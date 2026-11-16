@@ -1,55 +1,66 @@
-# Bimeyar: car insurance case files on Google Drive
+# Bimeyar: RICH INSURANS car insurance case files
 
-A web app for a car insurance agent to keep every customer's policies, vehicle documents, ID scans, claim photos and payment receipts in one place, stored in Google Drive. It installs on a phone and a laptop like a normal app (PWA). It is in **English** by default, with **Thai** and **Persian** available from the language switch in the top bar.
+**Live app:** https://ghosmali22-prog.github.io/bimeyar/
+
+A web app for **RICH INSURANS** to keep every customer's policies, vehicle documents, ID scans, claim photos and
+payment receipts in one place. Every file is stored in the **owner's Google Drive**. People the owner approves sign
+in with their own Gmail. The app installs on a phone and a laptop like a normal app (PWA), and works in
+**English**, **Thai** and **Persian** (right-to-left).
+
+> Changing the code? Read **[CLAUDE.md](CLAUDE.md)** first. This app stores real company data.
 
 ## What it does
 
-- **Glass dashboard**: expiring policies, files per month, customer growth and storage used, with 3D tilt and spring animations.
-- **Customer case files**: one folder per customer in Drive. Each folder shows the customer's files as cards with category tabs.
-- **Fast saving**: drag and drop, paste, pick files, or take a photo with the phone camera. The **assistant** guesses each file's category and customer from its name, so most uploads are a single click on "Save".
-- **Assistant search** (Ctrl/⌘ K): type a plain sentence such as "Morgan car registration", "policies expiring soon", "photos this week", "กรมธรรม์ สมชาย" or "بیمه‌نامه رضایی". It runs on the device; nothing is sent anywhere.
-- **Renewals**: every policy with an expiry date, sorted by urgency, with one-tap calling.
-- **Preview, rename, recategorise, share and download** any file. Deletes go to the Drive trash, where they can be restored for 30 days.
-- **Private by design**: the app uses the `drive.file` scope, so it can only see files it created itself. It can't see anything else in the Drive.
+- **Dashboard**: expiring policies, files per month, customer growth and Drive space used.
+- **Customer case files**: one folder per customer, files shown as cards with category tabs.
+- **Fast saving**: drag and drop, paste, pick files, or take a photo. The assistant guesses the category and customer from the file name. Photos are compressed before upload (25 MB limit).
+- **Assistant search** (Ctrl/⌘ K) in plain sentences, in all three languages. It runs on the device.
+- **Renewals**: policies sorted by how soon they expire, with one-tap calling.
+- **Team & access** (admin only): add or remove people by Gmail, with roles admin, editor (view, upload, edit) or viewer (view only).
+- Deletes go to the Drive trash and can be restored for 30 days. Each file records who uploaded it.
+- **This device only** demo mode with sample data, for trying the app without signing in.
 
-There is also a **"This device only"** mode (browser storage) with sample data, for trying the app before Drive is set up.
+## How it works
 
-## 1. Publish it (GitHub Pages)
+```
+Phone / laptop (GitHub Pages PWA)
+   │  Sign in with Google → ID token (openid, email, profile only; no Drive access in the browser)
+   ▼
+Apps Script web app "Bimeyar backend" (runs as the owner)
+   │  verifies the token, checks the access list, then reads and writes Drive
+   ▼
+Owner's Google Drive → "Bimeyar" folder → one folder per customer → files
+```
 
-Google sign-in requires an `https://` address, and the phone needs to be able to reach the app, so host it on GitHub Pages:
+| Part | Where |
+|---|---|
+| Frontend | this repo, branch `main`, served by GitHub Pages |
+| Backend | `backend/Code.gs` + `backend/appsscript.json`, deployed in Apps Script project "Bimeyar backend" (owner ghosmali22@gmail.com); its `/exec` URL is `API_URL` in `js/config.js` |
+| Login | Google Cloud project "Bimeyar", Web OAuth client (`GOOGLE_CLIENT_ID` in `js/config.js`); allowed origins `https://ghosmali22-prog.github.io` and `http://localhost:8765` |
+| Data | "Bimeyar" folder in the owner's Google Drive (never in this repo) |
+| Access list | Apps Script → Project settings → Script properties → `ACL` |
 
-1. Push this folder to a GitHub repository.
-2. Open the repository, then go to **Settings → Pages → Build and deployment**, choose **Deploy from a branch**, then **main** and **/ (root)**, and click **Save**.
-3. After about a minute the app is live at `https://<your-user>.github.io/<repo>/`.
+## Adding or removing people
 
-## 2. Connect Google Drive (one time, about 10 minutes)
+Open the app with the owner account → **Settings** (top right) → **Team & access** → type the Gmail address,
+choose a role and press **Add person**. The person can then sign in with that Gmail. Removing someone blocks them
+on their next action. Their uploads stay in the owner's Drive.
 
-1. Go to <https://console.cloud.google.com/> and create a project (e.g. "Bimeyar").
-2. **APIs & Services → Library**: search for **Google Drive API** and click **Enable**.
-3. **APIs & Services → OAuth consent screen**: choose **External**, fill in the app name and your email, and add the scope `.../auth/drive.file`. Under **Test users**, add the Google account(s) that will use the app.
-4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
-   - Application type: **Web application**
-   - **Authorised JavaScript origins**: `https://<your-user>.github.io` (and `http://localhost:8765` for local testing)
-   - No redirect URI is needed.
-5. Copy the **Client ID** (it ends with `.apps.googleusercontent.com`).
-6. Either paste it into `js/config.js` (`GOOGLE_CLIENT_ID = '...'`) and push, so every device gets it, **or** open the app and go to **Settings → Google Client ID**, then click **Connect to Google Drive**.
+## Updating the backend
 
-The app then creates a **Bimeyar** folder in that Google account's Drive, with one subfolder per customer.
+Paste the new `backend/Code.gs` into the Apps Script editor, save, then
+**Deploy → Manage deployments → ✏️ → Version: New version → Deploy**. This keeps the same URL.
+To roll back, choose the previous version there.
 
-> **Whose Drive?** Files go to whichever Google account signs in. To use your own Drive as the storage, sign in with your account on the client's devices (and add it as a test user in step 3).
->
-> While the consent screen is in **Testing** mode, Google asks the user to sign in again about once a week. To stop that, click **Publish app** on the consent screen. Because `drive.file` is a non-sensitive scope, no Google review is needed.
+## Install on phone and laptop
 
-## 3. Install on phone and laptop
-
-- **iPhone (Safari)**: open the site, tap **Share**, then **Add to Home Screen**.
-- **Android (Chrome)**: open the site, tap **⋮**, then **Install app**.
-- **Laptop (Chrome / Edge)**: click the install icon in the address bar.
+- **iPhone (Safari)**: Share → **Add to Home Screen**.
+- **Android (Chrome)**: ⋮ → **Install app**.
+- **Laptop (Chrome / Edge)**: the install icon in the address bar.
 
 ## Run locally
 
 ```bash
-cd bimeyar
 python3 -m http.server 8765
 # open http://localhost:8765
 ```
@@ -63,10 +74,23 @@ No build step and no dependencies: plain HTML, CSS and JavaScript modules.
 | `index.html` | App shell |
 | `css/app.css` | Glass design, animations, responsive layout |
 | `js/app.js` | Views, upload flow, sheets, events |
+| `js/auth.js` | Google sign-in (ID token only) |
+| `js/store-remote.js` | Calls to the Apps Script backend |
+| `js/store-local.js` | On-device demo storage (IndexedDB) |
 | `js/i18n.js` | English, Thai and Persian text |
 | `js/assistant.js` | Category and customer guessing, plain-sentence search |
-| `js/store-drive.js` | Google Drive storage (folders, resumable uploads, metadata in `appProperties`) |
-| `js/store-local.js` | On-device storage (IndexedDB) |
 | `js/demo.js` | Fictional sample data |
-| `js/util.js` | Dates (Gregorian, Thai Buddhist and Jalali), icons, helpers |
+| `js/util.js` | Dates (Gregorian, Thai Buddhist and Jalali), icons, image compression |
+| `js/config.js` | Client ID, backend URL, upload limit, version |
+| `backend/` | Apps Script backend source |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Installable app (PWA) |
+
+## راهنمای فارسی
+
+- **آدرس اپ:** https://ghosmali22-prog.github.io/bimeyar/
+- **فایل‌ها کجا هستند؟** در پوشهٔ «Bimeyar» در Google Drive حساب ghosmali22@gmail.com. هیچ فایل مشتری روی GitHub نیست.
+- **اضافه کردن یک نفر:** با حساب خودت وارد اپ شو ← تنظیمات (بالا سمت راست) ← «تیم و دسترسی» ← جیمیل را بنویس، نقش را انتخاب کن ← «افزودن نفر».
+  - editor: دیدن، آپلود و ویرایش · viewer: فقط دیدن
+- **حذف دسترسی:** همان صفحه ← «حذف دسترسی». فایل‌هایی که آن نفر آپلود کرده در Drive تو می‌مانند.
+- **فایل پاک‌شده:** تا ۳۰ روز در سطل زبالهٔ Google Drive است و برمی‌گردد.
+- **قبل از هر تغییری در کد:** به Claude Code بگو اول فایل CLAUDE.md را بخواند و `git pull` کند.
