@@ -13,7 +13,7 @@ function post(body, onProgress) {
     x.open('POST', API_URL);
     x.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
     x.timeout = 300000;
-    if (onProgress) x.upload.onprogress = e => e.lengthComputable && onProgress(Math.min(.97, e.loaded / e.total));
+    onProgress?.(0.3); // no x.upload listener: it forces a CORS preflight, which Apps Script rejects
     x.onload = () => {
       let j;
       try { j = JSON.parse(x.responseText); } catch { return rej(new ApiError('network', `HTTP ${x.status}`)); }
