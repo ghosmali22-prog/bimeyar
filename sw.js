@@ -1,6 +1,6 @@
 // Caches the app shell so it opens fast like an installed app (and offline in "this device" mode)
-const CACHE = 'bimeyar-v1';
-const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/util.js', 'js/i18n.js', 'js/config.js', 'js/store-local.js', 'js/store-drive.js', 'js/assistant.js', 'js/demo.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
+const CACHE = 'bimeyar-v2';
+const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/util.js', 'js/i18n.js', 'js/config.js', 'js/store-local.js', 'js/store-remote.js', 'js/auth.js', 'js/assistant.js', 'js/demo.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {

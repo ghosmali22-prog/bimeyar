@@ -167,13 +167,16 @@ const I = {
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   check: '<path d="M5 12l5 5 9-10"/>',
   arrow: '<path d="M17 17L7 7M7 16V7h9"/>',
+  team: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.3 2.9-5.5 6.5-5.5s6.5 2.2 6.5 5.5"/><path d="M17 11l1.5 1.5L22 9"/>',
+  logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.3 2.9-5.5 6.500-5.500s6.500 2.200 6.500 5.500M16 4.800a3.500 3.500 0 0 1 0 6.400M18 14.800c2.100.700 3.500 2.500 3.500 5.200"/>',
 };
 export const icon = (n, s = 20) => `<svg class="ico" viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${I[n] || I.file}</svg>`;
 
 export const hue = id => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
 
-/** بندانگشتی کوچک برای عکس‌ها */
+/** Small thumbnail for photos */
 export async function makeThumb(blob, max = 360) {
   if (!blob.type.startsWith('image/')) return '';
   try {
@@ -184,4 +187,24 @@ export async function makeThumb(blob, max = 360) {
     c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
     return c.toDataURL('image/jpeg', 0.72);
   } catch { return ''; }
+}
+
+/**
+ * Shrinks big photos before upload: longest side at most 2560 px, JPEG quality 0.82.
+ * Returns the original file when it is not a photo, can't be decoded, or would not get smaller.
+ */
+export async function compressImage(file, maxSide = 2560, quality = 0.82) {
+  if (!/^image\/(jpeg|png|webp|heic|heif)$/i.test(file.type)) return file;
+  let bmp;
+  try { bmp = await createImageBitmap(file); } catch { return file; }
+  const k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+  if (k === 1 && file.size < 1.2 * 1048576) return file;
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  const out = await new Promise(r => c.toBlob(r, 'image/jpeg', quality));
+  if (!out || out.size >= file.size) return file;
+  return new File([out], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg', lastModified: Date.now() });
 }

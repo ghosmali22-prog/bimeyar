@@ -1,37 +1,72 @@
-import { GOOGLE_CLIENT_ID, APP_VERSION } from './config.js';
+import { APP_VERSION, API_URL, MAX_UPLOAD_MB } from './config.js';
 import { t, num, lang, setLang, applyDir, LANGS } from './i18n.js';
-import { $, $$, esc, digits, norm, fmtDate, monthKey, monthName, expAttrs, expValue, parseExp, defaultExp, daysLeft, fmtSize, TYPES, typeLabel, isImage, isPdf, icon, hue, makeThumb } from './util.js';
+import { $, $$, esc, digits, norm, fmtDate, monthKey, monthName, expAttrs, expValue, parseExp, defaultExp, daysLeft, fmtSize, TYPES, typeLabel, isImage, isPdf, icon, hue, makeThumb, compressImage } from './util.js';
 import { LocalStore } from './store-local.js';
-import { DriveStore, loadGis } from './store-drive.js';
+import { ApiStore } from './store-remote.js';
+import * as auth from './auth.js';
 import { guessType, guessCustomer, ask } from './assistant.js';
 import { seedDemo } from './demo.js';
 
+const cloudReady = () => auth.configured() && !!API_URL;
+let savedMode = null;
+try { savedMode = localStorage.getItem('by_mode'); } catch { }
+
 const S = {
-  view: 'dash', customers: [], files: [], sel: null, store: null, gate: false,
-  mode: localStorage.getItem('by_mode') || 'local',
+  view: 'dash', customers: [], files: [], sel: null, store: null,
+  gate: null,            // null | 'loading' | 'signin' | 'expired' | 'deny' | 'config' | 'gis'
+  denied: '',            // email that was refused
+  role: 'admin', me: null,
+  mode: savedMode === 'local' || !cloudReady() ? 'local' : 'cloud',
   filters: { customer: '', type: '', period: '', q: '' },
   mobileDetail: false,
 };
-const clientId = () => GOOGLE_CLIENT_ID || localStorage.getItem('by_cid') || '';
 const cust = id => S.customers.find(c => c.id === id);
 const narrow = () => matchMedia('(max-width: 820px)').matches;
 const sortCustomers = () => S.customers.sort((a, b) => a.name.localeCompare(b.name, lang));
+const canEdit = () => S.role === 'admin' || S.role === 'editor';
+const setMode = m => { S.mode = m; try { localStorage.setItem('by_mode', m); } catch { } };
 
 /* ================= connect & load ================= */
 async function connect() {
-  S.gate = false; S.store = null;
-  if (S.mode === 'drive') {
-    const d = new DriveStore(clientId());
-    if (clientId() && d.restore()) {
-      try { await d.init(); S.store = d; } catch (e) { if (!e.auth) toast(e.message, 'err'); }
-    }
-    if (!S.store) { S.gate = true; if (clientId()) loadGis().catch(() => { }); mount(); return; }
-  } else {
+  S.store = null; S.gate = null;
+  if (S.mode === 'local') {
     const l = new LocalStore();
     await l.init();
-    S.store = l;
+    S.store = l; S.role = 'admin'; S.me = null;
+    applyRole();
+    return reload(true);
   }
-  await reload(true);
+  if (!cloudReady()) return showGate('config');
+  showGate('loading');
+  let has;
+  try { has = await auth.init(lang); }
+  catch { return showGate('gis'); }
+  if (has) return enterCloud();
+  showGate('signin');
+  auth.getToken().then(tok => { if (tok && S.gate === 'signin') enterCloud(); });   // One Tap / silent sign-in
+}
+
+let entering = false;
+async function enterCloud() {
+  if (entering) return;
+  entering = true;
+  try {
+    showGate('loading');
+    const st = new ApiStore();
+    const me = await st.init();
+    S.store = st; S.me = me; S.role = me.role; S.gate = null; S.sel = null;
+    applyRole();
+    await reload(true);
+  } catch (e) {
+    handleError(e);
+  } finally { entering = false; }
+}
+
+auth.onSignIn(() => { if (S.mode === 'cloud' && S.gate && S.gate !== 'loading') enterCloud(); });
+
+function showGate(g, email = '') {
+  S.gate = g; S.denied = email || S.denied;
+  closeSheet(); mount();
 }
 
 async function reload(remount = false) {
@@ -44,13 +79,24 @@ async function reload(remount = false) {
   if (remount) mount(); else drawAll(false);
 }
 
+function applyRole() {
+  document.body.classList.toggle('ro', !canEdit());
+  document.body.classList.toggle('adm', S.role === 'admin' && S.mode === 'cloud');
+}
+
+function handleError(e) {
+  console.error(e);
+  const code = e?.code;
+  if (code === 'auth' || e?.auth) { auth.drop(); return showGate('expired'); }
+  if (code === 'forbidden') { S.store = null; return showGate('deny', e.email || auth.user()?.email || ''); }
+  const msg = { network: 'err.network', role: 'err.role', not_found: 'err.not_found', server: 'err.server' }[code];
+  toast(msg ? t(msg) : e?.message || t('err.generic'), 'err');
+  if (code === 'not_found' && S.store) reload().catch(() => { });
+  if (!S.store && S.mode === 'cloud' && S.gate === 'loading') showGate('signin');
+}
+
 async function run(fn) {
-  try { await fn(); }
-  catch (e) {
-    console.error(e);
-    if (e.auth) { S.gate = true; closeSheet(); mount(); }
-    toast(e.message || t('err.generic'), 'err');
-  }
+  try { await fn(); } catch (e) { handleError(e); }
 }
 
 /* ================= filters ================= */
@@ -69,7 +115,7 @@ const activeFilters = () => Object.values(S.filters).filter(Boolean).length;
 const noFilters = () => ({ customer: '', type: '', period: '', q: '' });
 
 /* ================= views ================= */
-const titleRow = (k, actions = '') => `<section class="title-row"><div><h1>${t(k + '.title')}</h1><p>${t(k + '.sub')}</p></div>${actions ? `<div class="title-actions">${actions}</div>` : ''}</section>`;
+const titleRow = (k, actions = '') => `<section class="title-row"><div><h1>${t(k + '.title')}</h1><p>${t(k + '.sub')}</p></div>${actions ? `<div class="title-actions" data-need="edit">${actions}</div>` : ''}</section>`;
 const addBtn = () => `<button class="btn primary" data-act="upload">${icon('plus')}<span>${t('btn.addFile')}</span></button>`;
 const VIEWS = {
   dash: () => `${titleRow('dash', `<button class="btn ghost" data-act="new-customer">${icon('userplus')}<span>${t('btn.newCustomer')}</span></button>${addBtn()}`)}
@@ -89,6 +135,8 @@ function mount() {
   const v = $('#view');
   v.innerHTML = S.gate ? gateHtml() : VIEWS[S.view]();
   v.className = 'enter';
+  document.body.classList.toggle('gated', !!S.gate);
+  if (S.gate === 'signin' || S.gate === 'expired') auth.button($('#gbtn'), lang).catch(() => { });
   if (!S.gate) drawAll(true);
   syncChrome();
   clearTimeout(enterT);
@@ -103,6 +151,7 @@ function drawResults(anim) {
   if (S.view === 'dash') drawPanel(anim);
   if (S.view === 'files') drawGrid();
   if (S.view === 'exp') drawExp();
+  loadThumbs();
 }
 
 function applyStatic() {
@@ -116,22 +165,29 @@ function syncChrome() {
   for (const b of $$('[data-view]')) b.classList.toggle('on', b.dataset.view === S.view);
   const on = $('#nav button.on'), ind = $('#nav .nav-ind');
   if (on) { ind.style.width = on.offsetWidth + 'px'; ind.style.transform = `translateX(${on.offsetLeft}px)`; }
-  const drive = S.store?.kind === 'drive';
-  $('#storeLbl').textContent = S.gate ? t('store.off') : drive ? 'Drive' : t('store.local');
-  $('#storeDot').className = 'dot ' + (S.gate ? 'warn' : drive ? 'ok' : '');
+  const cloud = S.mode === 'cloud';
+  $('#storeLbl').textContent = cloud ? (S.gate || !S.me ? t('store.off') : S.me.email.split('@')[0]) : t('store.local');
+  $('#storeDot').className = 'dot ' + (cloud ? (S.gate ? 'warn' : 'ok') : '');
 }
 
 function gateHtml() {
-  const has = !!clientId();
+  const g = S.gate;
+  const demo = `<button class="btn ghost" data-act="mode-local">${t('gate.demo')}</button>`;
+  if (g === 'loading') return `<section class="gate card"><div class="gate-ico">${icon('lock', 38)}</div><h1>${t('gate.loading')}</h1><div class="spin"></div></section>`;
+  if (g === 'deny') return `<section class="gate card">
+      <div class="gate-ico deny">${icon('lock', 38)}</div><h1>${t('deny.title')}</h1>
+      <p>${t('deny.text', { x: `<b dir="ltr">${esc(S.denied)}</b>` })}</p>
+      <div class="gate-actions"><button class="btn primary" data-act="retry">${t('deny.retry')}</button><button class="btn ghost" data-act="switch-account">${t('deny.switch')}</button></div>
+      <div class="gate-foot">${demo}</div></section>`;
+  if (g === 'config' || g === 'gis') return `<section class="gate card"><div class="gate-ico">${icon('cloud', 38)}</div><h1>${t('gate.title')}</h1><p>${t('gate.' + g)}</p>
+      <div class="gate-actions">${g === 'gis' ? `<button class="btn primary" data-act="reload">${t('gate.retry')}</button>` : ''}${demo}</div></section>`;
   return `<section class="gate card">
-    <div class="gate-ico">${icon('cloud', 40)}</div>
-    <h1>${t('gate.title')}</h1>
-    <p>${t(has ? 'gate.has' : 'gate.no')}</p>
-    <div class="gate-actions">
-      ${has ? `<button class="btn primary big" data-act="drive-connect">${icon('cloud')}<span>${t('gate.signin')}</span></button>` : `<button class="btn primary big" data-act="settings">${icon('sliders')}<span>${t('gate.settings')}</span></button>`}
-      <button class="btn ghost" data-act="mode-local">${t('gate.local')}</button>
-    </div>
-  </section>`;
+      <div class="gate-ico">${icon('shield', 38)}</div>
+      <h1>${t('gate.title')}</h1>
+      <p>${t(g === 'expired' ? 'gate.expired' : 'gate.text')}</p>
+      <div class="gbtn" id="gbtn"><div class="spin"></div></div>
+      <div class="gate-foot">${demo}</div>
+    </section>`;
 }
 
 /* ---------- stat cards ---------- */
@@ -155,9 +211,10 @@ function drawStats(anim) {
 
   const bytes = S.files.reduce((a, f) => a + (f.size || 0), 0);
   const nPdf = S.files.filter(isPdf).length, nImg = S.files.filter(isImage).length, nOther = S.files.length - nPdf - nImg;
-  const drive = S.store.kind === 'drive';
-  const qLine = drive && S.quota?.limit ? t('s4.quota', { a: fmtSize(S.quota.used), b: fmtSize(S.quota.limit) }) : t(drive ? 's4.drive' : 's4.local');
+  const cloud = S.store.kind === 'cloud';
+  const qLine = cloud && S.quota?.limit ? t('s4.quota', { a: fmtSize(S.quota.used), b: fmtSize(S.quota.limit) }) : t(cloud ? 's4.drive' : 's4.local');
   const big = n => `<b ${anim ? `data-count="${n}"` : ''}>${num(anim ? 0 : n)}</b>`;
+  const root = S.me?.root;
 
   el.innerHTML = `
   <article class="card tilt c-exp" data-act="go" data-view="exp" style="--i:0">
@@ -181,24 +238,24 @@ function drawStats(anim) {
     <div class="bars">${months.map((m, i) => `<div><i class="${i === 5 ? 'now' : ''}" style="--h:${Math.max(7, (m.n / maxM) * 100)}%;--i:${i}" title="${num(m.n)}"></i><small>${monthName(m.k, true)}</small></div>`).join('')}</div>
   </article>
 
-  <article class="card tilt" data-act="new-customer" style="--i:2">
+  <article class="card tilt" data-act="${canEdit() ? 'new-customer' : 'go'}" data-view="dash" style="--i:2">
     <header><span>${t('s3.title')}</span><i class="badge-ico">${icon('users', 15)}</i></header>
     <div class="big">${big(S.customers.length)}<small>${t('s3.unit')}</small></div>
-    <p class="delta good">${newC ? t('s3.new', { n: newC }) : t('s3.tap')}</p>
+    <p class="delta good">${newC ? t('s3.new', { n: newC }) : canEdit() ? t('s3.tap') : ''}</p>
     <svg class="spark" viewBox="0 0 200 70"><defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6a4df5" stop-opacity=".28"/><stop offset="1" stop-color="#6a4df5" stop-opacity="0"/></linearGradient></defs>
       <path class="area" d="${line} L192 70 L8 70 Z" fill="url(#sg)"/><path class="ln" d="${line}" pathLength="1"/>
       ${xy.map((p, i) => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${i === 7 ? 4 : 2.6}" style="--i:${i}"/>`).join('')}</svg>
   </article>
 
   <article class="card tilt c-store" style="--i:3">
-    <header><span>${t('s4.title')}</span><button class="mini-btn" data-act="${drive ? 'open-root' : 'settings'}" title="${t(drive ? 's4.openRoot' : 's4.storage')}">${icon('arrow', 16)}</button></header>
+    <header><span>${t('s4.title')}</span>${root ? `<button class="mini-btn" data-act="open-root" title="${t('s4.openRoot')}">${icon('arrow', 16)}</button>` : `<button class="mini-btn" data-act="settings" title="${t('s4.storage')}">${icon('arrow', 16)}</button>`}</header>
     <div class="big"><b class="sz">${fmtSize(bytes)}</b></div>
     <p class="delta">${qLine}</p>
     <div class="kinds">
       <div><b>${num(nPdf)}</b><small>PDF</small></div>
       <div class="hi"><b>${num(nImg)}</b><small>${t('kind.photo')}</small></div>
       <div><b>${num(nOther)}</b><small>${t('kind.other')}</small></div>
-      <button class="btn dark" data-act="upload">${t('btn.quick')}</button>
+      <button class="btn dark" data-act="upload" data-need="edit">${t('btn.quick')}</button>
     </div>
   </article>`;
   if (anim) countUp(el);
@@ -231,15 +288,38 @@ function drawFilters(force = false) {
 function ftBadge(f, size = 26, cls = '') {
   return `<span class="ft ${cls} ${isPdf(f) ? 'pdf' : ''}">${isPdf(f) ? 'PDF' : icon(isImage(f) ? 'image' : (TYPES[f.type] || TYPES.other).icon, size)}</span>`;
 }
+const thumbImg = (src, ic) => `<img class="th" src="${esc(src)}" alt="" loading="lazy" data-ic="${ic}">`;
 function fileTile(f, i, light = false) {
   const ty = TYPES[f.type] || TYPES.other, c = light ? cust(f.customerId) : null;
   const left = f.expiry ? daysLeft(f.expiry) : null;
   return `<button class="tile" data-act="open-file" data-id="${esc(f.id)}" style="--i:${Math.min(i, 14)}">
-    <span class="thumb">${f.thumb ? `<img class="th" src="${esc(f.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-ic="${ty.icon}">` : ftBadge(f)}
+    <span class="thumb">${f.thumb ? thumbImg(f.thumb, ty.icon) : ftBadge(f)}
       ${left !== null && left <= 30 ? `<em class="flag ${left < 0 ? 'bad' : 'warn'}">${left < 0 ? t('flag.expired') : t('flag.days', { n: left })}</em>` : ''}</span>
     <b>${esc(f.name)}</b>
     <small>${c ? esc(c.name) + ' · ' : ''}${typeLabel(f.type)} · ${fmtDate(f.createdAt, false)}</small>
   </button>`;
+}
+
+// Thumbnails come from the backend (files are private), a batch at a time for what's on screen
+let thumbBusy = false;
+async function loadThumbs() {
+  if (thumbBusy || S.store?.kind !== 'cloud') return;
+  const ids = $$('.tile[data-id]').map(el => el.dataset.id).filter(id => { const f = S.files.find(x => x.id === id); return f && !f.thumb && (isImage(f) || isPdf(f)) && !S.store.thumbCache.has(id); });
+  if (!ids.length) return;
+  thumbBusy = true;
+  try {
+    const got = await S.store.thumbs(ids);
+    for (const [id, url] of Object.entries(got)) {
+      const f = S.files.find(x => x.id === id); if (f) f.thumb = url;
+      for (const tb of $$(`.tile[data-id="${CSS.escape(id)}"] .thumb`)) {
+        const old = tb.querySelector('.ft'); if (!old) continue;
+        old.outerHTML = thumbImg(url, (TYPES[f?.type] || TYPES.other).icon);
+        tb.querySelector('img').classList.add('fadein');
+      }
+    }
+  } catch (e) { if (e.code === 'auth' || e.code === 'forbidden') handleError(e); }
+  finally { thumbBusy = false; }
+  setTimeout(loadThumbs, 50);   // next batch, if any are left
 }
 
 function drawPanel(anim) {
@@ -247,8 +327,8 @@ function drawPanel(anim) {
   if (!S.customers.length) {
     el.innerHTML = `<div class="empty dark">
       <div class="gate-ico">${icon('users', 34)}</div><h3>${t('p.empty.title')}</h3>
-      <p>${t('p.empty.text')}</p>
-      <div class="gate-actions"><button class="btn white" data-act="new-customer">${icon('userplus')}<span>${t('p.empty.first')}</span></button>
+      <p>${canEdit() ? t('p.empty.text') : ''}</p>
+      <div class="gate-actions" data-need="edit"><button class="btn white" data-act="new-customer">${icon('userplus')}<span>${t('p.empty.first')}</span></button>
       ${S.store.kind === 'local' ? `<button class="btn glassy" data-act="seed">${t('p.empty.demo')}</button>` : ''}</div></div>`;
     return;
   }
@@ -267,7 +347,7 @@ function drawPanel(anim) {
   <header class="panel-head">
     <h3>${t('p.customers')} <span>${num(list.length)}</span></h3>
     <div class="tabs">${tabs.map(([k, l, n]) => `<button class="${S.filters.type === k ? 'on' : ''}" data-act="tab" data-type="${k}">${l}<i>${num(n)}</i></button>`).join('')}</div>
-    <button class="icon-btn onDark" data-act="new-customer" title="${t('btn.newCustomer')}">${icon('userplus', 18)}</button>
+    <button class="icon-btn onDark" data-act="new-customer" data-need="edit" title="${t('btn.newCustomer')}">${icon('userplus', 18)}</button>
   </header>
   <div class="panel-body ${S.mobileDetail ? 'show-detail' : ''}">
     <ul class="clist">${list.map((x, i) => {
@@ -284,20 +364,19 @@ function drawPanel(anim) {
           <button class="icon-btn glassy back" data-act="back" title="${t('btn.back')}">${icon('chev', 18)}</button>
           <div class="dname"><small>${t('p.file')}</small><h2>${esc(c.name)}</h2></div>
           <div class="dmeta">${c.plate ? `<span>${icon('car', 15)}${esc(c.plate)}</span>` : ''}${c.car ? `<span>${esc(c.car)}</span>` : ''}${c.phone ? `<a href="tel:${esc(c.phone)}">${icon('phone', 15)}<bdi>${esc(digits(c.phone))}</bdi></a>` : ''}</div>
-          <button class="icon-btn glassy" data-act="edit-customer" title="${t('p.edit')}">${icon('edit', 17)}</button>
+          <button class="icon-btn glassy" data-act="edit-customer" data-need="edit" title="${t('p.edit')}">${icon('edit', 17)}</button>
         </header>
         <div class="tiles">
           ${shown.map((f, i) => fileTile(f, i)).join('')}
-          <button class="tile add" data-act="upload" style="--i:${Math.min(shown.length, 14)}">${icon('plus', 22)}<b>${t('btn.addFile')}</b><small>${t('p.drop')}</small></button>
+          <button class="tile add" data-act="upload" data-need="edit" style="--i:${Math.min(shown.length, 14)}">${icon('plus', 22)}<b>${t('btn.addFile')}</b><small>${t('p.drop')}</small></button>
         </div>
         <footer>
           <div><small>${t('p.total')}</small><b>${num(mine.length)}</b></div>
           <div><small>${t('p.size')}</small><b>${fmtSize(mine.reduce((a, f) => a + (f.size || 0), 0))}</b></div>
           <div><small>${t('p.next')}</small><b>${nextExp ? fmtDate(nextExp.expiry) : '—'}</b></div>
           <span class="sp"></span>
-          ${c.link ? `<button class="icon-btn glassy" data-act="open-link" data-url="${esc(c.link)}" title="${t('p.openFolder')}">${icon('external', 17)}</button>` : ''}
-          <button class="icon-btn glassy" data-act="camera" title="${t('btn.camera')}">${icon('camera', 17)}</button>
-          <button class="btn white" data-act="upload">${icon('plus', 18)}<span>${t('btn.upload')}</span></button>
+          <button class="icon-btn glassy" data-act="camera" data-need="edit" title="${t('btn.camera')}">${icon('camera', 17)}</button>
+          <button class="btn white" data-act="upload" data-need="edit">${icon('plus', 18)}<span>${t('btn.upload')}</span></button>
         </footer>
       </div>` : `<div class="empty dark"><p>${t('p.pick')}</p></div>`}
     </div>
@@ -359,19 +438,19 @@ function toast(msg, kind = '') {
   const r = $('#toast-root');
   r.innerHTML = `<div class="toast ${kind}">${icon(kind === 'err' ? 'alert' : 'check', 17)}<span>${esc(msg)}</span></div>`;
   clearTimeout(toastT);
-  toastT = setTimeout(() => r.firstElementChild?.classList.add('out'), 3400);
+  toastT = setTimeout(() => r.firstElementChild?.classList.add('out'), kind === 'err' ? 5200 : 3400);
 }
 
 /* ---------- customer ---------- */
 function customerSheet(c = {}) {
   sheet(`${head(t(c.id ? 'c.edit' : 'c.new'), t('c.sub'))}
   <form class="form" data-form="customer" data-id="${esc(c.id || '')}">
-    <label>${t('c.name')}<input name="name" required value="${esc(c.name || '')}" placeholder="${t('c.name.ph')}" autocomplete="off"></label>
+    <label>${t('c.name')}<input name="name" required maxlength="120" value="${esc(c.name || '')}" placeholder="${t('c.name.ph')}" autocomplete="off"></label>
     <div class="two">
-      <label>${t('c.phone')}<input name="phone" inputmode="tel" dir="ltr" value="${esc(c.phone || '')}"></label>
-      <label>${t('c.plate')}<input name="plate" value="${esc(c.plate || '')}" placeholder="${t('c.plate.ph')}"></label>
+      <label>${t('c.phone')}<input name="phone" inputmode="tel" dir="ltr" maxlength="40" value="${esc(c.phone || '')}"></label>
+      <label>${t('c.plate')}<input name="plate" maxlength="40" value="${esc(c.plate || '')}" placeholder="${t('c.plate.ph')}"></label>
     </div>
-    <label>${t('c.car')}<input name="car" value="${esc(c.car || '')}" placeholder="${t('c.car.ph')}"></label>
+    <label>${t('c.car')}<input name="car" maxlength="80" value="${esc(c.car || '')}" placeholder="${t('c.car.ph')}"></label>
     <div class="sh-actions">${c.id ? `<button type="button" class="btn danger-ghost" data-act="del-customer" data-id="${esc(c.id)}">${icon('trash', 17)}<span>${t('c.delete')}</span></button><span class="sp"></span>` : ''}
       <button type="button" class="btn ghost" data-act="close-sheet">${t('btn.cancel')}</button><button class="btn primary">${t('btn.save')}</button></div>
   </form>`);
@@ -380,6 +459,8 @@ function customerSheet(c = {}) {
 
 /* ---------- upload ---------- */
 let U = [];
+const MAX = MAX_UPLOAD_MB * 1048576;
+const compressible = f => /^image\/(jpeg|png|webp|heic|heif)$/i.test(f.type);
 function pending(file, fallbackCustomer, fallbackName = '') {
   const g = guessCustomer(file.name, S.customers), type = guessType(file.name);
   return {
@@ -387,8 +468,18 @@ function pending(file, fallbackCustomer, fallbackName = '') {
     hint: [type !== 'other' ? t('u.hint.type', { x: typeLabel(type) }) : '', g ? t('u.hint.cust', { x: g.name }) : ''].filter(Boolean).join(' · '),
   };
 }
+/** Drops files that are over the limit and can't be shrunk (photos are compressed later) */
+function sizeFilter(files) {
+  const ok = [];
+  for (const f of files) {
+    if (f.size > MAX && !compressible(f)) toast(t('u.tooBig', { x: f.name, n: MAX_UPLOAD_MB }), 'err');
+    else ok.push(f);
+  }
+  return ok;
+}
 async function startUpload(fileList) {
-  const files = [...fileList].filter(f => f.size > 0);
+  if (!canEdit()) return toast(t('err.role'), 'err');
+  const files = sizeFilter([...fileList].filter(f => f.size > 0));
   if (!files.length) return;
   if (S.gate || !S.store) return toast(t('u.connect'), 'err');
   const def = S.view === 'dash' ? S.sel : S.filters.customer || S.sel;
@@ -405,11 +496,11 @@ function drawUpload() {
     <div class="up-row" data-i="${i}" style="--i:${Math.min(i, 8)}">
       ${ftBadge({ mime: u.file.type, name: u.name, type: u.type }, 24)}
       <div class="up-main">
-        <div class="up-top"><input data-u="name" value="${esc(u.name)}" aria-label="${t('u.fileName')}"><small>${fmtSize(u.file.size)}</small>
+        <div class="up-top"><input data-u="name" maxlength="200" value="${esc(u.name)}" aria-label="${t('u.fileName')}"><small>${fmtSize(u.file.size)}</small>
           <button class="icon-btn sm" data-act="up-remove" aria-label="${t('u.remove')}">${icon('x', 15)}</button></div>
         <div class="up-fields">
           <select data-u="customerId" aria-label="${t('u.customer')}">${S.customers.map(c => `<option value="${esc(c.id)}" ${c.id === u.customerId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}<option value="__new" ${u.customerId === '__new' ? 'selected' : ''}>${t('u.newCustomer')}</option></select>
-          ${u.customerId === '__new' ? `<input data-u="newName" value="${esc(u.newName)}" placeholder="${t('u.newName')}">` : ''}
+          ${u.customerId === '__new' ? `<input data-u="newName" maxlength="120" value="${esc(u.newName)}" placeholder="${t('u.newName')}">` : ''}
           <select data-u="type" aria-label="${t('fl.type')}">${Object.keys(TYPES).map(k => `<option value="${k}" ${k === u.type ? 'selected' : ''}>${typeLabel(k)}</option>`).join('')}</select>
           ${u.type === 'policy' ? `<input data-u="expiry" ${expAttrs()} value="${esc(u.expiry)}" placeholder="${t('u.expiry')}" title="${t('e.expiry')}" aria-label="${t('e.expiry')}">` : ''}
         </div>
@@ -424,28 +515,39 @@ async function doUpload(btn) {
     if (u.customerId === '__new' && !u.newName.trim()) return toast(t('u.needName'), 'err');
     if (u.type === 'policy' && u.expiry.trim() && !parseExp(u.expiry.trim())) return toast(t('u.badDate'), 'err');
   }
-  btn.disabled = true; btn.textContent = t('u.saving');
+  btn.disabled = true;
   const created = {};
-  let done = 0, last = null;
+  let done = 0, last = null, failed = null;
   try {
     for (const [i, u] of U.entries()) {
       if (u.p === 1) continue;
+      let blob = u.file;
+      if (compressible(blob)) { btn.textContent = t('u.compressing'); blob = await compressImage(blob); }
+      if (blob.size > MAX) { toast(t('u.tooBig', { x: u.name, n: MAX_UPLOAD_MB }), 'err'); continue; }
+      btn.textContent = t('u.saving');
       let cid = u.customerId;
       if (cid === '__new') {
         const nm = u.newName.trim();
         created[nm] ||= (S.customers.find(c => norm(c.name) === norm(nm)) || await S.store.saveCustomer({ name: nm })).id;
         cid = created[nm];
       }
-      const meta = { name: u.name.trim() || u.file.name, customerId: cid, type: u.type, expiry: u.type === 'policy' ? parseExp(u.expiry.trim()) || '' : '', note: '' };
-      if (S.store.kind === 'local') meta.thumb = await makeThumb(u.file);
+      let name = u.name.trim() || u.file.name;
+      if (blob !== u.file && blob.type === 'image/jpeg') name = name.replace(/\.(png|webp|heic|heif|jpe?g)$/i, '') + '.jpg';
+      const meta = { name, customerId: cid, type: u.type, expiry: u.type === 'policy' ? parseExp(u.expiry.trim()) || '' : '', note: '' };
+      const thumb = await makeThumb(blob);
+      if (S.store.kind === 'local') meta.thumb = thumb;
       const bar = $(`.up-row[data-i="${i}"] .prog i`);
-      await S.store.addFile(u.file, meta, p => { if (bar) bar.style.width = p * 100 + '%'; });
+      const f = await S.store.addFile(blob, meta, p => { if (bar) bar.style.width = p * 100 + '%'; });
+      if (thumb && S.store.thumbCache) S.store.thumbCache.set(f.id, thumb);
       u.p = 1; done++; last = cid;
     }
-  } finally {
-    if (done) { if (last) S.sel = last; await reload(); }
+  } catch (e) { failed = e; }
+  finally {
+    if (done) { if (last) S.sel = last; await reload().catch(() => { }); }
     btn.disabled = false; drawUpload();
   }
+  if (failed) throw failed;
+  if (!done) return;
   closeSheet();
   toast(t('u.done', { n: done }));
   if (S.view === 'dash' && narrow()) { S.mobileDetail = true; drawPanel(true); }
@@ -456,25 +558,28 @@ let cur = null;
 async function openFile(id) {
   const f = S.files.find(x => x.id === id); if (!f) return;
   const c = cust(f.customerId) || { name: '—' };
+  const ro = !canEdit(), dis = ro ? 'disabled' : '';
   cur = { f, blob: null, url: '' };
-  sheet(`${head(esc(f.name), `${esc(c.name)} · ${fmtSize(f.size)} · ${fmtDate(f.createdAt)}`)}
+  const by = f.by ? ` · ${t('up.by', { x: esc(f.by) })}` : '';
+  sheet(`${head(esc(f.name), `${esc(c.name)} · ${fmtSize(f.size)} · ${fmtDate(f.createdAt)}${by}`)}
     <div class="preview" id="preview"><div class="spin"></div></div>
     <form class="form" data-form="file" data-id="${esc(f.id)}">
-      <label>${t('u.fileName')}<input name="name" value="${esc(f.name)}" required></label>
+      <label>${t('u.fileName')}<input name="name" value="${esc(f.name)}" maxlength="200" required ${dis}></label>
       <div class="two">
-        <label>${t('fl.type')}<select name="type">${Object.keys(TYPES).map(k => `<option value="${k}" ${k === f.type ? 'selected' : ''}>${typeLabel(k)}</option>`).join('')}</select></label>
-        <label>${t('fl.expiry')}<input name="expiry" ${expAttrs()} value="${expValue(f.expiry)}"></label>
+        <label>${t('fl.type')}<select name="type" ${dis}>${Object.keys(TYPES).map(k => `<option value="${k}" ${k === f.type ? 'selected' : ''}>${typeLabel(k)}</option>`).join('')}</select></label>
+        <label>${t('fl.expiry')}<input name="expiry" ${expAttrs()} value="${expValue(f.expiry)}" ${dis}></label>
       </div>
-      <label>${t('fl.note')}<input name="note" value="${esc(f.note || '')}" placeholder="${t('fl.note.ph')}"></label>
+      <label>${t('fl.note')}<input name="note" value="${esc(f.note || '')}" maxlength="2000" placeholder="${ro ? '' : t('fl.note.ph')}" ${dis}></label>
       <div class="sh-actions">
-        <button type="button" class="icon-btn danger" data-act="del-file" data-id="${esc(f.id)}" title="${t('btn.delete')}">${icon('trash', 17)}</button>
+        <button type="button" class="icon-btn danger" data-act="del-file" data-need="edit" data-id="${esc(f.id)}" title="${t('btn.delete')}">${icon('trash', 17)}</button>
         <button type="button" class="icon-btn" data-act="dl-file" title="${t('fl.download')}">${icon('download', 17)}</button>
         ${navigator.share ? `<button type="button" class="icon-btn" data-act="share-file" title="${t('fl.share')}">${icon('share', 17)}</button>` : ''}
-        ${f.link ? `<button type="button" class="icon-btn" data-act="open-link" data-url="${esc(f.link)}" title="${t('fl.openDrive')}">${icon('external', 17)}</button>` : ''}
-        <span class="sp"></span><button class="btn primary">${t('fl.saveChanges')}</button>
+        <span class="sp"></span><button class="btn primary" data-need="edit">${t('fl.saveChanges')}</button>
       </div>
     </form>`, 'wide');
-  const blob = await S.store.getBlob(id);
+  let blob;
+  try { blob = await S.store.getBlob(id); }
+  catch (e) { const pv = $('#preview'); if (pv && cur?.f.id === id) pv.innerHTML = `<p class="sh-text">${t('fl.noContent')}</p>`; throw e; }
   if (cur?.f.id !== id) return;
   const pv = $('#preview'); if (!pv) return;
   if (!blob) { pv.innerHTML = `<p class="sh-text">${t('fl.noContent')}</p>`; return; }
@@ -487,7 +592,7 @@ async function openFile(id) {
 /* ---------- assistant ---------- */
 function assistantSheet() {
   const first = S.customers[0]?.name;
-  const chips = [t('a.c1'), t('a.c2'), t('a.c3'), first ? t('a.c4', { x: first }) : '', t('a.c5'), t('a.c6')].filter(Boolean);
+  const chips = [t('a.c1'), t('a.c2'), t('a.c3'), first ? t('a.c4', { x: first }) : '', t('a.c5'), canEdit() ? t('a.c6') : ''].filter(Boolean);
   sheet(`<div class="as-box">${icon('sparkle', 22)}<input id="asq" type="search" placeholder="${esc(t('a.ph'))}" autocomplete="off"><button class="icon-btn" data-act="close-sheet" aria-label="${t('btn.close')}">${icon('x', 18)}</button></div>
     <div class="chips">${chips.map(c => `<button data-act="as-chip">${esc(c)}</button>`).join('')}</div>
     <div class="as-res" id="asRes"><p class="as-tip">${t('a.tip')}</p></div>`, 'wide assistant');
@@ -498,29 +603,54 @@ function drawAsk(q) {
   if (!q.trim()) { el.innerHTML = `<p class="as-tip">${t('a.tip')}</p>`; return; }
   const r = ask(q, S);
   el.innerHTML = `<p class="as-ans">${icon('sparkle', 16)}<span>${esc(r.answer)}</span></p>
-    ${r.action ? `<button class="btn primary" data-act="as-new" data-name="${esc(r.action.name)}">${icon('userplus', 18)}<span>${t('a.create', { x: esc(r.action.name) })}</span></button>` : ''}
+    ${r.action && canEdit() ? `<button class="btn primary" data-act="as-new" data-name="${esc(r.action.name)}">${icon('userplus', 18)}<span>${t('a.create', { x: esc(r.action.name) })}</span></button>` : ''}
     ${r.customers.map(c => `<button class="as-row" data-act="as-customer" data-id="${esc(c.id)}"><span class="ava" style="--h:${hue(c.id)}">${esc(c.name.trim()[0] || '?')}</span><span><b>${esc(c.name)}</b><small>${t('a.open')}${c.plate ? ' · ' + esc(c.plate) : ''}</small></span>${icon('chev', 16)}</button>`).join('')}
     ${r.files.map(f => { const c = cust(f.customerId) || { name: '—' }; return `<button class="as-row" data-act="open-file" data-id="${esc(f.id)}">${ftBadge(f, 18, 'sm')}<span><b>${esc(f.name)}</b><small>${esc(c.name)} · ${typeLabel(f.type)} · ${f.expiry ? t('e.expiry') + ' ' + fmtDate(f.expiry) : fmtDate(f.createdAt)}</small></span>${icon('chev', 16)}</button>`; }).join('')}`;
 }
 
 /* ---------- settings ---------- */
 function settingsSheet() {
-  const drive = S.store?.kind === 'drive', cid = clientId();
-  if (cid) loadGis().catch(() => { });
+  const cloud = S.mode === 'cloud', signedIn = cloud && S.me && !S.gate;
   sheet(`${head(t('settings'), t('set.sub'))}
     <div class="set">
       <div class="seg" role="group" aria-label="${t('set.lang')}">${Object.entries(LANGS).map(([k, l]) => `<button class="${k === lang ? 'on' : ''}" data-act="lang" data-l="${k}">${l}</button>`).join('')}</div>
-      <div class="set-card ${drive ? 'on' : ''}">
-        <div class="set-h">${icon('cloud', 22)}<div><b>Google Drive</b><small>${drive ? t('set.drive.on', { x: esc(S.store.user?.emailAddress || '') }) : t('set.drive.off')}</small></div></div>
-        ${GOOGLE_CLIENT_ID ? '' : `<label class="cid">${t('set.cid')}<input id="cid" dir="ltr" value="${esc(cid)}" placeholder="xxxxxxxx.apps.googleusercontent.com" autocomplete="off"><small>${t('set.cid.help')}</small></label>`}
-        <div class="sh-actions">${drive ? `<button class="btn ghost" data-act="open-root">${icon('external', 17)}<span>${t('set.folder')}</span></button><span class="sp"></span><button class="btn danger-ghost" data-act="drive-disconnect">${t('set.disconnect')}</button>` : `<span class="sp"></span><button class="btn primary" data-act="drive-connect">${icon('cloud', 18)}<span>${t('set.connect')}</span></button>`}</div>
-      </div>
-      <div class="set-card ${!drive && !S.gate ? 'on' : ''}">
-        <div class="set-h">${icon('folder', 22)}<div><b>${t('set.local')}</b><small>${t('set.local.text')}</small></div></div>
-        <div class="sh-actions">${!drive && !S.gate ? `<button class="btn ghost" data-act="seed">${t('set.seed')}</button><button class="btn danger-ghost" data-act="wipe">${t('set.wipe')}</button>` : `<span class="sp"></span><button class="btn ghost" data-act="mode-local">${t('set.use')}</button>`}</div>
+      ${cloudReady() ? `<div class="set-card ${cloud ? 'on' : ''}">
+        <div class="set-h">${icon('cloud', 22)}<div><b>${t('set.cloud')}</b><small>${signedIn ? `${t('set.cloud.on', { x: `<bdi>${esc(S.me.email)}</bdi>` })} · <em class="role-chip r-${S.role}">${t('role.' + S.role)}</em>` : t('set.cloud.off')}</small></div></div>
+        <div class="sh-actions">${signedIn
+          ? `${S.role === 'admin' ? `<button class="btn primary" data-act="team">${icon('team', 18)}<span>${t('set.team')}</span></button>` : ''}${S.me.root ? `<button class="btn ghost" data-act="open-root">${icon('external', 17)}<span>${t('set.folder')}</span></button>` : ''}<span class="sp"></span><button class="btn danger-ghost" data-act="sign-out">${icon('logout', 17)}<span>${t('set.signout')}</span></button>`
+          : `<span class="sp"></span><button class="btn primary" data-act="mode-cloud">${icon('cloud', 18)}<span>${t('set.signin')}</span></button>`}</div>
+      </div>` : ''}
+      <div class="set-card ${!cloud ? 'on' : ''}">
+        <div class="set-h">${icon('folder', 22)}<div><b>${t('set.demo')}</b><small>${t('set.local.text')}</small></div></div>
+        <div class="sh-actions">${!cloud ? `<button class="btn ghost" data-act="seed">${t('set.seed')}</button><button class="btn danger-ghost" data-act="wipe">${t('set.wipe')}</button>` : `<span class="sp"></span><button class="btn ghost" data-act="mode-local">${t('set.use')}</button>`}</div>
       </div>
       <p class="ver">${t('set.ver', { v: digits(APP_VERSION) })}</p>
     </div>`, 'wide');
+}
+
+/* ---------- team & access (admin) ---------- */
+const roleOpts = sel => ['admin', 'editor', 'viewer'].map(r => `<option value="${r}" ${r === sel ? 'selected' : ''}>${t('role.' + r)}</option>`).join('');
+function teamSheet() {
+  sheet(`${head(t('team.title'), t('team.sub'))}
+    <form class="team-add" data-form="team-add">
+      <input name="email" type="email" required dir="ltr" placeholder="name@gmail.com" aria-label="${t('team.email')}" autocomplete="off">
+      <select name="role" aria-label="${t('fl.type')}">${roleOpts('editor')}</select>
+      <button class="btn primary">${icon('userplus', 18)}<span>${t('team.add')}</span></button>
+    </form>
+    <div class="roles">${['admin', 'editor', 'viewer'].map(r => `<span><em class="role-chip r-${r}">${t('role.' + r)}</em>${t('role.' + r + '.d')}</span>`).join('')}</div>
+    <div class="team-list" id="teamList"><p class="as-tip"><span class="spin sm"></span>${t('team.loading')}</p></div>`, 'wide');
+  run(async () => drawTeam(await S.store.aclList()));
+}
+function drawTeam(list) {
+  const el = $('#teamList'); if (!el) return;
+  const me = S.me?.email;
+  el.innerHTML = list.map((p, i) => `
+    <div class="team-row" style="--i:${Math.min(i, 10)}">
+      <span class="ava" style="--h:${hue(p.email)}">${esc(p.email[0].toUpperCase())}</span>
+      <span class="tmain"><b dir="ltr">${esc(p.email)}</b><small>${p.owner ? t('role.owner') : t('role.' + p.role + '.d')}${p.email === me ? ` · ${t('team.you')}` : ''}</small></span>
+      ${p.owner ? `<em class="role-chip r-admin">${t('role.owner')}</em>` : `<select data-team-role="${esc(p.email)}" aria-label="${esc(p.email)}">${roleOpts(p.role)}</select>
+      <button class="icon-btn sm danger" data-act="team-remove" data-email="${esc(p.email)}" title="${t('team.remove')}">${icon('trash', 15)}</button>`}
+    </div>`).join('');
 }
 
 function changeLang(l) {
@@ -528,6 +658,7 @@ function changeLang(l) {
 }
 
 /* ================= actions ================= */
+const EDIT_ACTS = new Set(['upload', 'camera', 'pick-more', 'do-upload', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new']);
 const ACT = {
   go(el) { S.view = el.dataset.view; S.mobileDetail = false; if (S.view === 'exp') S.filters.type = ''; mount(); scrollTo({ top: 0, behavior: 'smooth' }); },
   'close-sheet': closeSheet,
@@ -535,19 +666,21 @@ const ACT = {
   'confirm-yes'() { const r = confirmRes; confirmRes = null; closeSheet(); r?.(true); },
   settings: settingsSheet,
   assistant: assistantSheet,
+  team: teamSheet,
   lang(el) { changeLang(el.dataset.l); },
+  reload() { location.reload(); },
   upload() { $('#pick').click(); },
   camera() { $('#cam').click(); },
   'pick-more'() { $('#pick').dataset.more = '1'; $('#pick').click(); },
   'new-customer'() { customerSheet(); },
   'edit-customer'() { customerSheet(cust(S.sel)); },
-  select(el) { S.sel = el.dataset.id; S.mobileDetail = true; drawPanel(true); if (narrow()) $('#panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); },
+  select(el) { S.sel = el.dataset.id; S.mobileDetail = true; drawPanel(true); loadThumbs(); if (narrow()) $('#panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); },
   back() { S.mobileDetail = false; drawPanel(false); },
-  tab(el) { S.filters.type = el.dataset.type; drawFilters(); drawPanel(true); },
+  tab(el) { S.filters.type = el.dataset.type; drawFilters(); drawPanel(true); loadThumbs(); },
   'clear-filters'() { S.filters = noFilters(); drawFilters(true); drawResults(true); },
   'open-file'(el) { return openFile(el.dataset.id); },
   'open-link'(el) { window.open(el.dataset.url, '_blank', 'noopener'); },
-  'open-root'() { if (S.store?.rootLink) window.open(S.store.rootLink, '_blank', 'noopener'); },
+  'open-root'() { if (S.me?.root) window.open('https://drive.google.com/drive/folders/' + encodeURIComponent(S.me.root), '_blank', 'noopener'); },
   'up-remove'(el) { U.splice(+el.closest('.up-row').dataset.i, 1); U.length ? drawUpload() : closeSheet(); },
   'do-upload': doUpload,
   'dl-file'() { if (!cur?.url) return; const a = document.createElement('a'); a.href = cur.url; a.download = cur.f.name; a.click(); },
@@ -556,53 +689,50 @@ const ACT = {
     const file = new File([cur.blob], cur.f.name, { type: cur.blob.type });
     try {
       if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: cur.f.name });
-      else if (cur.f.link) await navigator.share({ title: cur.f.name, url: cur.f.link });
       else toast(t('t.noShare'), 'err');
     } catch (e) { if (e.name !== 'AbortError') throw e; }
   },
   async 'del-file'(el) {
     const f = S.files.find(x => x.id === el.dataset.id);
-    if (!await confirmBox(t('del.file', { x: esc(f.name) }) + t(S.store.kind === 'drive' ? 'del.drive' : 'del.local'))) return;
+    if (!await confirmBox(t('del.file', { x: esc(f.name) }) + t(S.store.kind === 'cloud' ? 'del.drive' : 'del.local'))) return;
     await S.store.deleteFile(f.id); await reload(); toast(t('t.fileDeleted'));
   },
   async 'del-customer'(el) {
     const c = cust(el.dataset.id), n = S.files.filter(f => f.customerId === c.id).length;
-    if (!await confirmBox((n ? t('del.customerN', { x: esc(c.name), n }) : t('del.customer', { x: esc(c.name) })) + t(S.store.kind === 'drive' ? 'del.drive' : 'del.local'))) return;
+    if (!await confirmBox((n ? t('del.customerN', { x: esc(c.name), n }) : t('del.customer', { x: esc(c.name) })) + t(S.store.kind === 'cloud' ? 'del.drive' : 'del.local'))) return;
     await S.store.deleteCustomer(c.id); S.mobileDetail = false; await reload(); toast(t('t.customerDeleted'));
   },
   'as-chip'(el) { const i = $('#asq'), more = el.textContent.includes('…'); i.value = el.textContent.replace('…', '').trim() + (more ? ' ' : ''); i.focus(); drawAsk(more ? '' : i.value); },
   'as-new'(el) { customerSheet({ name: el.dataset.name }); },
   'as-customer'(el) { closeSheet(); S.sel = el.dataset.id; S.view = 'dash'; S.mobileDetail = true; S.filters = noFilters(); mount(); $('#panel')?.scrollIntoView({ behavior: 'smooth' }); },
-  async seed() { closeSheet(); await seedDemo(S.store, lang); await reload(true); toast(t('t.seeded')); },
+  async seed() { if (S.store?.kind !== 'local') return; closeSheet(); await seedDemo(S.store, lang); await reload(true); toast(t('t.seeded')); },
   async wipe() {
+    if (S.store?.kind !== 'local') return;
     if (!await confirmBox(t('wipe.q'), t('wipe.ok'))) return;
     for (const c of S.customers) await S.store.deleteCustomer(c.id);
     await reload(true); toast(t('t.wiped'));
   },
-  async 'mode-local'() { S.mode = 'local'; localStorage.setItem('by_mode', 'local'); closeSheet(); await connect(); },
-  async 'drive-connect'() {
-    const inp = $('#cid');
-    if (inp) { const v = inp.value.trim(); if (v) localStorage.setItem('by_cid', v); else localStorage.removeItem('by_cid'); }
-    const cid = clientId();
-    if (!cid) return toast(t('t.needCid'), 'err');
-    if (!/\.apps\.googleusercontent\.com$/.test(cid)) return toast(t('t.badCid'), 'err');
-    const d = new DriveStore(cid);
-    await d.signIn();
-    await d.init();
-    S.mode = 'drive'; localStorage.setItem('by_mode', 'drive');
-    S.store = d; S.gate = false; S.sel = null;
-    closeSheet(); await reload(true);
-    toast(t('t.connected', { x: d.user?.emailAddress || '' }));
+  async 'mode-local'() { setMode('local'); closeSheet(); await connect(); },
+  async 'mode-cloud'() { setMode('cloud'); closeSheet(); await connect(); },
+  async 'sign-out'() { auth.signOut(); S.me = null; S.store = null; S.customers = []; S.files = []; applyRole(); closeSheet(); showGate('signin'); },
+  async retry() { auth.drop(); const tok = await auth.getToken(); if (tok) enterCloud(); else showGate('signin'); },
+  async 'switch-account'() { auth.signOut(); showGate('signin'); },
+  async 'team-remove'(el) {
+    const email = el.dataset.email;
+    if (!await confirmBox(t('team.removeQ', { x: `<b dir="ltr">${esc(email)}</b>` }), t('team.remove'))) return;
+    const list = await S.store.aclRemove(email);
+    teamSheet(); drawTeam(list); toast(t('team.removed', { x: email }));
   },
-  async 'drive-disconnect'() { S.store?.signOut?.(); S.mode = 'local'; localStorage.setItem('by_mode', 'local'); closeSheet(); await connect(); toast(t('t.disconnected')); },
 };
 
 /* ================= events ================= */
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
   if (el.tagName === 'A') e.preventDefault();
-  const fn = ACT[el.dataset.act];
-  if (fn) run(() => fn(el, e));
+  const act = el.dataset.act, fn = ACT[act];
+  if (!fn) return;
+  if (EDIT_ACTS.has(act) && !canEdit()) return toast(t('err.role'), 'err');
+  run(() => fn(el, e));
 });
 
 document.addEventListener('submit', e => {
@@ -610,18 +740,30 @@ document.addEventListener('submit', e => {
   e.preventDefault();
   const d = Object.fromEntries(new FormData(form));
   run(async () => {
-    if (form.dataset.form === 'customer') {
-      const old = cust(form.dataset.id) || {};
-      const c = await S.store.saveCustomer({ ...old, name: d.name.trim(), phone: d.phone.trim(), plate: d.plate.trim(), car: d.car.trim() });
-      S.sel = c.id; closeSheet(); await reload(); if (S.view !== 'dash') { S.view = 'dash'; mount(); }
-      toast(t(old.id ? 't.customerUpdated' : 't.customerAdded'));
-    } else {
-      const f = S.files.find(x => x.id === form.dataset.id);
-      let expiry = '';
-      if (d.expiry.trim()) { expiry = parseExp(d.expiry.trim()); if (!expiry) return toast(t('u.badDate'), 'err'); }
-      await S.store.updateFile({ ...f, name: d.name.trim() || f.name, type: d.type, expiry, note: d.note.trim() });
-      closeSheet(); await reload(); toast(t('t.saved'));
+    const kind = form.dataset.form;
+    if (kind === 'team-add') {
+      const email = d.email.trim().toLowerCase();
+      const btn = form.querySelector('button'); btn.disabled = true;
+      try { drawTeam(await S.store.aclSet(email, d.role)); form.reset(); toast(t('team.added', { x: email })); }
+      finally { btn.disabled = false; }
+      return;
     }
+    if (!canEdit()) return toast(t('err.role'), 'err');
+    const btn = form.querySelector('.btn.primary'); if (btn) btn.disabled = true;
+    try {
+      if (kind === 'customer') {
+        const old = cust(form.dataset.id) || {};
+        const c = await S.store.saveCustomer({ ...old, name: d.name.trim(), phone: d.phone.trim(), plate: d.plate.trim(), car: d.car.trim() });
+        S.sel = c.id; closeSheet(); await reload(); if (S.view !== 'dash') { S.view = 'dash'; mount(); }
+        toast(t(old.id ? 't.customerUpdated' : 't.customerAdded'));
+      } else {
+        const f = S.files.find(x => x.id === form.dataset.id);
+        let expiry = '';
+        if (d.expiry.trim()) { expiry = parseExp(d.expiry.trim()); if (!expiry) return toast(t('u.badDate'), 'err'); }
+        await S.store.updateFile({ ...f, name: d.name.trim() || f.name, type: d.type, expiry, note: d.note.trim() });
+        closeSheet(); await reload(); toast(t('t.saved'));
+      }
+    } finally { if (btn?.isConnected) btn.disabled = false; }
   });
 });
 
@@ -629,6 +771,7 @@ let qT;
 document.addEventListener('input', e => {
   const el = e.target;
   if (el.id === 'langSel') changeLang(el.value);
+  else if (el.dataset.teamRole) run(async () => { drawTeam(await S.store.aclSet(el.dataset.teamRole, el.value)); toast(t('team.changed')); });
   else if (el.dataset.f) {
     S.filters[el.dataset.f] = el.value;
     if (el.dataset.f === 'customer' && el.value) { S.sel = el.value; S.mobileDetail = true; }
@@ -644,13 +787,13 @@ document.addEventListener('input', e => {
 for (const id of ['pick', 'cam']) $('#' + id).addEventListener('change', e => {
   const inp = e.target, files = [...inp.files], more = inp.dataset.more;
   inp.value = ''; delete inp.dataset.more;
-  if (more && U.length && $('#upList')) { for (const f of files) U.push(pending(f, U[0].customerId, U[0].newName)); drawUpload(); }
+  if (more && U.length && $('#upList')) { for (const f of sizeFilter(files)) U.push(pending(f, U[0].customerId, U[0].newName)); drawUpload(); }
   else run(() => startUpload(files));
 });
 
-// drag & drop, and paste from the clipboard
+// drag & drop, and paste from the clipboard (editors only)
 let dragN = 0;
-const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files') && canEdit() && !S.gate;
 addEventListener('dragenter', e => { if (hasFiles(e)) { dragN++; $('#drop').classList.add('on'); } });
 addEventListener('dragleave', e => { if (hasFiles(e) && --dragN <= 0) { dragN = 0; $('#drop').classList.remove('on'); } });
 addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
@@ -660,10 +803,10 @@ addEventListener('drop', e => {
   const dc = e.target.closest?.('[data-customer]'); if (dc) S.sel = dc.dataset.customer;
   run(() => startUpload(e.dataTransfer.files));
 });
-addEventListener('paste', e => { const f = e.clipboardData?.files; if (f?.length && !e.target.closest('input,textarea')) { e.preventDefault(); run(() => startUpload(f)); } });
+addEventListener('paste', e => { const f = e.clipboardData?.files; if (f?.length && canEdit() && !S.gate && !e.target.closest('input,textarea')) { e.preventDefault(); run(() => startUpload(f)); } });
 
 addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); assistantSheet(); }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !S.gate) { e.preventDefault(); assistantSheet(); }
   if (e.key === 'Escape') closeSheet();
 });
 addEventListener('resize', syncChrome);
