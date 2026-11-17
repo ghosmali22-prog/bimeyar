@@ -106,6 +106,22 @@ export function fmtDate(iso, withYear = true) {
   if (lang === 'fa') return jDate(iso, withYear);
   return new Intl.DateTimeFormat(LOCALE[lang], { day: 'numeric', month: 'short', ...(withYear ? { year: 'numeric' } : {}) }).format(localDate(iso));
 }
+/* ---------- DD/MM/YYYY display, chosen in Settings: 'ce' (2026), 'be' (2569) or 'fa' (Jalali) ---------- */
+let dfmt = null;
+try { dfmt = localStorage.getItem('by_datefmt'); } catch { }
+export const dateFmt = () => (['ce', 'be', 'fa'].includes(dfmt) ? dfmt : lang === 'fa' ? 'fa' : 'ce');
+export const setDateFmt = f => { dfmt = f; try { localStorage.setItem('by_datefmt', f); } catch { } };
+/** "17/11/2026", "17/11/2569" or "۱۴۰۵/۰۸/۲۶" */
+export function fmtDay(iso) {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}/.test(iso)) return '';
+  const f = dateFmt();
+  if (f === 'fa') return fmtJ(iso.slice(0, 10));
+  const [y, m, d] = iso.slice(0, 10).split('-');
+  return `${d}/${m}/${f === 'be' ? +y + 543 : y}`;
+}
+export const todayIso = () => isoDay(new Date());
+export const addDays = (iso, n) => { const d = localDate(iso); d.setDate(d.getDate() + n); return isoDay(d); };
+
 /** month bucket index for the bar chart (Jalali months in Persian, Gregorian otherwise) */
 export function monthKey(d) {
   if (lang === 'fa') { const [y, m] = toJ(d); return y * 12 + m - 1; }
@@ -170,6 +186,14 @@ const I = {
   team: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.3 2.9-5.5 6.5-5.5s6.5 2.2 6.5 5.5"/><path d="M17 11l1.5 1.5L22 9"/>',
   logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 8v4l3 2"/>',
+  invoice: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
+  cog: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  wand: '<path d="M15 4V2M15 10V8M11 6h2M17 6h2M4 20L14 10M18 13v2M17 14h2"/>',
+  move: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M10 13h6M13 10l3 3-3 3"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.5"/>',
+  gallery: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/>',
   users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.3 2.9-5.5 6.500-5.500s6.500 2.200 6.500 5.500M16 4.800a3.500 3.500 0 0 1 0 6.400M18 14.800c2.100.700 3.500 2.500 3.500 5.200"/>',
 };
 export const icon = (n, s = 20) => `<svg class="ico" viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${I[n] || I.file}</svg>`;
