@@ -42,8 +42,29 @@ const SUBFOLDERS = [
 ];
 const SLOTS = SUBFOLDERS.map(s => s.slot);
 
-/** Gemini model used for reading documents. Change here only. */
-const GEMINI_MODEL = 'gemini-3.8-flash';
+/**
+ * Gemini models for reading documents, tried in this order (change here only).
+ * think = generationConfig.thinkingConfig.thinkingLevel: the lowest level each model accepts
+ * (gemini-3.8-flash has no 'minimal'; the Flash-Lite models do). Low thinking = faster extraction.
+ */
+const AI_MODELS = [
+  { id: 'gemini-3.8-flash', think: 'low' },
+  { id: 'gemini-3.6-flash', think: 'minimal' },
+  { id: 'gemini-3.1-flash-lite', think: 'minimal' },
+];
+const GEMINI_MODEL = AI_MODELS[0].id;   // kept for older code and the setup log
+/** Retries per model on 429/500/503/504/timeout, and the wait before each retry (plus random jitter). */
+const AI_TRIES_PER_MODEL = 3;
+const AI_BACKOFF_MS = [2000, 5000, 10000];
+/**
+ * Time limits for one aiExtract call. The app waits 170 s, Apps Script allows 6 min.
+ * UrlFetchApp has no per-request timeout (a busy Google once took 90 s to answer 503), so a new attempt only
+ * starts when at least AI_MIN_LEFT_MS (~ one slow request) is left: the last one starts before 65 s.
+ * An attempt that failed slowly (AI_SLOW_MS) is not repeated on the same model: the next model is tried.
+ */
+const AI_BUDGET_MS = 110000;
+const AI_MIN_LEFT_MS = 45000;
+const AI_SLOW_MS = 20000;
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/';
 const AI_MAX_BYTES = 18 * 1024 * 1024;
 
@@ -856,52 +877,88 @@ function aiExtract(req) {
   });
   if (bytes > AI_MAX_BYTES) throw err('too_big', 'Files are too large for reading');
   parts.push({ text: AI_PROMPT });
-  const body = {
+  const payloadFor = m => JSON.stringify({
     contents: [{ role: 'user', parts }],
-    generationConfig: { responseMimeType: 'application/json', responseJsonSchema: aiSchema() },
-  };
-  const t0 = Date.now();
-  let code = 0, usage = 0, result = 'ok';
+    generationConfig: { responseMimeType: 'application/json', responseJsonSchema: aiSchema(), thinkingConfig: { thinkingLevel: m.think } },
+  });
+
+  const t0 = Date.now(), attempts = [];
+  let last = null;   // last error: { busy, code, msg }
   try {
-    const r = UrlFetchApp.fetch(GEMINI_URL + GEMINI_MODEL + ':generateContent', {
-      method: 'post', contentType: 'application/json', payload: JSON.stringify(body), muteHttpExceptions: true,
-      headers: { 'x-goog-api-key': key },
-    });
-    code = r.getResponseCode();
-    if (code === 429) { result = 'quota'; throw err('ai_quota', 'AI quota reached, try again later'); }
-    if (code === 400 || code === 401 || code === 403) {
-      const m = String(r.getContentText()).slice(0, 300);
-      result = 'http' + code;
-      if (/API key/i.test(m)) throw err('ai_nokey', 'The Gemini API key is not valid');
-      throw err('ai_error', 'AI request rejected (' + code + ')');
+    for (const m of AI_MODELS) {
+      const payload = payloadFor(m);
+      for (let i = 0; i < AI_TRIES_PER_MODEL; i++) {
+        if (i > 0) {
+          const wait = Math.round(AI_BACKOFF_MS[Math.min(i - 1, AI_BACKOFF_MS.length - 1)] * (0.7 + Math.random() * 0.6));   // jitter
+          if (AI_BUDGET_MS - (Date.now() - t0) - wait < AI_MIN_LEFT_MS) break;
+          Utilities.sleep(wait);
+        }
+        if (AI_BUDGET_MS - (Date.now() - t0) < AI_MIN_LEFT_MS) break;
+        const r = aiAttempt(m, payload, key);
+        attempts.push({ model: m.id, status: r.status, ms: r.ms, tokens: r.tokens || 0 });
+        if (r.out) return { docType: r.out.docType || 'other', fields: r.out.fields || {}, model: m.id, tries: attempts.length };
+        last = r;
+        if (r.fatal) throw err(r.fatal, r.msg);   // bad key: no other model will work either
+        if (!r.retry) break;                      // this model refused the request: try the next model
+        if (r.ms > AI_SLOW_MS) break;             // overloaded and slow: switch model instead of waiting again
+      }
+      if (AI_BUDGET_MS - (Date.now() - t0) < AI_MIN_LEFT_MS) break;
     }
-    if (code !== 200) { result = 'http' + code; throw err('ai_error', 'AI service error (' + code + ')'); }
-    const j = JSON.parse(r.getContentText());
-    usage = (j.usageMetadata && j.usageMetadata.totalTokenCount) || 0;
-    const c = (j.candidates || [])[0];
-    const text = c && c.content && (c.content.parts || []).map(p => p.text || '').join('');
-    if (!text) { result = 'empty'; throw err('ai_error', 'The AI could not read this document'); }
-    let out;
-    try { out = JSON.parse(text); } catch (e) { result = 'badjson'; throw err('ai_error', 'The AI answer was not valid'); }
-    return { docType: out.docType || 'other', fields: out.fields || {}, model: GEMINI_MODEL };
-  } catch (e) {
-    if (result === 'ok') result = e.code || 'fail';
-    throw e;
+    if (last && last.busy) throw err('ai_busy', 'Google AI is busy right now');
+    throw err('ai_error', (last && last.msg) || 'The AI could not read this document');
   } finally {
-    aiLog({ at: new Date().toISOString(), ms: Date.now() - t0, files: files.length, kb: Math.round(bytes / 1024), tokens: usage, model: GEMINI_MODEL, result });
+    const base = { at: new Date().toISOString(), files: files.length, kb: Math.round(bytes / 1024) };
+    aiLog(attempts.map((a, i) => Object.assign({}, base, a, { try: i + 1, of: attempts.length, totalMs: Date.now() - t0 })));
   }
 }
 
-/** Usage log without any customer data */
-function aiLog(entry) {
+/**
+ * One request to one model. Returns { out } on success, otherwise
+ * { status, retry, busy, fatal?, msg }. retry/busy = 429, 500, 503, 504, timeout or network error.
+ */
+function aiAttempt(m, payload, key) {
+  const t = Date.now();
+  let res;
   try {
-    console.log('ai ' + JSON.stringify(entry));
+    res = UrlFetchApp.fetch(GEMINI_URL + m.id + ':generateContent', {
+      method: 'post', contentType: 'application/json', payload: payload, muteHttpExceptions: true,
+      headers: { 'x-goog-api-key': key },
+    });
+  } catch (e) {   // timeout or network problem inside Google
+    return { status: /time/i.test(String(e)) ? 'timeout' : 'neterr', ms: Date.now() - t, retry: true, busy: true, msg: 'AI service did not answer' };
+  }
+  const code = res.getResponseCode(), ms = Date.now() - t;
+  if (code === 200) {
+    let j, out, tokens = 0;
+    try { j = JSON.parse(res.getContentText()); } catch (e) { return { status: 'badjson', ms: ms, retry: false, msg: 'The AI answer was not valid' }; }
+    tokens = (j.usageMetadata && j.usageMetadata.totalTokenCount) || 0;
+    const c = (j.candidates || [])[0];
+    const text = c && c.content && (c.content.parts || []).map(p => p.text || '').join('');
+    if (!text) return { status: 'empty', ms: ms, tokens: tokens, retry: false, msg: 'The AI could not read this document' };
+    try { out = JSON.parse(text); } catch (e) { return { status: 'badjson', ms: ms, tokens: tokens, retry: false, msg: 'The AI answer was not valid' }; }
+    return { status: 'ok', ms: ms, tokens: tokens, out: out };
+  }
+  const status = 'http' + code;
+  if (code === 429 || code === 500 || code === 503 || code === 504) return { status: status, ms: ms, retry: true, busy: true, msg: 'AI service busy (' + code + ')' };
+  const text = String(res.getContentText()).slice(0, 300);
+  if ((code === 400 || code === 401 || code === 403) && /API key/i.test(text)) return { status: status, ms: ms, fatal: 'ai_nokey', msg: 'The Gemini API key is not valid' };
+  return { status: status, ms: ms, retry: false, msg: 'AI request rejected (' + code + ')' };   // e.g. 404: model not available -> next model
+}
+
+/** Usage log without any customer data. Script properties hold max 9 KB, so the oldest entries are dropped to fit. */
+function aiLog(entries) {
+  entries = [].concat(entries || []);
+  if (!entries.length) return;
+  try {
+    for (const e of entries) console.log('ai ' + JSON.stringify(e));
     withLock(() => {
       const p = PropertiesService.getScriptProperties();
       let log = [];
       try { log = JSON.parse(p.getProperty('AI_LOG') || '[]'); } catch (e) { }
-      log.push(entry);
-      p.setProperty('AI_LOG', JSON.stringify(log.slice(-200)));
+      log = log.concat(entries).slice(-200);
+      let s = JSON.stringify(log);
+      while (s.length > 8500 && log.length > 1) { log = log.slice(Math.ceil(log.length / 10)); s = JSON.stringify(log); }
+      p.setProperty('AI_LOG', s);
     });
   } catch (e) { }
 }
@@ -963,6 +1020,23 @@ function setup() {
   console.log('Gemini key set: ' + (aiKey() ? 'yes' : 'NO - add GEMINI_API_KEY in Project Settings > Script properties'));
   // touch the Docs service so the editor asks for the new permission
   try { DocumentApp.getActiveDocument(); } catch (e) { }
+}
+
+/**
+ * Run from the editor: sends a one-line test sentence (no customer data) to every model in AI_MODELS
+ * and prints status and time for each. Shows which models work and which are busy right now.
+ */
+function aiModelsCheck() {
+  const key = aiKey();
+  if (!key) return console.log('GEMINI_API_KEY is not set');
+  for (const m of AI_MODELS) {
+    const payload = JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: 'Reply with the JSON {"ok": true}.' }] }],
+      generationConfig: { responseMimeType: 'application/json', thinkingConfig: { thinkingLevel: m.think } },
+    });
+    const r = aiAttempt(m, payload, key);
+    console.log(m.id + ' (thinking ' + m.think + '): ' + r.status + ' in ' + r.ms + ' ms');
+  }
 }
 
 /** Run from the editor: dry-run report of the sub-folder migration (writes nothing). */
