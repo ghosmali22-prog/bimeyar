@@ -311,7 +311,7 @@ const V3 = {
     'cf.brand': 'ยี่ห้อ', 'cf.model': 'รุ่น', 'cf.year': 'ปี', 'cf.color': 'สี', 'cf.plate': 'ทะเบียนรถ', 'cf.province': 'จังหวัด', 'cf.vin': 'เลขตัวถัง', 'cf.engineNo': 'เลขเครื่องยนต์',
     'cf.insurer': 'บริษัทประกัน', 'cf.policyNo': 'เลขกรมธรรม์', 'cf.policyType': 'ประเภท / ชั้นประกัน', 'cf.coverage': 'ทุนประกัน', 'cf.premium': 'เบี้ยประกัน',
     'cf.policyStart': 'วันเริ่มคุ้มครอง', 'cf.policyExpiry': 'วันหมดอายุ', 'cf.note': 'หมายเหตุ', 'cf.car': 'รถ (ข้อมูลเดิม)',
-    'fo.title': 'เอกสาร', 'fo.policy': 'Policy', 'fo.docs': 'Documents', 'fo.prev': 'Previous policy', 'fo.pay': 'Payment receipts',
+    'fo.title': 'เอกสาร', 'fo.policy': 'กรมธรรม์', 'fo.docs': 'เอกสาร', 'fo.prev': 'กรมธรรม์เดิม', 'fo.pay': 'หลักฐานการชำระเงิน',
     'fo.other': 'อื่นๆ', 'fo.otherHint': 'ไฟล์เหล่านี้อยู่นอก 4 โฟลเดอร์ (บันทึกก่อน v3) และยังอยู่ที่เดิม เปิดไฟล์เพื่อย้ายเข้าโฟลเดอร์',
     'fo.missing': 'ยังไม่ได้สร้าง 4 โฟลเดอร์ของลูกค้ารายนี้ ระบบจะสร้างให้อัตโนมัติเมื่ออัปโหลดครั้งถัดไป หรือที่ ตั้งค่า → โฟลเดอร์ Drive',
     'fo.choose': 'บันทึกลงโฟลเดอร์', 'fo.required': '(กรุณาเลือก)', 'fo.pickAll': 'กรุณาเลือกโฟลเดอร์ให้ทุกไฟล์', 'fo.in': 'โฟลเดอร์',
