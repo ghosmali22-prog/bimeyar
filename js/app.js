@@ -767,9 +767,10 @@ async function aiQueue() {
   for (const it of u?.items || []) {
     if (U !== u) return;
     if (it.ai !== 'wait') continue;
-    it.ai = 'busy'; drawUpload();
+    it.ai = 'busy'; it.since = Date.now(); drawUpload();
     try {
-      const r = await S.store.aiExtract(await prepare([it.file]));
+      it.prepared ||= await prepare([it.file]);   // kept: "Try again" sends the same bytes, so a late result comes from the cache
+      const r = await S.store.aiExtract(it.prepared);
       if (U !== u) return;
       it.n = normalize(r);
       it.aiFolder = suggestFolder(it.n, cust(u.cid));
@@ -782,7 +783,7 @@ async function aiQueue() {
 }
 function aiErr(e) {
   if (e?.key) return t(e.key);
-  return t({ offline: 'ai.offline', timeout: 'ai.timeout', network: 'ai.offline', ai_nokey: 'ai.nokey', ai_quota: 'ai.busy', ai_busy: 'ai.busy', too_big: 'ai.tooBig', role: 'err.role' }[e?.code] || 'ai.failed');
+  return t({ offline: 'ai.offline', timeout: 'ai.stillWorking', network: 'ai.offline', ai_nokey: 'ai.nokey', ai_quota: 'ai.busy', ai_busy: 'ai.busy', too_big: 'ai.tooBig', role: 'err.role' }[e?.code] || 'ai.failed');
 }
 function uploadDiff() {
   const c = cust(U.cid), best = {};
@@ -794,7 +795,7 @@ function uploadDiff() {
 }
 function aiLine(it) {
   if (it.ai === 'skip') return '';
-  if (it.ai === 'wait' || it.ai === 'busy') return `<p class="ai-line busy"><span class="spin sm"></span>${t('ai.reading')}</p>`;
+  if (it.ai === 'wait' || it.ai === 'busy') return `<p class="ai-line busy"><span class="spin sm"></span>${t('ai.reading')} <span class="elapsed" data-since="${it.since || ''}"></span><span class="slow-hint">${t('ai.slowHint')}</span></p>`;
   // the file stays in the list: try the AI again, or just pick the folder by hand
   if (it.ai === 'err') return `<p class="ai-line err">${icon('alert', 14)}${esc(it.err)} · ${t('ai.manual')} <button type="button" class="link" data-act="up-ai-retry">${t('ai.retry')}</button></p>`;
   const dt = it.n?.docType || 'other';
@@ -883,16 +884,17 @@ async function aiNew(src) {
   const files = await pickFiles({ capture: src === 'cam', accept: src === 'cam' ? 'image/*' : DOC_ACCEPT, multiple: src !== 'cam' });
   if (files.length) aiNewFiles(files);
 }
-function aiNewFiles(files) {
+function aiNewFiles(files, prepared = null) {
   if (!aiOn()) return toast(S.mode === 'local' ? t('ai.localOnly') : t('ai.off'), 'err');
   const ok = sizeFilter(files).filter(readable);
   if (!ok.length) { if (files.length) toast(t('ai.noReadable'), 'err'); return; }
-  R = { files: ok, previews: ok.map(f => isImage({ mime: f.type }) ? objUrl(f) : ''), n: null, v: {}, folder: '', aiFolder: null, errors: {}, warnings: {} };
+  R = { files: ok, prepared, previews: ok.map(f => isImage({ mime: f.type }) ? objUrl(f) : ''), n: null, v: {}, folder: '', aiFolder: null, errors: {}, warnings: {} };
   readingSheet();
   const r0 = R;
   run(async () => {
     try {
-      const r = await S.store.aiExtract(await prepare(ok));
+      R.prepared ||= await prepare(ok);   // kept for "Try again" (same bytes -> cached result if it arrived late)
+      const r = await S.store.aiExtract(R.prepared);
       if (R !== r0) return;
       R.n = normalize(r); R.v = { ...R.n.values }; R.aiFolder = suggestFolder(R.n, null); R.folder = R.aiFolder || ''; R.model = r.model || '';
       reviewSheet();
@@ -908,7 +910,7 @@ const pvFile = (f, i, act) => `<button class="pv-file" data-act="${act}" data-i=
 function readingSheet() {
   sheet({ title: t('ai.readingTitle'), cls: 'wide', body: `<div class="reading">
     <div class="pv-strip">${R.files.map((f, i) => R.previews[i] ? `<img src="${R.previews[i]}" alt="">` : pvFile(f, i, 'pv-open')).join('')}</div>
-    <div class="scan"><span class="spin"></span><b>${t('ai.reading')}</b><small>${t('ai.readingSub')}</small></div></div>` });
+    <div class="scan"><span class="spin"></span><b>${t('ai.reading')} <span class="elapsed" data-since="${Date.now()}"></span></b><small>${t('ai.readingSub')}</small><small class="slow-hint">${t('ai.slowHint')}</small></div></div>` });
   sheetClose = () => { R = null; };
 }
 function reviewSheet() {
@@ -1399,7 +1401,7 @@ const ACT = {
     if (!el.dataset.src) { if (!aiOn()) return toast(S.mode === 'local' ? t('ai.localOnly') : t('ai.off'), 'err'); return sourceSheet(files => aiNewFiles(files), { title: t('add.ai'), accept: DOC_ACCEPT }); }
     return aiNew(el.dataset.src);
   },
-  'ai-retry'() { if (R) aiNewFiles(R.files); },   // same photos, nothing to pick again
+  'ai-retry'() { if (R) aiNewFiles(R.files, R.prepared); },   // same photos (and bytes): nothing to pick again, a late result comes from the cache
   'up-ai-retry'(el) { const it = U?.items[+el.closest('.up-row').dataset.i]; if (!it) return; it.ai = 'wait'; it.err = ''; drawUpload(); aiQueue(); },
   'ai-manual'() { if (!R) return; R.n = null; R.v = {}; reviewSheet(); },
   'pv-zoom'(el) { if (R) window.open(R.previews[+el.dataset.i], '_blank', 'noopener'); },
@@ -1606,6 +1608,16 @@ const endDrag = () => { if (!drag) return; const { sh, dy } = drag; drag = null;
 document.addEventListener('pointerup', endDrag); document.addEventListener('pointercancel', endDrag);
 
 addEventListener('offline', () => toast(t('err.offline'), 'err'));
+
+// "Reading… 1:25": time since the AI request started (Google can take minutes when busy)
+setInterval(() => {
+  for (const el of $$('[data-since]')) {
+    const s0 = +el.dataset.since; if (!s0) continue;
+    const sec = Math.floor((Date.now() - s0) / 1000);
+    el.textContent = sec < 5 ? '' : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    el.closest('.scan, .ai-line')?.classList.toggle('slow', sec >= 20);
+  }
+}, 1000);
 
 /* ================= start ================= */
 { const st = document.createElement('style'); st.textContent = INVOICE_CSS; document.head.append(st); }
