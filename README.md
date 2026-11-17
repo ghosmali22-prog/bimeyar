@@ -2,55 +2,84 @@
 
 **Live app:** https://ghosmali22-prog.github.io/bimeyar/
 
-A web app for **RICH INSURANS** to keep every customer's policies, vehicle documents, ID scans, claim photos and
-payment receipts in one place. Every file is stored in the **owner's Google Drive**. People the owner approves sign
-in with their own Gmail. The app installs on a phone and a laptop like a normal app (PWA), and works in
-**English**, **Thai** and **Persian** (right-to-left).
+A phone-first web app for **RICH INSURANS**. It keeps every customer's policy, vehicle documents, ID scans,
+previous policy and payment receipts in one place, makes invoices, and shows which policies expire soon.
+Every file is stored in the **owner's Google Drive**. People the owner approves sign in with their own Gmail.
+It installs on an iPhone like a normal app (PWA) and works in **English**, **Thai** and **Persian**.
 
 > Changing the code? Read **[CLAUDE.md](CLAUDE.md)** first. This app stores real company data.
+> Deploying the backend? Follow **[backend/DEPLOY.md](backend/DEPLOY.md)**.
 
-## What it does
+## What it does (v3)
 
-- **Dashboard**: expiring policies, files per month, customer growth and Drive space used.
-- **Customer case files**: one folder per customer, files shown as cards with category tabs.
-- **Fast saving**: drag and drop, paste, pick files, or take a photo. The assistant guesses the category and customer from the file name. Photos are compressed before upload (25 MB limit).
-- **Assistant search** (Ctrl/⌘ K) in plain sentences, in all three languages. It runs on the device.
-- **Renewals**: policies sorted by how soon they expire, with one-tap calling.
-- **Team & access** (admin only): add or remove people by Gmail, with roles admin, editor (view, upload, edit) or viewer (view only).
-- Deletes go to the Drive trash and can be restored for 30 days. Each file records who uploaded it.
+- **Customers**: cards with a status badge (Active / Expiring within 30 days / Expired / Not set), search by name,
+  phone or plate, and filters. At the top: total customers, policies expiring this month, expired.
+- **Customer page**: customer, vehicle and policy details; call in one tap; files grouped in the 4 Drive folders
+  with thumbnails; invoices of that customer.
+- **Expiring**: policies sorted by the nearest expiry, grouped: expired / next 7 / next 30 / next 60 days.
+- **Invoices**: create an invoice from a customer (everything is pre-filled), A4 PDF with Thai font, saved
+  automatically in the customer's payment folder, share or download on the phone, mark as paid, re-generate.
+- **AI (Gemini)**: take a photo of a policy and the app fills in the new customer for you. You check every field
+  before anything is saved. On every upload the AI suggests the folder and shows "old value → new value" changes.
+- **Team & access** (admin): add people by Gmail as admin, editor (view, upload, edit, AI) or viewer (view only).
+- Deletes go to the Drive trash and can be restored for 30 days.
 - **This device only** demo mode with sample data, for trying the app without signing in.
+
+## Drive folders
+
+```
+Bimeyar/                          ← the app's folder in the owner's Drive
+  <customer name>/                ← one folder per customer (details are saved in the folder's description)
+    01_กรมธรรม์/                    policy
+    02_เอกสาร/                      documents (vehicle book, ID card, ...)
+    03_กรมธรรม์เดิม/                 previous policy
+    04_หลักฐานการชำระเงิน/            payment receipts + invoices (PDF)
+    (older files)                 files saved before v3 stay here; the app shows them under "Other / ไม่ระบุ"
+```
+
+The folder names are set in one place: `SUBFOLDERS` in `backend/Code.gs` (and `FOLDERS` in `js/config.js` for the
+labels in the app). The app finds the folders by a hidden tag, not by name, so they can be renamed later.
+New customers get the 4 folders automatically. For older customers use **Settings → Drive folders**
+(first "Check", which changes nothing, then "Create missing folders"). This never moves, renames or deletes a file.
 
 ## How it works
 
 ```
-Phone / laptop (GitHub Pages PWA)
-   │  Sign in with Google → ID token (openid, email, profile only; no Drive access in the browser)
+iPhone / laptop (GitHub Pages PWA)
+   │  Sign in with Google → ID token (no Drive access in the browser)
    ▼
 Apps Script web app "Bimeyar backend" (runs as the owner)
-   │  verifies the token, checks the access list, then reads and writes Drive
+   │  verifies the token, checks the access list, then reads and writes Drive,
+   │  makes invoice PDFs (Google Docs → PDF) and calls Gemini
    ▼
-Owner's Google Drive → "Bimeyar" folder → one folder per customer → files
+Owner's Google Drive → "Bimeyar" folder          Gemini API (key only in Script Properties)
 ```
 
 | Part | Where |
 |---|---|
 | Frontend | this repo, branch `main`, served by GitHub Pages |
-| Backend | `backend/Code.gs` + `backend/appsscript.json`, deployed in Apps Script project "Bimeyar backend" (owner ghosmali22@gmail.com); its `/exec` URL is `API_URL` in `js/config.js` |
-| Login | Google Cloud project "Bimeyar", Web OAuth client (`GOOGLE_CLIENT_ID` in `js/config.js`); allowed origins `https://ghosmali22-prog.github.io` and `http://localhost:8765` |
+| Backend | `backend/Code.gs` + `backend/appsscript.json`, Apps Script project "Bimeyar backend" (owner ghosmali22@gmail.com); its `/exec` URL is `API_URL` in `js/config.js` |
+| Login | Google Cloud project "Bimeyar", Web OAuth client (`GOOGLE_CLIENT_ID` in `js/config.js`) |
 | Data | "Bimeyar" folder in the owner's Google Drive (never in this repo) |
-| Access list | Apps Script → Project settings → Script properties → `ACL` |
+| Script Properties | `ACL` (access list), `GEMINI_API_KEY` (AI), `COMPANY` (invoice details), `INV_SEQ` (invoice numbers), `AI_LOG` (AI usage, no customer data) |
 
-## Adding or removing people
+## The Gemini API key
 
-Open the app with the owner account → **Settings** (top right) → **Team & access** → type the Gmail address,
-choose a role and press **Add person**. The person can then sign in with that Gmail. Removing someone blocks them
-on their next action. Their uploads stay in the owner's Drive.
+The key is stored **only** in Apps Script → Project Settings → Script properties, as `GEMINI_API_KEY`.
+It is never in this repo and never reaches the browser: the app sends the document to the backend, the backend
+calls Gemini. Get a key at https://aistudio.google.com/apikey. The model name is `GEMINI_MODEL` in `backend/Code.gs`.
 
-## Updating the backend
+## Data fields
 
-Paste the new `backend/Code.gs` into the Apps Script editor, save, then
-**Deploy → Manage deployments → ✏️ → Version: New version → Deploy**. This keeps the same URL.
-To roll back, choose the previous version there.
+Customer (all optional except the name; old customers simply show "not set"):
+name, nameEn, phone, idNo, dob, address, brand, model, year, color, plate, province, vin, engineNo,
+insurer, policyNo, policyType, coverage, premium, policyStart, policyExpiry, note (and the old `car` field).
+Dates are saved as `YYYY-MM-DD` in the Common Era. Thai Buddhist years (e.g. 2569) are converted to 2026 when read.
+The display format (2026 / 2569) is chosen in Settings.
+
+Invoice: number (`RI-2026-0001`, made by the backend under a lock), issue/due date, customer, vehicle, policy,
+line items, discount, VAT 7% (optional), paid, status. Saved as a PDF in `04_หลักฐานการชำระเงิน`, with the data
+in the PDF file's description.
 
 ## Install on phone and laptop
 
@@ -63,6 +92,7 @@ To roll back, choose the previous version there.
 ```bash
 python3 -m http.server 8765
 # open http://localhost:8765
+node tests/invoice-totals.test.mjs   # invoice maths + validation tests
 ```
 
 No build step and no dependencies: plain HTML, CSS and JavaScript modules.
@@ -71,26 +101,27 @@ No build step and no dependencies: plain HTML, CSS and JavaScript modules.
 
 | File | Purpose |
 |---|---|
-| `index.html` | App shell |
-| `css/app.css` | Glass design, animations, responsive layout |
-| `js/app.js` | Views, upload flow, sheets, events |
-| `js/auth.js` | Google sign-in (ID token only) |
+| `index.html` | App shell (sidebar on desktop, tab bar on phone) |
+| `css/app.css` | Mobile-first design, light/dark mode |
+| `js/app.js` | Screens, sheets, upload, AI review, invoices, settings |
+| `js/ai.js` | Prepares files for the AI, cleans the answer, folder suggestion, "old → new" changes |
+| `js/validate.js` | Thai phone, Thai ID checksum, dates (BE → CE), amounts, duplicate check |
+| `js/invoice.js` | Invoice maths (copy of the backend's) and the invoice layout |
 | `js/store-remote.js` | Calls to the Apps Script backend |
 | `js/store-local.js` | On-device demo storage (IndexedDB) |
 | `js/i18n.js` | English, Thai and Persian text |
-| `js/assistant.js` | Category and customer guessing, plain-sentence search |
-| `js/demo.js` | Fictional sample data |
-| `js/util.js` | Dates (Gregorian, Thai Buddhist and Jalali), icons, image compression |
-| `js/config.js` | Client ID, backend URL, upload limit, version |
-| `backend/` | Apps Script backend source |
-| `sw.js`, `manifest.webmanifest`, `icons/` | Installable app (PWA) |
+| `js/auth.js` | Google sign-in (ID token only) |
+| `js/assistant.js` | Plain-sentence search (Ctrl/⌘ K) |
+| `js/util.js` | Dates, icons, image compression |
+| `js/config.js` | Client ID, backend URL, folder names, version |
+| `backend/` | Apps Script backend source and `DEPLOY.md` |
+| `tests/` | Node tests for the invoice maths and validation |
+| `sw.js`, `manifest.webmanifest`, `icons/` | Installable app. The service worker caches only the app shell, never customer data |
 
 ## راهنمای فارسی
 
 - **آدرس اپ:** https://ghosmali22-prog.github.io/bimeyar/
-- **فایل‌ها کجا هستند؟** در پوشهٔ «Bimeyar» در Google Drive حساب ghosmali22@gmail.com. هیچ فایل مشتری روی GitHub نیست.
-- **اضافه کردن یک نفر:** با حساب خودت وارد اپ شو ← تنظیمات (بالا سمت راست) ← «تیم و دسترسی» ← جیمیل را بنویس، نقش را انتخاب کن ← «افزودن نفر».
-  - editor: دیدن، آپلود و ویرایش · viewer: فقط دیدن
-- **حذف دسترسی:** همان صفحه ← «حذف دسترسی». فایل‌هایی که آن نفر آپلود کرده در Drive تو می‌مانند.
-- **فایل پاک‌شده:** تا ۳۰ روز در سطل زبالهٔ Google Drive است و برمی‌گردد.
+- **فایل‌ها کجا هستند؟** در پوشهٔ «Bimeyar» در Google Drive حساب مالک. هر مشتری یک پوشه با ۴ زیرپوشه دارد. هیچ فایل مشتری روی GitHub نیست.
+- **کلید Gemini:** فقط در Apps Script ← Project Settings ← Script properties با نام `GEMINI_API_KEY`.
+- **به‌روزرسانی backend:** فایل [backend/DEPLOY.md](backend/DEPLOY.md) را قدم به قدم انجام بده.
 - **قبل از هر تغییری در کد:** به Claude Code بگو اول فایل CLAUDE.md را بخواند و `git pull` کند.
