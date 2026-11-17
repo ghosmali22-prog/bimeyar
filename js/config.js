@@ -8,4 +8,20 @@ export const API_URL = 'https://script.google.com/macros/s/AKfycbxbtAtT-NsQwT9rg
 // Largest file the backend accepts (photos are compressed before this check)
 export const MAX_UPLOAD_MB = 25;
 
-export const APP_VERSION = '2.0.0';
+// Largest total size sent to the AI in one go (photos are compressed first)
+export const MAX_AI_MB = 15;
+
+export const APP_VERSION = '3.0.0';
+
+/**
+ * The 4 sub-folders of every customer folder. Must match SUBFOLDERS in backend/Code.gs.
+ * `slot` is the stable key stored in Drive; `th` is the folder name; `en` is the small English label.
+ */
+export const FOLDERS = [
+  { slot: 'policy', th: '01_กรมธรรม์', en: 'Policy', icon: 'shield', type: 'policy' },
+  { slot: 'docs', th: '02_เอกสาร', en: 'Documents', icon: 'idcard', type: 'car' },
+  { slot: 'prev', th: '03_กรมธรรม์เดิม', en: 'Previous policy', icon: 'history', type: 'policy' },
+  { slot: 'pay', th: '04_หลักฐานการชำระเงิน', en: 'Payment receipts', icon: 'receipt', type: 'payment' },
+];
+
+export const VAT_RATE = 7;
