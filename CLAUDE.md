@@ -69,7 +69,16 @@ to a production system. Talk to the owner (Pejman) in Persian.
 ## Current deployment
 
 - **Backend**: Apps Script deployment **Version 2** ("v3.0.0"), live since 2026-11-17. Version 1 is the v2 backend.
-- **Frontend**: `main` = release tag `v3.0.0`. The v2 frontend is tag `v2.0.1-pre-upgrade`.
+- **Frontend**: `main` = release tag `v3.1.0` (v2 design with the v3 features). Before it: `v3.0.1-stable` (v3.0 look).
+  The v2 frontend is tag `v2.0.1-pre-upgrade`.
+
+## Design (owner's decision)
+
+The app keeps the **original v2 design** (light glass look, top nav, stat cards, dark customer panel, purple case file)
+on laptop and phone. Do not redesign it. New features go inside that layout and reuse the v2 classes
+(`.card`, `.btn`, `.pill`, `.set-card`, `.tile`, …). The v2 part of `css/app.css` stays unchanged; new styles go in the
+"v3 features" section at the end. Light theme only (no automatic dark mode). Phone: same design in one column,
+44px touch targets, 16px inputs. Check English, Thai and Persian (RTL) at 1440px and 390px.
 
 ## Rollback
 
