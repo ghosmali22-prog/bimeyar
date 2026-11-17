@@ -1385,7 +1385,16 @@ addEventListener('offline', () => { document.body.classList.add('offline'); toas
 for (const el of $$('[data-ico]')) el.outerHTML = icon(el.dataset.ico, +el.dataset.s || 22);
 applyStatic();
 if (!navigator.onLine) document.body.classList.add('offline');
-if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('sw.js').catch(() => { });
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  // When a new version takes over right after the app opened, reload once so the new files are used.
+  // Not later in the session, so nothing the user is typing is lost.
+  const hadController = !!navigator.serviceWorker.controller, openedAt = Date.now();
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloaded && Date.now() - openedAt < 20000) { reloaded = true; location.reload(); }
+  });
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => { });
+}
 { const r = parseHash(); S.view = r.view; S.cid = r.cid; }
 mount('fade');
 run(connect);
