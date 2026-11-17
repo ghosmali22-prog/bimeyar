@@ -66,8 +66,15 @@ to a production system. Talk to the owner (Pejman) in Persian.
 6. After deploying, test with the owner's account: sign in, list, add a customer, upload a photo and a PDF,
    open a file, then delete the test items.
 
+## Current deployment
+
+- **Backend**: Apps Script deployment **Version 2** ("v3.0.0"), live since 2026-11-17. Version 1 is the v2 backend.
+- **Frontend**: `main` = release tag `v3.0.0`. The v2 frontend is tag `v2.0.1-pre-upgrade`.
+
 ## Rollback
 
 - Frontend: `git revert <commit>` (or reset `main` to the last `*-stable` tag) and push.
+  Full rollback of v3: revert to tag `v2.0.1-pre-upgrade` (e.g. `git revert -m 1 <v3 merge commit>`) and push.
 - Backend: Apps Script → Deploy → Manage deployments → edit → choose the previous version → Deploy.
+  Full rollback of v3: choose **Version 1**. (The v3 backend also works with the v2 frontend, so roll back the frontend first.)
 - Data: deleted items are in the Drive trash for 30 days.
