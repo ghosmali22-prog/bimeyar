@@ -217,12 +217,12 @@ export async function makeThumb(blob, max = 360) {
  * Shrinks big photos before upload: longest side at most 2560 px, JPEG quality 0.82.
  * Returns the original file when it is not a photo, can't be decoded, or would not get smaller.
  */
-export async function compressImage(file, maxSide = 2560, quality = 0.82) {
+export async function compressImage(file, maxSide = 2560, quality = 0.82, keepBelow = 1.2 * 1048576) {
   if (!/^image\/(jpeg|png|webp|heic|heif)$/i.test(file.type)) return file;
   let bmp;
   try { bmp = await createImageBitmap(file); } catch { return file; }
   const k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
-  if (k === 1 && file.size < 1.2 * 1048576) return file;
+  if (k === 1 && file.size < keepBelow) return file;
   const c = document.createElement('canvas');
   c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
   const g = c.getContext('2d');

@@ -782,7 +782,7 @@ async function aiQueue() {
 }
 function aiErr(e) {
   if (e?.key) return t(e.key);
-  return t({ offline: 'ai.offline', timeout: 'ai.timeout', network: 'ai.offline', ai_nokey: 'ai.nokey', ai_quota: 'ai.quota', too_big: 'ai.tooBig', role: 'err.role' }[e?.code] || 'ai.failed');
+  return t({ offline: 'ai.offline', timeout: 'ai.timeout', network: 'ai.offline', ai_nokey: 'ai.nokey', ai_quota: 'ai.busy', ai_busy: 'ai.busy', too_big: 'ai.tooBig', role: 'err.role' }[e?.code] || 'ai.failed');
 }
 function uploadDiff() {
   const c = cust(U.cid), best = {};
@@ -795,7 +795,8 @@ function uploadDiff() {
 function aiLine(it) {
   if (it.ai === 'skip') return '';
   if (it.ai === 'wait' || it.ai === 'busy') return `<p class="ai-line busy"><span class="spin sm"></span>${t('ai.reading')}</p>`;
-  if (it.ai === 'err') return `<p class="ai-line err">${icon('alert', 14)}${esc(it.err)} · ${t('ai.manual')}</p>`;
+  // the file stays in the list: try the AI again, or just pick the folder by hand
+  if (it.ai === 'err') return `<p class="ai-line err">${icon('alert', 14)}${esc(it.err)} · ${t('ai.manual')} <button type="button" class="link" data-act="up-ai-retry">${t('ai.retry')}</button></p>`;
   const dt = it.n?.docType || 'other';
   return `<p class="hint">${icon('sparkle', 13)} ${t('ai.found', { x: t('dt.' + dt) })}${it.aiFolder ? ` · ${t('ai.suggests', { x: iso(FOLDER[it.aiFolder].th) })}` : ''}</p>`;
 }
@@ -893,7 +894,7 @@ function aiNewFiles(files) {
     try {
       const r = await S.store.aiExtract(await prepare(ok));
       if (R !== r0) return;
-      R.n = normalize(r); R.v = { ...R.n.values }; R.aiFolder = suggestFolder(R.n, null); R.folder = R.aiFolder || '';
+      R.n = normalize(r); R.v = { ...R.n.values }; R.aiFolder = suggestFolder(R.n, null); R.folder = R.aiFolder || ''; R.model = r.model || '';
       reviewSheet();
     } catch (e) {
       if (R !== r0) return;
@@ -916,7 +917,7 @@ function reviewSheet() {
     body: `<div class="rv">
       <aside class="rv-pv">${R.files.map((f, i) => R.previews[i] ? `<button data-act="pv-zoom" data-i="${i}"><img src="${R.previews[i]}" alt=""></button>` : pvFile(f, i, 'pv-open')).join('')}</aside>
       <form class="form" data-form="review" id="rvform" novalidate>
-        ${R.n ? `<p class="note ${lowCount ? 'warn' : ''}">${icon(lowCount ? 'alert' : 'check', 15)}<span>${lowCount ? t('rv.check', { n: lowCount }) : t('rv.allGood')} ${t('rv.never')}</span></p>` : ''}
+        ${R.n ? `<p class="note ${lowCount ? 'warn' : ''}">${icon(lowCount ? 'alert' : 'check', 15)}<span>${lowCount ? t('rv.check', { n: lowCount }) : t('rv.allGood')} ${t('rv.never')}${R.model ? ` <small class="muted" dir="ltr">(${esc(R.model)})</small>` : ''}</span></p>` : ''}
         ${fieldGroups(R.v, { errors: R.errors, warnings: R.warnings, conf: R.n?.conf, notes: R.n?.notes })}
         <fieldset class="fgroup"><legend>${t('rv.saveTo')}</legend>${folderPicker(R.folder, R.aiFolder, 'rv')}</fieldset>${datalists()}
       </form></div>`,
@@ -1319,7 +1320,7 @@ function changeLang(l) {
 const uploadTarget = () => S.view === 'dash' ? S.sel : S.filters.customer || '';
 
 /* ================= actions ================= */
-const EDIT_ACTS = new Set(['upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
+const EDIT_ACTS = new Set(['upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
 const ACT = {
   go(el) { S.view = el.dataset.view; S.mobileDetail = false; closeSheet(); mount(); scrollTo({ top: 0, behavior: 'smooth' }); },
   'close-sheet': closeSheet,
@@ -1398,7 +1399,8 @@ const ACT = {
     if (!el.dataset.src) { if (!aiOn()) return toast(S.mode === 'local' ? t('ai.localOnly') : t('ai.off'), 'err'); return sourceSheet(files => aiNewFiles(files), { title: t('add.ai'), accept: DOC_ACCEPT }); }
     return aiNew(el.dataset.src);
   },
-  'ai-retry'() { if (R) aiNewFiles(R.files); },
+  'ai-retry'() { if (R) aiNewFiles(R.files); },   // same photos, nothing to pick again
+  'up-ai-retry'(el) { const it = U?.items[+el.closest('.up-row').dataset.i]; if (!it) return; it.ai = 'wait'; it.err = ''; drawUpload(); aiQueue(); },
   'ai-manual'() { if (!R) return; R.n = null; R.v = {}; reviewSheet(); },
   'pv-zoom'(el) { if (R) window.open(R.previews[+el.dataset.i], '_blank', 'noopener'); },
   'pv-open'(el) { if (R) window.open(objUrl(R.files[+el.dataset.i]), '_blank', 'noopener'); },
