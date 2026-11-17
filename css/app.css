@@ -714,3 +714,6 @@ img.fadein { animation: fade .5s ease both; }
   #storeChip .lbl { display: none; }
   #storeChip { padding: 0; width: 44px; }
 }
+
+/* file names that start with Latin/Thai text read correctly in Persian (RTL) */
+.tile b { unicode-bidi: plaintext; }

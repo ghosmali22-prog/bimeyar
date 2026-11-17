@@ -36,6 +36,8 @@ const setMode = m => { S.mode = m; try { localStorage.setItem('by_mode', m); } c
 const aiOn = () => !!S.store?.aiReady && canEdit();
 const initial = s => (String(s || '').trim()[0] || '?').toUpperCase();
 const FOLDER = Object.fromEntries(FOLDERS.map(f => [f.slot, f]));
+// keep folder and file names in their own direction inside Persian (RTL) text: "01_กรมธรรม์" must not flip
+const iso = s => '⁨' + s + '⁩';
 const dfmt = () => dateFmt() === 'be' ? 'be' : 'ce';
 
 const PROVINCES = 'กรุงเทพมหานคร กระบี่ กาญจนบุรี กาฬสินธุ์ กำแพงเพชร ขอนแก่น จันทบุรี ฉะเชิงเทรา ชลบุรี ชัยนาท ชัยภูมิ ชุมพร เชียงราย เชียงใหม่ ตรัง ตราด ตาก นครนายก นครปฐม นครพนม นครราชสีมา นครศรีธรรมราช นครสวรรค์ นนทบุรี นราธิวาส น่าน บึงกาฬ บุรีรัมย์ ปทุมธานี ประจวบคีรีขันธ์ ปราจีนบุรี ปัตตานี พระนครศรีอยุธยา พะเยา พังงา พัทลุง พิจิตร พิษณุโลก เพชรบุรี เพชรบูรณ์ แพร่ ภูเก็ต มหาสารคาม มุกดาหาร แม่ฮ่องสอน ยโสธร ยะลา ร้อยเอ็ด ระนอง ระยอง ราชบุรี ลพบุรี ลำปาง ลำพูน เลย ศรีสะเกษ สกลนคร สงขลา สตูล สมุทรปราการ สมุทรสงคราม สมุทรสาคร สระแก้ว สระบุรี สิงห์บุรี สุโขทัย สุพรรณบุรี สุราษฎร์ธานี สุรินทร์ หนองคาย หนองบัวลำภู อ่างทอง อำนาจเจริญ อุดรธานี อุตรดิตถ์ อุทัยธานี อุบลราชธานี'.split(' ');
@@ -449,7 +451,7 @@ function caseFile(c, mine) {
   const section = F => {
     const list = mine.filter(f => f.folder === F.slot);
     return `<section class="dsec" data-folder="${F.slot}">
-      <header class="dsec-h"><span class="fico">${icon(F.icon, 16)}</span><div><b>${F.th}</b><small>${t('fo.' + F.slot)}</small></div><em class="cnt">${num(list.length)}</em>
+      <header class="dsec-h"><span class="fico">${icon(F.icon, 16)}</span><div><b>${iso(F.th)}</b><small>${t('fo.' + F.slot)}</small></div><em class="cnt">${num(list.length)}</em>
         <button class="icon-btn glassy sm" data-act="add-file" data-folder="${F.slot}" data-need="edit" title="${t('btn.addFile')}">${icon('plus', 16)}</button></header>
       ${list.length ? `<div class="tiles">${list.map((f, i) => fileTile(f, i)).join('')}</div>` : ''}</section>`;
   };
@@ -725,7 +727,7 @@ async function saveCustomerForm(form) {
 function folderPicker(cur, aiSlot, name = 'folder', i = '') {
   return `<div class="fpick" role="radiogroup" aria-label="${t('fo.choose')}">${FOLDERS.map(F => `
     <button type="button" role="radio" aria-checked="${cur === F.slot}" class="${cur === F.slot ? 'on' : ''}" data-act="pick-folder" data-name="${name}" data-i="${i}" data-folder="${F.slot}">
-      <span class="fp-ico">${icon(F.icon, 18)}</span><b>${F.th}</b><small>${t('fo.' + F.slot)}</small>${aiSlot === F.slot ? `<em class="ai-tag">${icon('wand', 11)} AI</em>` : ''}</button>`).join('')}</div>`;
+      <span class="fp-ico">${icon(F.icon, 18)}</span><b>${iso(F.th)}</b><small>${t('fo.' + F.slot)}</small>${aiSlot === F.slot ? `<em class="ai-tag">${icon('wand', 11)} AI</em>` : ''}</button>`).join('')}</div>`;
 }
 const typeFor = (slot, docType) => slot === 'docs' ? (docType === 'id_card' ? 'id' : 'car') : FOLDER[slot]?.type || 'other';
 
@@ -795,7 +797,7 @@ function aiLine(it) {
   if (it.ai === 'wait' || it.ai === 'busy') return `<p class="ai-line busy"><span class="spin sm"></span>${t('ai.reading')}</p>`;
   if (it.ai === 'err') return `<p class="ai-line err">${icon('alert', 14)}${esc(it.err)} · ${t('ai.manual')}</p>`;
   const dt = it.n?.docType || 'other';
-  return `<p class="hint">${icon('sparkle', 13)} ${t('ai.found', { x: t('dt.' + dt) })}${it.aiFolder ? ` · ${t('ai.suggests', { x: FOLDER[it.aiFolder].th })}` : ''}</p>`;
+  return `<p class="hint">${icon('sparkle', 13)} ${t('ai.found', { x: t('dt.' + dt) })}${it.aiFolder ? ` · ${t('ai.suggests', { x: iso(FOLDER[it.aiFolder].th) })}` : ''}</p>`;
 }
 const fmtVal = (k, v) => !v ? '' : DATE_FIELDS.has(k) ? fmtDay(v) : v;
 function diffRows(list, attr) {
@@ -998,7 +1000,7 @@ async function openFile(id) {
   const inv = f.invoice ? S.invoices.find(i => i.id === f.id) : null;
   sheet({ title: esc(f.name), sub: `${esc(c.name)} · ${fmtSize(f.size)} · ${fmtDay(f.createdAt)}${by}`, cls: 'wide',
     body: `<div class="preview" id="preview"><div class="spin"></div></div>
-    <p class="in-folder">${t('fo.in')}: <b>${FOLDER[f.folder] ? FOLDER[f.folder].th : 'ไม่ระบุ · ' + t('fo.other')}</b></p>
+    <p class="in-folder">${t('fo.in')}: <b>${FOLDER[f.folder] ? iso(FOLDER[f.folder].th) : 'ไม่ระบุ · ' + t('fo.other')}</b></p>
     ${canEdit() && !inv ? `<details class="move" ${FOLDER[f.folder] ? '' : 'open'}><summary>${icon('move', 16)}${t('fo.move')}</summary>${folderPicker(f.folder, null, 'move')}<p class="muted">${t('fo.moveNote')}</p></details>` : ''}
     ${inv ? `<button class="btn ghost block" data-act="open-invoice" data-id="${esc(inv.id)}">${icon('invoice', 18)}<span>${t('inv.open')}</span></button>` : `
     <form class="form" data-form="file" id="fform" data-id="${esc(f.id)}">
@@ -1026,9 +1028,9 @@ async function openFile(id) {
 }
 async function moveCur(slot) {
   const f = cur?.f; if (!f || f.folder === slot) return;
-  if (!await confirmBox(t('fo.moveQ', { x: esc(f.name), y: FOLDER[slot].th }), t('fo.move'), false)) return;
+  if (!await confirmBox(t('fo.moveQ', { x: esc(f.name), y: iso(FOLDER[slot].th) }), t('fo.move'), false)) return;
   await S.store.moveFile(f.id, slot);
-  await reload(); toast(t('fo.moved', { x: FOLDER[slot].th }));
+  await reload(); toast(t('fo.moved', { x: iso(FOLDER[slot].th) }));
 }
 function download(blob, name) {
   const a = document.createElement('a'); a.href = objUrl(blob); a.download = name; document.body.append(a); a.click(); a.remove();
@@ -1158,7 +1160,7 @@ function invoiceSheet(id) {
       <div><small>${t('inv.total')}</small><b class="amt">${baht(inv.t?.total || 0)}</b></div>
       <div class="r">${invPill(inv.status)}${inv.status !== 'paid' ? `<small>${t('inv.bal')} ${baht(inv.t?.bal || 0)}</small>` : ''}</div></section>
       <div class="inv-pv-wrap"><div class="inv-pv">${invoiceHtml(inv, S.company || {}, dfmt())}</div></div>
-      ${local ? `<p class="note">${icon('info', 15)}<span>${t('inv.localNote')}</span></p>` : `<p class="muted">${t('inv.savedIn', { x: FOLDER.pay.th })}</p>`}`,
+      ${local ? `<p class="note">${icon('info', 15)}<span>${t('inv.localNote')}</span></p>` : `<p class="muted">${t('inv.savedIn', { x: iso(FOLDER.pay.th) })}</p>`}`,
     foot: `${c ? `<button class="icon-btn" data-act="open-customer" data-id="${esc(c.id)}" title="${t('inv.openCustomer')}">${icon('users', 17)}</button>` : ''}
       <button class="icon-btn" data-act="inv-edit" data-need="edit" data-id="${esc(id)}" title="${t('inv.editBtn')}">${icon('edit', 17)}</button>
       ${inv.status !== 'paid' ? `<button class="btn ghost" data-act="inv-paid" data-need="edit" data-id="${esc(id)}">${icon('check', 17)}<span>${t('inv.markPaid')}</span></button>` : ''}
@@ -1209,7 +1211,7 @@ async function pickLogo() {
 /* ---------- Drive folders for existing customers (admin): check first, then create ---------- */
 function migrateSheet() {
   sheet({ title: t('mig.title'), sub: t('mig.sub'), cls: 'wide', body: `<p class="note">${icon('info', 15)}<span>${t('mig.explain')}</span></p>
-    <ul class="mig-names">${FOLDERS.map(F => `<li><b>${F.th}</b><small>${t('fo.' + F.slot)}</small></li>`).join('')}</ul><div id="migOut"></div>`,
+    <ul class="mig-names">${FOLDERS.map(F => `<li><b>${iso(F.th)}</b><small>${t('fo.' + F.slot)}</small></li>`).join('')}</ul><div id="migOut"></div>`,
     foot: `<span class="sp"></span><button class="btn primary" data-act="mig-run" data-dry="1" id="migGo">${t('mig.dry')}</button>` });
 }
 async function migRun(dry, btn) {
