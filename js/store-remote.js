@@ -115,8 +115,8 @@ export class ApiStore {
   // Sub-folder migration (admin)
   migrate(dryRun, from) { return call('migrateFolders', { dryRun, from, limit: 40 }); }
 
-  // AI (editor+). Long timeout: reading a multi-page PDF can take a while.
-  aiExtract(files) { return call('aiExtract', { files }, null, 150000); }
+  // AI (editor+). The backend stops trying after about 125 s (retries + fallback models); 170 s leaves room for the upload.
+  aiExtract(files) { return call('aiExtract', { files }, null, 170000); }
 
   // Team / access (admin only)
   aclList() { return call('aclList'); }

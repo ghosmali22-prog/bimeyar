@@ -22,7 +22,7 @@ to a production system. Talk to the owner (Pejman) in Persian.
   Invoice numbers come from Script property `INV_SEQ` under `LockService` only.
   The root folder is tagged `appProperties.bimeyar = 'root'`. The company logo file is tagged `bimeyar = 'logo'`.
 - **AI**: Gemini is called only from the backend (`aiExtract`). The key is Script property `GEMINI_API_KEY`: never in the repo,
-  never in the frontend, never in logs. The model is `GEMINI_MODEL`. The AI never saves anything by itself: every value is shown
+  never in the frontend, never in logs. Models: `AI_MODELS` (tried in order, with retries on 429/5xx/timeouts inside a time budget; see `aiExtract`). The AI never saves anything by itself: every value is shown
   to the user first (review screen / "old → new" list). Log AI usage without customer data (`aiLog`).
 - **Login**: "Sign in with Google" (openid/email/profile only). The backend verifies the ID token on every
   request (audience = `CLIENT_ID`) and checks the access list.

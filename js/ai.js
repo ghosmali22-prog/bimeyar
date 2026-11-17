@@ -37,7 +37,8 @@ export async function prepare(files) {
   for (const f of files) {
     const isImg = /^image\/(jpeg|png|webp|heic|heif)$/i.test(f.type), isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
     if (!isImg && !isPdf) continue;
-    const blob = isImg ? await compressImage(f, 2000, 0.8) : f;
+    // AI copy only (the saved file is compressed separately): long side 1600 px, JPEG 0.8, so 2 photos stay well under 1 MB
+    const blob = isImg ? await compressImage(f, 1600, 0.8, 300 * 1024) : f;
     total += blob.size;
     if (total > MAX_AI_MB * 1048576) throw Object.assign(new Error('ai.tooBig'), { key: 'ai.tooBig' });
     out.push({ mime: isPdf ? 'application/pdf' : (blob.type || 'image/jpeg').toLowerCase(), data: await b64(blob) });
