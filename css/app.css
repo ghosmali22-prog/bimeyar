@@ -717,3 +717,10 @@ img.fadein { animation: fade .5s ease both; }
 
 /* file names that start with Latin/Thai text read correctly in Persian (RTL) */
 .tile b { unicode-bidi: plaintext; }
+
+/* AI waiting: elapsed time, and the "can take up to 3 minutes" hint after 20 s */
+.elapsed { font-variant-numeric: tabular-nums; font-weight: 600; opacity: .75; }
+.scan .slow-hint { display: none; color: #b96700; font-weight: 600; max-width: 360px; }
+.scan.slow .slow-hint { display: block; }
+.ai-line .slow-hint { display: none; flex-basis: 100%; color: #b96700; font-weight: 500; }
+.ai-line.slow .slow-hint { display: block; }
