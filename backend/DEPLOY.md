@@ -74,9 +74,17 @@ and in Apps Script → Executions.
 ## When Google AI is busy (503 / 429)
 
 `aiExtract` retries automatically (2 s, 5 s, … with jitter, up to 3 tries per model) and then falls back to the
-next model in `AI_MODELS` (`gemini-3.8-flash` → `gemini-3.6-flash` → `gemini-3.1-flash-lite`). It stops after
-about 110 s; the app then shows "Google AI is busy right now" with **Try again** and **Fill in by hand**
-(the chosen photos are kept).
+next model in `AI_MODELS` (`gemini-3.1-flash-lite` → `gemini-3.8-flash` → `gemini-3.6-flash`). A slow failure
+(over 20 s) switches model at once.
+
+Time limits: a busy Google can take minutes for one request and Apps Script cannot stop a request half-way, so new
+attempts only start in the first 45 s; the app waits 240 s and shows the elapsed time and "this can take up to
+3 minutes". When nothing works the app shows "Google AI is busy right now" with **Try again** and
+**Fill in by hand** (the chosen photos are kept).
+
+Results are kept 10 minutes in the script cache (CacheService), keyed by a hash of the files. If the app gave up
+waiting but Google answered later, **Try again** returns that result at once (`AI_LOG` status `cache`). If the first
+request is still running, the second one waits for it (`joined`) instead of asking Google again.
 
 To see which models answer right now: in the editor choose **`aiModelsCheck`** → Run. It sends one test sentence
 (no customer data) to each model and prints the status and time in the log.

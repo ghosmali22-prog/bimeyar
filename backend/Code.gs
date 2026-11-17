@@ -48,23 +48,28 @@ const SLOTS = SUBFOLDERS.map(s => s.slot);
  * (gemini-3.8-flash has no 'minimal'; the Flash-Lite models do). Low thinking = faster extraction.
  */
 const AI_MODELS = [
+  { id: 'gemini-3.1-flash-lite', think: 'minimal' },   // first: fast and available when the bigger models are busy
   { id: 'gemini-3.8-flash', think: 'low' },
   { id: 'gemini-3.6-flash', think: 'minimal' },
-  { id: 'gemini-3.1-flash-lite', think: 'minimal' },
 ];
 const GEMINI_MODEL = AI_MODELS[0].id;   // kept for older code and the setup log
 /** Retries per model on 429/500/503/504/timeout, and the wait before each retry (plus random jitter). */
 const AI_TRIES_PER_MODEL = 3;
 const AI_BACKOFF_MS = [2000, 5000, 10000];
 /**
- * Time limits for one aiExtract call. The app waits 170 s, Apps Script allows 6 min.
- * UrlFetchApp has no per-request timeout (a busy Google once took 90 s to answer 503), so a new attempt only
- * starts when at least AI_MIN_LEFT_MS (~ one slow request) is left: the last one starts before 65 s.
- * An attempt that failed slowly (AI_SLOW_MS) is not repeated on the same model: the next model is tried.
+ * Time limits for one aiExtract call. The app waits 240 s; Apps Script allows 6 min.
+ * UrlFetchApp has no per-request timeout and one busy request already took 175 s, so a new attempt only starts
+ * while at least AI_MIN_LEFT_MS of AI_BUDGET_MS is left, i.e. in the first 45 s: even a 180 s request then ends
+ * by ~225 s. A result that still arrives after the app gave up is kept in the cache (AI_CACHE_S), so "Try again"
+ * returns it at once. An attempt that failed slowly (AI_SLOW_MS) switches to the next model.
  */
-const AI_BUDGET_MS = 110000;
-const AI_MIN_LEFT_MS = 45000;
+const AI_BUDGET_MS = 200000;
+const AI_MIN_LEFT_MS = 155000;
 const AI_SLOW_MS = 20000;
+/** Successful results are kept 10 minutes in CacheService, keyed by a SHA-256 of the files (never logged). */
+const AI_CACHE_S = 600;
+/** While a request for the same files is still running, a second request waits for it (polls) up to this long. */
+const AI_JOIN_MS = 200000;
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/';
 const AI_MAX_BYTES = 18 * 1024 * 1024;
 
@@ -883,33 +888,68 @@ function aiExtract(req) {
   });
 
   const t0 = Date.now(), attempts = [];
+  const cache = CacheService.getScriptCache(), ck = aiCacheKey(files);
   let last = null;   // last error: { busy, code, msg }
+  let mine = false;  // this request runs the Gemini calls (and must clear the "running" mark)
   try {
+    // 1) same files read in the last 10 minutes (for example the app gave up waiting): answer at once
+    const hit = aiCached(cache, ck);
+    if (hit) { attempts.push({ model: hit.model, status: 'cache', ms: 0 }); return Object.assign(hit, { cached: true }); }
+    // 2) the same files are being read right now by an earlier request: wait for that result instead of asking Google again
+    if (cache.get(ck + ':run')) {
+      while (Date.now() - t0 < AI_JOIN_MS && cache.get(ck + ':run')) {
+        Utilities.sleep(3000);
+        const r = aiCached(cache, ck);
+        if (r) { attempts.push({ model: r.model, status: 'joined', ms: Date.now() - t0 }); return Object.assign(r, { cached: true }); }
+      }
+      const r = aiCached(cache, ck);
+      if (r) { attempts.push({ model: r.model, status: 'joined', ms: Date.now() - t0 }); return Object.assign(r, { cached: true }); }
+      if (Date.now() - t0 >= AI_JOIN_MS - 5000) throw err('ai_busy', 'Google AI is busy right now');
+    }
+    // 3) ask Gemini; the clock for new attempts starts now
+    cache.put(ck + ':run', '1', 360);
+    mine = true;
+    const t1 = Date.now();
+    const left = () => AI_BUDGET_MS - (Date.now() - t1);
     for (const m of AI_MODELS) {
       const payload = payloadFor(m);
       for (let i = 0; i < AI_TRIES_PER_MODEL; i++) {
         if (i > 0) {
           const wait = Math.round(AI_BACKOFF_MS[Math.min(i - 1, AI_BACKOFF_MS.length - 1)] * (0.7 + Math.random() * 0.6));   // jitter
-          if (AI_BUDGET_MS - (Date.now() - t0) - wait < AI_MIN_LEFT_MS) break;
+          if (left() - wait < AI_MIN_LEFT_MS) break;
           Utilities.sleep(wait);
         }
-        if (AI_BUDGET_MS - (Date.now() - t0) < AI_MIN_LEFT_MS) break;
+        if (left() < AI_MIN_LEFT_MS) break;
         const r = aiAttempt(m, payload, key);
         attempts.push({ model: m.id, status: r.status, ms: r.ms, tokens: r.tokens || 0 });
-        if (r.out) return { docType: r.out.docType || 'other', fields: r.out.fields || {}, model: m.id, tries: attempts.length };
+        if (r.out) {
+          const res = { docType: r.out.docType || 'other', fields: r.out.fields || {}, model: m.id, tries: attempts.length };
+          try { cache.put(ck + ':res', JSON.stringify(res), AI_CACHE_S); } catch (e) { }   // kept even if the app stopped waiting
+          return res;
+        }
         last = r;
         if (r.fatal) throw err(r.fatal, r.msg);   // bad key: no other model will work either
         if (!r.retry) break;                      // this model refused the request: try the next model
         if (r.ms > AI_SLOW_MS) break;             // overloaded and slow: switch model instead of waiting again
       }
-      if (AI_BUDGET_MS - (Date.now() - t0) < AI_MIN_LEFT_MS) break;
+      if (left() < AI_MIN_LEFT_MS) break;
     }
     if (last && last.busy) throw err('ai_busy', 'Google AI is busy right now');
     throw err('ai_error', (last && last.msg) || 'The AI could not read this document');
   } finally {
+    if (mine) try { cache.remove(ck + ':run'); } catch (e) { }
     const base = { at: new Date().toISOString(), files: files.length, kb: Math.round(bytes / 1024) };
     aiLog(attempts.map((a, i) => Object.assign({}, base, a, { try: i + 1, of: attempts.length, totalMs: Date.now() - t0 })));
   }
+}
+
+/** Cache key for a set of files: SHA-256 of their types and contents (the hash is not logged). */
+function aiCacheKey(files) {
+  const d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, files.map(f => f.mime + ':' + f.data).join('|'));
+  return 'ai1_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');
+}
+function aiCached(cache, ck) {
+  try { const v = cache.get(ck + ':res'); return v ? JSON.parse(v) : null; } catch (e) { return null; }
 }
 
 /**
