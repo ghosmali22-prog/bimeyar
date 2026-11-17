@@ -67,5 +67,16 @@ phone, tax ID, bank details, footer note, and the invoice number prefix (`RI` �
 
 ## AI usage log
 
-Every AI call is logged without any customer data (time, duration, size, tokens, result) in the Script property
-`AI_LOG` (last 200 calls) and in Apps Script → Executions.
+Every AI **attempt** is logged without any customer data (time, model, status such as `ok` / `http503` /
+`timeout`, ms, size, tokens, try number) in the Script property `AI_LOG` (newest entries, trimmed to fit 9 KB)
+and in Apps Script → Executions.
+
+## When Google AI is busy (503 / 429)
+
+`aiExtract` retries automatically (2 s, 5 s, … with jitter, up to 3 tries per model) and then falls back to the
+next model in `AI_MODELS` (`gemini-3.8-flash` → `gemini-3.6-flash` → `gemini-3.1-flash-lite`). It stops after
+about 110 s; the app then shows "Google AI is busy right now" with **Try again** and **Fill in by hand**
+(the chosen photos are kept).
+
+To see which models answer right now: in the editor choose **`aiModelsCheck`** → Run. It sends one test sentence
+(no customer data) to each model and prints the status and time in the log.
