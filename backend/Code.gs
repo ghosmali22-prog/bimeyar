@@ -23,6 +23,15 @@
  *   INV_SEQ         last invoice number per year (set automatically, under a lock)
  *   AI_LOG          last 200 AI calls: time, ms, size, tokens, result. No customer data.
  *   RENAME_LAST     id of the last batch of the "Rename files" tool, for "Undo last rename" (admin)
+ *   MOVE_LAST       id of the last batch of the "Move to new folders" tool (v4), for "Undo last move" (admin)
+ *
+ * v4 folders (per vehicle), all found by their tags (appProperties), never by name:
+ *   customer folder
+ *   └── month   { bimeyar: 'month', year: '2026', month: '07' }            "07 July 2026" (month of the contract date)
+ *       └── plate { bimeyar: 'vehicle', plate, year, month }               "70-5416"; the vehicle's data is JSON in its description
+ *           ├── 1 … 4, 5   { bimeyar: 'slot', slot: '1' … '5' }            see VSLOTS
+ *           └── 5 ─ 5.1 … 5.5 { bimeyar: 'slot', slot: '5.1' … '5.5' }    files go only into 1–4 and 5.1–5.5, never into 5
+ * The v3 sub-folders (01_… 04_) and v2 files directly in the customer folder keep working as before.
  *   DEVICE_SESSIONS device sign-ins (v3.3): { sid: { h: SHA-256 of the secret, e: email, n: device name,
  *                   c: created, u: last used, x: expires (ms), f: wrong attempts } }. The secret itself is never stored.
  */
@@ -55,6 +64,32 @@ const SUBFOLDERS = [
   { slot: 'pay', name: '04_หลักฐานการชำระเงิน' },      // payment receipts + invoices
 ];
 const SLOTS = SUBFOLDERS.map(s => s.slot);
+
+/**
+ * v4: the folders inside every plate folder. Found by `slot`, never by name; must match VSLOTS in js/vehicles.js.
+ * `in` = the folder it sits in (5.1–5.5 are inside 5). Created in this order, so 5 exists before 5.1.
+ */
+const VSLOTS = [
+  { slot: '1', name: '1. กรมธรรม์รถยนต์' },
+  { slot: '2', name: '2. กรมธรรม์ขนส่งสินค้า' },
+  { slot: '3', name: '3. พรบ.' },
+  { slot: '4', name: '4. ใบวางบิล/ใบเสนอราคา' },
+  { slot: '5', name: '5. เอกสารตัวรถยนต์' },
+  { slot: '5.1', name: '5.1 สำเนาทะเบียนรถ', in: '5' },
+  { slot: '5.2', name: '5.2 สำเนากรมธรรม์เดิม', in: '5' },
+  { slot: '5.3', name: '5.3 รูปรถ', in: '5' },
+  { slot: '5.4', name: '5.4 หลักฐานการโอนเงิน', in: '5' },
+  { slot: '5.5', name: '5.5 หนังสือแต่งตั้ง/หนังสือรับรองบริษัท', in: '5' },
+];
+/** Folders that can hold files (never "5" itself) */
+const VFILE_SLOTS = ['1', '2', '3', '4', '5.1', '5.2', '5.3', '5.4', '5.5'];
+const MONTHS_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+/** Vehicle fields (v4), stored as JSON in the description of the plate folder. All optional except the plate. */
+const VFIELDS = {
+  plate: 40, province: 60, brand: 40, model: 60, year: 4, color: 30, body: 60, vin: 40, engineNo: 40,
+  insurer: 80, policyNo: 60, policyType: 60, coverage: 20, premium: 20,
+  contractDate: 'date', policyStart: 'date', policyExpiry: 'date', note: 500,
+};
 
 /**
  * Gemini models for reading documents, tried in this order (change here only).
@@ -133,7 +168,7 @@ function doPost(e) {
 /* ============================ actions ============================ */
 
 const ACTIONS = {
-  me: { need: 'viewer', run: (req, user, role) => ({ email: user.email, name: user.name, role, owner: ownerEmail() === user.email, root: role === 'admin' ? rootId() : '', ai: !!aiKey(), v: 3, dev: !!user.sid }) },
+  me: { need: 'viewer', run: (req, user, role) => ({ email: user.email, name: user.name, role, owner: ownerEmail() === user.email, root: role === 'admin' ? rootId() : '', ai: !!aiKey(), v: 4, dev: !!user.sid }) },
 
   /* ---------- device sign-in (v3.3) ---------- */
   // Only with a Google ID token. Returns the secret once; only its SHA-256 is stored.
@@ -182,8 +217,8 @@ const ACTIONS = {
     need: 'viewer',
     run: (req, user, role) => {
       const root = rootId();
-      const all = listAll("appProperties has { key='bimeyar' and value='item' } and trashed=false");
-      const subs = listAll("appProperties has { key='bimeyar' and value='sub' } and trashed=false");
+      const all = listAll(tagQuery('item'));
+      const subs = listAll(tagQuery('sub'));
       const customers = all.filter(f => f.mimeType === FOLDER && (f.parents || []).indexOf(root) >= 0).map(toCustomer);
       const ids = {};
       customers.forEach(c => { ids[c.id] = c; c.folders = {}; });
@@ -192,18 +227,20 @@ const ACTIONS = {
         const cid = (s.parents || [])[0], slot = (s.appProperties || {}).slot;
         if (ids[cid] && SLOTS.indexOf(slot) >= 0) { subOf[s.id] = { customer: cid, slot }; ids[cid].folders[slot] = s.id; }
       });
+      const tree = vehicleTree(ids);   // v4: customer -> month -> plate -> 5 folders
       const files = [], invoices = [];
       all.forEach(f => {
         if (f.mimeType === FOLDER) return;
         const p = (f.parents || [])[0];
-        let cid = '', slot = '';
-        if (ids[p]) cid = p; else if (subOf[p]) { cid = subOf[p].customer; slot = subOf[p].slot; }
-        if (!cid) return;
-        const x = toFile(f, cid, slot);
+        let x = null;
+        if (ids[p]) x = toFile(f, p, '');
+        else if (subOf[p]) x = toFile(f, subOf[p].customer, subOf[p].slot);
+        else if (tree.slotOf[p] && tree.slotOf[p].slot !== '5') x = toFile(f, tree.slotOf[p].v.customerId, '', tree.slotOf[p].v.id, tree.slotOf[p].slot);
+        if (!x) return;
         files.push(x);
-        if (x.invoice) invoices.push(toInvoice(f, cid));
+        if (x.invoice) invoices.push(toInvoice(f, x.customerId));
       });
-      const out = { customers, files, invoices };
+      const out = { customers, files, invoices, vehicles: tree.vehicles, v: 4 };
       if (role === 'admin') {
         try { const q = Drive.About.get({ fields: 'storageQuota' }).storageQuota; out.quota = { used: +q.usage || 0, limit: +q.limit || 0 }; } catch (err) { }
       }
@@ -239,9 +276,57 @@ const ACTIONS = {
         appProperties: { bimeyar: 'item', kind: 'customer', by: user.email.slice(0, 100) },
       }, null, { fields: FIELDS });
       const out = toCustomer(f);
-      out.folders = ensureSubs(f.id, false).folders;
+      out.folders = {};   // v4: folders are made per vehicle (saveVehicle), not the 4 old v3 folders
       return out;
     },
+  },
+
+  /* ---------- vehicles (v4) ---------- */
+  /**
+   * Adds or changes a vehicle. Its data is JSON in the description of its plate folder and is MERGED:
+   * fields not sent keep their old value. A new vehicle gets its month folder (contract date, else policy start,
+   * else today; or `ym` when the user chose the month) and plate folder with the 5 folders + 5.1–5.5.
+   * The same plate in the same month is the same vehicle: its data is merged, nothing is made twice.
+   */
+  saveVehicle: {
+    need: 'editor',
+    run: (req, user) => {
+      const v = req.vehicle || {};
+      const fields = vehicleFields(v);
+      if (v.id) {
+        const own = assertVehicle(v.id);
+        const cur = Drive.Files.get(v.id, { fields: 'id,name,description' });
+        const d = vehicleMerge(parseObj(cur.description), fields, user, true);
+        const res = { description: JSON.stringify(d) };
+        // the plate was corrected: the plate folder follows (only this folder's name and tag change)
+        if (fileName(d.plate) !== cur.name) { res.name = fileName(d.plate); res.appProperties = { plate: tagVal(d.plate) }; }
+        const f = Drive.Files.update(res, v.id, null, { fields: FIELDS });
+        return toVehicle(f, own.customer, own.ym, vehicleSlots(v.id, true));
+      }
+      assertCustomer(v.customerId);
+      const first = vehicleMerge({}, fields, user, false);   // checks the plate and the dates
+      const ym = ymOk(v.ym) || ymOf(first);
+      const hit = withLock(() => {
+        const mid = monthFolder(v.customerId, ym, true);
+        const same = childFolders(mid).filter(k => tagOf(k, 'bimeyar') === 'vehicle' && plateKey(tagOf(k, 'plate') || k.name) === plateKey(first.plate))[0];
+        if (same) return { id: same.id, merge: true };
+        return { id: Drive.Files.create({
+          name: fileName(first.plate), mimeType: FOLDER, parents: [mid], description: JSON.stringify(first),
+          appProperties: { bimeyar: 'vehicle', plate: tagVal(first.plate), year: ym.slice(0, 4), month: ym.slice(5, 7) },
+        }, null, { fields: 'id' }).id };
+      });
+      if (hit.merge) {
+        const cur = Drive.Files.get(hit.id, { fields: 'description' });
+        Drive.Files.update({ description: JSON.stringify(vehicleMerge(parseObj(cur.description), fields, user, true)) }, hit.id);
+      }
+      const slots = vehicleSlots(hit.id, true);
+      return toVehicle(Drive.Files.get(hit.id, { fields: FIELDS }), v.customerId, ym, slots);
+    },
+  },
+  /** Removes a vehicle: its plate folder goes to the Drive trash (with its files, restorable for 30 days). */
+  deleteVehicle: {
+    need: 'editor',
+    run: req => { assertVehicle(req.id); Drive.Files.update({ trashed: true }, req.id); return true; },
   },
 
   deleteCustomer: {
@@ -261,9 +346,16 @@ const ACTIONS = {
       let name = fileName(m.name) || fileName(orig) || 'file';
       if (!extOf(name) && extOf(orig)) name = fileName(name + extOf(orig));
       const mime = clean(m.mime, 120) || 'application/octet-stream';
-      // New in v3: a sub-folder slot. Without one (old clients) the file goes into the customer folder, as before.
-      let parent = m.customerId;
-      if (m.folder) {
+      // v4: a vehicle + one of its folders (1–4, 5.1–5.5). v3: a sub-folder slot.
+      // Without either (old clients) the file goes into the customer folder, as before.
+      let parent = m.customerId, own = { customer: m.customerId, slot: m.folder || '' };
+      if (m.vehicleId) {
+        const v = assertVehicle(m.vehicleId);
+        if (v.customer !== m.customerId) throw err('bad_request', 'This vehicle belongs to another customer');
+        if (VFILE_SLOTS.indexOf(m.slot) < 0) throw err('bad_request', 'Unknown folder');
+        parent = vehicleSlots(v.id, true)[m.slot];
+        own = { customer: m.customerId, slot: '', vehicle: v.id, vslot: m.slot };
+      } else if (m.folder) {
         if (SLOTS.indexOf(m.folder) < 0) throw err('bad_request', 'Unknown folder');
         parent = ensureSubs(m.customerId, false).folders[m.folder];
       }
@@ -276,7 +368,7 @@ const ACTIONS = {
           by: user.email.slice(0, 100), at: new Date().toISOString(),
         },
       }, blob, { fields: FIELDS });
-      return toFile(settleName(f0, parent), m.customerId, m.folder || '');
+      return toFileOf(settleName(f0, parent), own);
     },
   },
 
@@ -292,22 +384,35 @@ const ACTIONS = {
       if (!(m.appProperties && m.appProperties.kind === 'invoice')) {
         res.description = descJoin(clean(f.note, 2000), descSplit(Drive.Files.get(f.id, { fields: 'description' }).description).meta);
       }
-      return toFile(Drive.Files.update(res, f.id, null, { fields: FIELDS }), own.customer, own.slot);
+      return toFileOf(Drive.Files.update(res, f.id, null, { fields: FIELDS }), own);
     },
   },
 
-  /** Moves a file into one of the 4 sub-folders of ITS OWN customer. Nothing else is changed. */
+  /**
+   * Moves ONE file (the user confirmed it) into a folder of ITS OWN customer: a vehicle folder (v4: vehicleId + slot)
+   * or one of the 4 v3 sub-folders (folder). Nothing else is changed.
+   */
   moveFile: {
     need: 'editor',
     run: req => {
       const m = assertFile(req.id);
-      if (SLOTS.indexOf(req.folder) < 0) throw err('bad_request', 'Unknown folder');
       const own = ownerOf(m);
-      const target = ensureSubs(own.customer, false).folders[req.folder];
+      let target, to;
+      if (req.vehicleId) {
+        const v = assertVehicle(req.vehicleId);
+        if (v.customer !== own.customer) throw err('bad_request', 'This vehicle belongs to another customer');
+        if (VFILE_SLOTS.indexOf(req.slot) < 0) throw err('bad_request', 'Unknown folder');
+        target = vehicleSlots(v.id, true)[req.slot];
+        to = { customer: own.customer, slot: '', vehicle: v.id, vslot: req.slot };
+      } else {
+        if (SLOTS.indexOf(req.folder) < 0) throw err('bad_request', 'Unknown folder');
+        target = ensureSubs(own.customer, false).folders[req.folder];
+        to = { customer: own.customer, slot: req.folder };
+      }
       const from = (m.parents || [])[0];
-      if (from === target) return toFile(Drive.Files.get(req.id, { fields: FIELDS }), own.customer, req.folder);
+      if (from === target) return toFileOf(Drive.Files.get(req.id, { fields: FIELDS }), to);
       const f = Drive.Files.update({}, req.id, null, { addParents: target, removeParents: from, fields: FIELDS });
-      return toFile(f, own.customer, req.folder);
+      return toFileOf(f, to);
     },
   },
 
@@ -330,7 +435,7 @@ const ACTIONS = {
       if (!anyone.length) Drive.Permissions.create({ type: 'anyone', role: 'reader', allowFileDiscovery: false }, req.id);
       anyone.forEach(p => { if (p.role !== 'reader') Drive.Permissions.update({ role: 'reader' }, req.id, p.id); });   // viewer only
       const f = Drive.Files.update({ appProperties: { link: '1' } }, req.id, null, { fields: FIELDS + ',webViewLink' });
-      return { file: toFile(f, own.customer, own.slot), link: f.webViewLink || ('https://drive.google.com/file/d/' + req.id + '/view?usp=sharing') };
+      return { file: toFileOf(f, own), link: f.webViewLink || ('https://drive.google.com/file/d/' + req.id + '/view?usp=sharing') };
     },
   },
   /** Makes the file private again: removes only the "anyone with the link" permission. */
@@ -341,7 +446,7 @@ const ACTIONS = {
       const perms = Drive.Permissions.list(req.id, { fields: 'permissions(id,type)' }).permissions || [];
       perms.filter(p => p.type === 'anyone').forEach(p => Drive.Permissions.remove(req.id, p.id));
       const f = Drive.Files.update({ appProperties: { link: null } }, req.id, null, { fields: FIELDS });
-      return toFile(f, own.customer, own.slot);
+      return toFileOf(f, own);
     },
   },
 
@@ -399,6 +504,72 @@ const ACTIONS = {
       }
       if (list.length >= 200) out.more = true;
       return out;
+    },
+  },
+
+  /* ---------- move existing files into the v4 folders (admin, one-time tool, v4) ---------- */
+  /**
+   * The ONLY place where many files are moved (CLAUDE.md rule 7). Each file is MOVED into a folder of a vehicle of
+   * ITS OWN customer: never deleted, never copied, its content never changed. A new name is given only when the
+   * app sends one (files that do not follow the name pattern yet); invoices keep their name.
+   * The old folder is written in the description ("Moved from: …") and kept in appProperties (mvf / mvt / mvb),
+   * so "Undo last move" can put every file back. Small batches: at most 25 files and ~200 s per request.
+   */
+  moveNew: {
+    need: 'admin',
+    run: req => {
+      const batch = String(req.batch || '');
+      if (!/^[\w-]{6,40}$/.test(batch)) throw err('bad_request', 'Bad batch id');
+      const t0 = Date.now();
+      const rows = (Array.isArray(req.items) ? req.items : []).slice(0, 25).map(it => {
+        const id = String((it && it.id) || '');
+        if (Date.now() - t0 > 200000) return { id, status: 'later' };
+        try { return moveOne(id, it, batch); } catch (e) { return { id, status: 'error', msg: String(e.message || e) }; }
+      });
+      if (rows.some(r => r.status === 'ok')) PropertiesService.getScriptProperties().setProperty('MOVE_LAST', batch);
+      return { rows };
+    },
+  },
+  /** Puts the files of the last move batch back into their old folder (and their old name). */
+  moveUndo: {
+    need: 'admin',
+    run: () => {
+      const batch = PropertiesService.getScriptProperties().getProperty('MOVE_LAST') || '';
+      const out = { done: 0, skipped: 0, more: false };
+      if (!/^[\w-]{6,40}$/.test(batch)) return out;
+      const list = Drive.Files.list({ q: "appProperties has { key='mvb' and value='" + batch + "' } and trashed=false", fields: 'files(id)', pageSize: 200, spaces: 'drive' }).files || [];
+      const t0 = Date.now();
+      for (const x of list) {
+        if (Date.now() - t0 > 200000) { out.more = true; break; }
+        try { if (undoMoveOne(x.id)) out.done++; else out.skipped++; } catch (e) { out.skipped++; }
+      }
+      if (list.length >= 200) out.more = true;
+      return out;
+    },
+  },
+  /**
+   * The v3 folders (01_… 04_) with the number of items still inside, so the owner can delete the empty ones
+   * by hand in Drive. This action only reads: it never deletes anything.
+   */
+  oldFolders: {
+    need: 'admin',
+    run: () => {
+      const root = rootId();
+      const names = {};
+      listAll("'" + root + "' in parents and mimeType='" + FOLDER + "' and trashed=false").forEach(c => { names[c.id] = c.name; });
+      const subs = listAll(tagQuery('sub')).filter(s => names[(s.parents || [])[0]]);
+      const used = {};
+      for (let i = 0; i < subs.length; i += 40) {
+        const q = '(' + subs.slice(i, i + 40).map(s => "'" + s.id + "' in parents").join(' or ') + ') and trashed=false';
+        let page;
+        do {
+          const r = Drive.Files.list({ q, fields: 'nextPageToken,files(id,parents)', pageSize: 1000, pageToken: page, spaces: 'drive' });
+          (r.files || []).forEach(f => (f.parents || []).forEach(p => { used[p] = (used[p] || 0) + 1; }));
+          page = r.nextPageToken;
+        } while (page);
+      }
+      return subs.map(s => ({ id: s.id, name: s.name, customerId: s.parents[0], customer: names[s.parents[0]], items: used[s.id] || 0 }))
+        .sort((a, b) => String(a.customer).localeCompare(String(b.customer)) || a.name.localeCompare(b.name));
     },
   },
 
@@ -499,8 +670,15 @@ const ACTIONS = {
       // Number is taken under a lock, so two people can never get the same number.
       inv.no = withLock(() => nextInvoiceNo(inv.issue));
       inv.createdBy = user.email; inv.createdAt = new Date().toISOString();
+      // v4: into "4. ใบวางบิล/ใบเสนอราคา" of the vehicle; without a vehicle (old clients) into the v3 payment folder
+      let folder;
+      if (inv.vehicleId) {
+        const v = assertVehicle(inv.vehicleId);
+        if (v.customer !== inv.customerId) throw err('bad_request', 'This vehicle belongs to another customer');
+        folder = vehicleSlots(v.id, true)['4'];
+      }
       const pdf = invoicePdf(inv, req.dateFmt);
-      const folder = ensureSubs(inv.customerId, false).folders.pay;
+      if (!folder) folder = ensureSubs(inv.customerId, false).folders.pay;
       const f = Drive.Files.create({
         name: inv.no + '.pdf', mimeType: 'application/pdf', parents: [folder], description: JSON.stringify(inv),
         appProperties: invoiceProps(inv, user),
@@ -701,18 +879,250 @@ function assertFile(id) {
   ownerOf(f);
   return f;
 }
-/** Returns { customer, slot } for a file's parent, or throws if it is not inside a customer folder. */
+/**
+ * Returns { customer, slot, vehicle?, vslot? } for a file's parent, or throws if it is not inside a customer folder.
+ * The parent may be: the customer folder (v2), a v3 sub-folder, or (v4) folder 1–4 of a plate folder or 5.1–5.5
+ * inside its folder 5. Every step up must have the right tag and must not be in the trash, and the chain must end
+ * at a customer folder inside the root folder; anything else is refused.
+ */
 function ownerOf(f) {
   const p = (f.parents || [])[0];
   const pm = meta(p);
-  if (pm.appProperties && pm.appProperties.bimeyar === 'sub') {
+  const kind = tagOf(pm, 'bimeyar');
+  if (kind === 'sub') {
     const cid = (pm.parents || [])[0];
     assertCustomer(cid);
     if (pm.trashed) throw err('not_found', 'File not found');
     return { customer: cid, slot: pm.appProperties.slot || '' };
   }
+  if (kind === 'slot') {
+    const slot = tagOf(pm, 'slot');
+    if (pm.trashed || pm.mimeType !== FOLDER) throw err('not_found', 'File not found');
+    let up = meta((pm.parents || [])[0]);
+    if (/^5\.[1-5]$/.test(slot)) {
+      if (up.trashed || up.mimeType !== FOLDER || tagOf(up, 'bimeyar') !== 'slot' || tagOf(up, 'slot') !== '5') throw err('not_found', 'File not found');
+      up = meta((up.parents || [])[0]);
+    } else if (!/^[1-4]$/.test(slot)) throw err('not_found', 'File not found');   // never directly in folder 5
+    const v = assertVehicle(up.id);
+    return { customer: v.customer, slot: '', vehicle: v.id, vslot: slot };
+  }
   assertCustomer(p);
   return { customer: p, slot: '' };
+}
+
+/* ============================ vehicles and their folders (v4) ============================ */
+
+const tagOf = (f, k) => ((f && f.appProperties) || {})[k] || '';
+function tagQuery(v) { return "appProperties has { key='bimeyar' and value='" + v + "' } and trashed=false"; }
+function parseObj(s) { try { const o = JSON.parse(s || '{}'); return o && typeof o === 'object' && !Array.isArray(o) ? o : {}; } catch (e) { return {}; } }
+
+/** A plate folder inside a month folder inside a customer folder (all not trashed). Returns { id, month, customer, ym }. */
+function assertVehicle(id) {
+  if (!id || !/^[\w-]{10,}$/.test(String(id))) throw err('bad_request', 'Missing vehicle');
+  const v = meta(id);
+  if (v.trashed || v.mimeType !== FOLDER || tagOf(v, 'bimeyar') !== 'vehicle') throw err('not_found', 'Vehicle not found');
+  const mo = meta((v.parents || [])[0]);
+  if (mo.trashed || mo.mimeType !== FOLDER || tagOf(mo, 'bimeyar') !== 'month') throw err('not_found', 'Vehicle not found');
+  const cid = (mo.parents || [])[0];
+  assertCustomer(cid);
+  return { id: v.id, month: mo.id, customer: cid, ym: tagOf(mo, 'year') + '-' + tagOf(mo, 'month') };
+}
+
+/** "2026-07" when it is a real month, else '' */
+function ymOk(ym) {
+  const m = String(ym || '').match(/^(\d{4})-(\d{2})$/);
+  return m && +m[1] >= 1990 && +m[1] <= 2200 && +m[2] >= 1 && +m[2] <= 12 ? m[0] : '';
+}
+/** Month of a vehicle's folder: contract date, else policy start, else this month (Bangkok). */
+function ymOf(d) {
+  const x = d.contractDate || d.policyStart;
+  return x ? x.slice(0, 7) : Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM');
+}
+/** "07 July 2026": the number is only for sorting in Drive */
+function monthLabel(ym) { return ym.slice(5, 7) + ' ' + MONTHS_EN[+ym.slice(5, 7) - 1] + ' ' + ym.slice(0, 4); }
+/** A Buddhist-year date (2400+) as CE, the same rule as beToCe in js/validate.js */
+function ceDate(d) { if (!d) return ''; const y = +d.slice(0, 4); return y > 2400 ? date((y - 543) + d.slice(4)) : d; }
+/** Plates compared without province, spaces, dots, dashes and case; Thai digits as 0-9 */
+function plateKey(p) {
+  return String(p || '').replace(/[๐-๙]/g, ch => String(ch.charCodeAt(0) - 0x0E50))
+    .replace(/([0-9])[\s.,]*[฀-๿][฀-๿.\s]*$/, '$1')   // a province after the number ("70-5416 นศ")
+    .replace(/[\s.\-]/g, '').toLowerCase();
+}
+/** appProperties allow at most 124 bytes for key + value: keep the value under 100 bytes (UTF-8) */
+function tagVal(s) {
+  s = String(s || '');
+  const bytes = x => encodeURIComponent(x).replace(/%[0-9A-F]{2}/gi, 'x').length;
+  while (s && bytes(s) > 100) s = s.slice(0, -1);
+  return s;
+}
+function childFolders(pid) {
+  return Drive.Files.list({ q: "'" + pid + "' in parents and mimeType='" + FOLDER + "' and trashed=false", fields: 'files(id,name,appProperties)', pageSize: 1000, spaces: 'drive' }).files || [];
+}
+
+/** Only the vehicle fields present in the request, cleaned ('' = clear that field). */
+function vehicleFields(v) {
+  const out = {};
+  Object.keys(VFIELDS).forEach(k => {
+    if (!Object.prototype.hasOwnProperty.call(v, k)) return;
+    out[k] = VFIELDS[k] === 'date' ? ceDate(date(v[k])) : k === 'plate' ? fileName(clean(v[k], 40)) : clean(v[k], VFIELDS[k]);
+  });
+  return out;
+}
+/** MERGE: old keys stay (also unknown ones), sent fields replace them, an empty sent field is removed. */
+function vehicleMerge(old, fields, user, update) {
+  const d = Object.assign({}, old);
+  Object.keys(fields).forEach(k => { if (fields[k]) d[k] = fields[k]; else delete d[k]; });
+  if (!d.plate) throw err('bad_request', 'Plate is required');
+  if (d.policyStart && d.policyExpiry && d.policyExpiry <= d.policyStart) throw err('bad_request', 'Expiry must be after start');
+  d.by = old.by || user.email;
+  if (update) d.updBy = user.email;
+  return d;
+}
+
+/** The month folder of a customer (by its tags). create: make it when missing (call inside the lock). */
+function monthFolder(customerId, ym, create) {
+  const y = ym.slice(0, 4), m = ym.slice(5, 7);
+  const hit = (Drive.Files.list({
+    q: "'" + customerId + "' in parents and mimeType='" + FOLDER + "' and trashed=false and appProperties has { key='bimeyar' and value='month' } and appProperties has { key='year' and value='" + y + "' } and appProperties has { key='month' and value='" + m + "' }",
+    fields: 'files(id)', spaces: 'drive',
+  }).files || [])[0];
+  if (hit || !create) return hit ? hit.id : '';
+  return Drive.Files.create({ name: monthLabel(ym), mimeType: FOLDER, parents: [customerId], appProperties: { bimeyar: 'month', year: y, month: m } }, null, { fields: 'id' }).id;
+}
+
+/**
+ * { '1': id, …, '5': id, '5.1': id, … } of a plate folder. create: the missing ones are made (inside the lock,
+ * checked again there, so two uploads at once never make a folder twice). Only creates, never moves or deletes.
+ */
+function vehicleSlots(vid, create) {
+  const read = () => {
+    const out = {};
+    childFolders(vid).forEach(k => { const s = tagOf(k, 'slot'); if (tagOf(k, 'bimeyar') === 'slot' && /^[1-5]$/.test(s) && !out[s]) out[s] = k.id; });
+    if (out['5']) childFolders(out['5']).forEach(k => { const s = tagOf(k, 'slot'); if (tagOf(k, 'bimeyar') === 'slot' && /^5\.[1-5]$/.test(s) && !out[s]) out[s] = k.id; });
+    return out;
+  };
+  let out = read();
+  if (!create || VSLOTS.every(s => out[s.slot])) return out;
+  return withLock(() => {
+    out = read();
+    VSLOTS.forEach(s => {
+      if (out[s.slot]) return;
+      out[s.slot] = Drive.Files.create({ name: s.name, mimeType: FOLDER, parents: [s.in ? out[s.in] : vid], appProperties: { bimeyar: 'slot', slot: s.slot } }, null, { fields: 'id' }).id;
+    });
+    return out;
+  });
+}
+
+/** All vehicles of the given customers ({ id: customer }), and which folder belongs to which vehicle. */
+function vehicleTree(ids) {
+  const monthOf = {}, vehOf = {}, slotOf = {}, vehicles = [];
+  listAll(tagQuery('month')).forEach(m => {
+    const cid = (m.parents || [])[0];
+    if (ids[cid] && m.mimeType === FOLDER) monthOf[m.id] = { customer: cid, ym: tagOf(m, 'year') + '-' + tagOf(m, 'month') };
+  });
+  listAll(tagQuery('vehicle')).forEach(f => {
+    const mo = monthOf[(f.parents || [])[0]];
+    if (!mo || f.mimeType !== FOLDER) return;
+    const v = toVehicle(f, mo.customer, mo.ym, {});
+    vehOf[f.id] = v; vehicles.push(v);
+  });
+  const slots = listAll(tagQuery('slot')).filter(s => s.mimeType === FOLDER);
+  slots.forEach(s => {
+    const k = tagOf(s, 'slot'), v = vehOf[(s.parents || [])[0]];
+    if (v && /^[1-5]$/.test(k) && !v.folders[k]) { v.folders[k] = s.id; slotOf[s.id] = { v, slot: k }; }
+  });
+  slots.forEach(s => {
+    const k = tagOf(s, 'slot'), up = slotOf[(s.parents || [])[0]];
+    if (up && up.slot === '5' && /^5\.[1-5]$/.test(k) && !up.v.folders[k]) { up.v.folders[k] = s.id; slotOf[s.id] = { v: up.v, slot: k }; }
+  });
+  return { vehicles, slotOf };
+}
+
+function toVehicle(f, customerId, ym, folders) {
+  const d = parseObj(f.description);
+  const v = { id: f.id, customerId, ym, folderName: f.name, createdAt: f.createdTime || '', by: d.by || '', folders: folders || {} };
+  Object.keys(VFIELDS).forEach(k => { v[k] = d[k] || ''; });
+  if (!v.plate) v.plate = tagOf(f, 'plate') || f.name;
+  return v;
+}
+
+/** Is this folder one of the customer's own folders (the customer folder, a v3 sub-folder or a v4 file folder)? */
+function folderOfCustomer(id, customer) {
+  try {
+    const f = meta(id);
+    if (f.trashed || f.mimeType !== FOLDER) return false;
+    if (id === customer) return true;
+    const kind = tagOf(f, 'bimeyar');
+    if (kind === 'sub') { assertCustomer(customer); return (f.parents || [])[0] === customer; }
+    if (kind === 'slot') return ownerOf({ parents: [id] }).customer === customer;
+    return false;
+  } catch (e) { return false; }
+}
+
+const MOVED = 'Moved from: ';
+/** One file of the move tool (see moveNew). */
+function moveOne(id, it, batch) {
+  const m = assertFile(id), own = ownerOf(m);
+  const v = assertVehicle(String((it && it.vehicleId) || ''));
+  if (v.customer !== own.customer) throw err('bad_request', 'This vehicle belongs to another customer');
+  const slot = String((it && it.slot) || '');
+  if (VFILE_SLOTS.indexOf(slot) < 0) throw err('bad_request', 'Unknown folder');
+  const inv = tagOf(m, 'kind') === 'invoice';
+  const target = vehicleSlots(v.id, true)[slot];
+  const from = (m.parents || [])[0];
+  if (from === target) return { id, status: 'same' };
+  const cur = Drive.Files.get(id, { fields: 'id,name,description' });
+  const fromName = Drive.Files.get(from, { fields: 'name' }).name;
+  return withLock(() => {
+    let name = cur.name;
+    if (!inv && it.name) {
+      let n = fileName(it.name);
+      const e = extOf(cur.name);
+      if (e && n.toLowerCase().slice(-e.length) !== e.toLowerCase()) n = fileName(n + e);   // the extension never changes
+      if (n && n !== e) name = n;
+    }
+    if (!inv) name = uniqueName(name, siblingNames(target, id));   // never the same name twice in a folder
+    const res = { appProperties: { mvb: batch, mvf: from, mvt: target, mvo: name !== cur.name ? '1' : null } };
+    if (name !== cur.name) res.name = name;
+    if (!inv) {   // an invoice's description is its JSON data: never add lines to it
+      const d = descSplit(cur.description);
+      const lines = d.meta.concat([MOVED + fromName + ' [' + from + ']']);
+      if (name !== cur.name) lines.push(RENAMED + cur.name + ARROW + name);
+      res.description = descJoin(d.note, lines);
+    }
+    Drive.Files.update(res, id, null, { addParents: target, removeParents: from });
+    return { id, status: 'ok', old: cur.name, name };
+  });
+}
+/** Undo of one moved file. false = left as it is (moved again by hand, or its old folder is gone). */
+function undoMoveOne(id) {
+  const m = assertFile(id), own = ownerOf(m);
+  const f = Drive.Files.get(id, { fields: 'id,name,description,parents,appProperties' });
+  const a = f.appProperties || {}, now = (f.parents || [])[0];
+  const clear = { mvb: null, mvf: null, mvt: null, mvo: null };
+  if (!a.mvf || now !== a.mvt || !folderOfCustomer(a.mvf, own.customer)) { Drive.Files.update({ appProperties: clear }, id); return false; }
+  withLock(() => {
+    const res = { appProperties: clear };
+    if (a.kind !== 'invoice') {
+      const d = descSplit(f.description);
+      let i = d.meta.length - 1;
+      while (i >= 0 && d.meta[i].indexOf(MOVED) !== 0) i--;
+      let name = f.name;
+      if (i >= 0) {
+        const ren = a.mvo === '1' && d.meta[i + 1] && d.meta[i + 1].indexOf(RENAMED) === 0 ? d.meta[i + 1] : '';
+        if (ren) {
+          const s = ren.slice(RENAMED.length), k = s.lastIndexOf(ARROW);
+          if (k > 0 && s.slice(k + ARROW.length) === f.name) name = s.slice(0, k);   // renamed again since: keep that name
+        }
+        d.meta.splice(i, ren ? 2 : 1);
+      }
+      name = uniqueName(name, siblingNames(a.mvf, id));
+      if (name !== f.name) res.name = name;
+      res.description = descJoin(d.note, d.meta);
+    }
+    Drive.Files.update(res, id, null, { addParents: a.mvf, removeParents: now });
+  });
+  return true;
 }
 
 /**
@@ -752,7 +1162,9 @@ function toCustomer(x) {
   Object.keys(CFIELDS).forEach(k => { c[k] = d[k] || ''; });
   return c;
 }
-function toFile(x, customerId, slot) {
+function toFileOf(x, own) { return toFile(x, own.customer, own.slot, own.vehicle, own.vslot); }
+/** slot = v3 sub-folder; vehicleId + vslot = v4 folder ('1'…'4', '5.1'…'5.5') */
+function toFile(x, customerId, slot, vehicleId, vslot) {
   const ap = x.appProperties || {};
   const inv = ap.kind === 'invoice';
   const d = inv ? { note: '', meta: [] } : descSplit(x.description);
@@ -762,19 +1174,20 @@ function toFile(x, customerId, slot) {
     note: d.note, mime: x.mimeType, size: +x.size || 0, createdAt: x.createdTime, by: ap.by || '', at: ap.at || x.createdTime,
     invoice: inv ? (ap.invNo || x.name) : '',
     orig: orig ? orig.slice(ORIG.length) : '', shared: ap.link === '1',   // v3.2
+    vehicleId: vehicleId || '', vslot: vslot || '',                       // v4
   };
 }
 
 /* ---------- file names and description lines (v3.2) ---------- */
 
 /**
- * Lines the app adds to a file's description: the original file name and the rename history.
+ * Lines the app adds to a file's description: the original file name, the rename history and (v4) the old folder.
  * The app shows the rest of the description as the file's note and never changes these lines.
  */
 const ORIG = 'Original file name: ', RENAMED = 'Renamed: ', ARROW = ' ⇒ ';
 function descSplit(desc) {
   const note = [], meta = [];
-  String(desc || '').split('\n').forEach(l => (l.indexOf(ORIG) === 0 || l.indexOf(RENAMED) === 0 ? meta : note).push(l));
+  String(desc || '').split('\n').forEach(l => (l.indexOf(ORIG) === 0 || l.indexOf(RENAMED) === 0 || l.indexOf(MOVED) === 0 ? meta : note).push(l));
   return { note: note.join('\n').trim(), meta };
 }
 function descJoin(note, meta) {
@@ -899,7 +1312,7 @@ function invoiceClean(x) {
   const due = date(x.due);
   if (due && due < issue) throw err('bad_request', 'Due date is before the issue date');
   const inv = {
-    v: 1, customerId: s(x.customerId, 80), issue, due, lang: ['th', 'en', 'both'].indexOf(x.lang) >= 0 ? x.lang : 'both',
+    v: 1, customerId: s(x.customerId, 80), vehicleId: s(x.vehicleId, 80), issue, due, lang: ['th', 'en', 'both'].indexOf(x.lang) >= 0 ? x.lang : 'both',
     cust: { name: s(x.cust && x.cust.name, 160), phone: s(x.cust && x.cust.phone, 40), address: s(x.cust && x.cust.address, 300) },
     veh: { brand: s(x.veh && x.veh.brand, 40), model: s(x.veh && x.veh.model, 60), plate: s(x.veh && x.veh.plate, 40), province: s(x.veh && x.veh.province, 60) },
     pol: { type: s(x.pol && x.pol.type, 60), insurer: s(x.pol && x.pol.insurer, 80), no: s(x.pol && x.pol.no, 60), start: date(x.pol && x.pol.start), end: date(x.pol && x.pol.end) },
@@ -1121,7 +1534,17 @@ const AI_FIELDS = {
   contractDate: 'Contract date of the insurance (วันทำสัญญาประกันภัย / วันที่ทำสัญญา), YYYY-MM-DD with the year exactly as printed',
   receiptAmount: 'For a payment receipt or slip: amount paid, digits only', receiptDate: 'For a payment receipt: payment date, YYYY-MM-DD with the year exactly as printed',
   payer: 'For a payment receipt: name of the payer',
+  insuredName: 'Name of the insured person or company (ผู้เอาประกันภัย) or the vehicle owner, exactly as printed',   // v4
+  bodyType: 'Vehicle body type as printed, e.g. รถเก๋ง, รถกระบะ, รถบรรทุก, หัวลาก',                                    // v4
 };
+
+/** v4: the folder of the vehicle file a document belongs to (see VSLOTS). */
+const AI_SLOT_HELP = 'Folder for this document: 1 = voluntary car insurance policy or schedule (กรมธรรม์ประกันภัยรถยนต์, ชั้น 1/2/3); ' +
+  '2 = goods-in-transit / cargo / carrier liability policy (กรมธรรม์ขนส่งสินค้า, ประกันภัยสินค้า); 3 = compulsory motor insurance (พ.ร.บ., ประกันภัยรถยนต์ภาคบังคับ); ' +
+  '4 = bill, invoice or quotation (ใบวางบิล, ใบแจ้งหนี้, ใบเสนอราคา); 5.1 = vehicle registration book or its copy (สำเนาทะเบียนรถ, เล่มทะเบียน); ' +
+  '5.2 = an old / previous policy (กรมธรรม์เดิม); 5.3 = photo of the car or of damage; 5.4 = bank transfer slip or payment receipt (หลักฐานการโอนเงิน, สลิป); ' +
+  '5.5 = ID card, driving licence, passport, company certificate (หนังสือรับรองบริษัท) or letter of appointment / power of attorney (หนังสือแต่งตั้ง, หนังสือมอบอำนาจ); ' +
+  'unknown = you cannot tell.';
 
 /** Thai document names for file names (v3.2); the same names as DOC_NAMES in js/naming.js. */
 const AI_DOC_NAMES = ['กรมธรรม์', 'บัตรประชาชน', 'ทะเบียนรถ', 'ใบขับขี่', 'หนังสือเดินทาง', 'หนังสือรับรองบริษัท', 'ภาพถ่ายรถ', 'สลิปโอนเงิน', 'ใบแจ้งหนี้', 'ใบเสร็จ'];
@@ -1135,9 +1558,10 @@ function aiSchema() {
     properties: {
       docType: { type: 'string', enum: ['policy', 'registration', 'id_card', 'receipt', 'other'], description: 'policy = insurance policy or schedule; registration = vehicle registration book; id_card = ID card, passport or driving licence; receipt = payment receipt, transfer slip or invoice' },
       docName: { type: 'string', description: 'Short Thai name of this document. Use one of: ' + AI_DOC_NAMES.join(', ') + '. If none fits, a short Thai name of the document as it calls itself.' },
+      slot: { type: 'string', enum: VFILE_SLOTS.concat(['unknown']), description: AI_SLOT_HELP },
       fields: { type: 'object', properties: props, required: Object.keys(AI_FIELDS) },
     },
-    required: ['docType', 'docName', 'fields'],
+    required: ['docType', 'docName', 'slot', 'fields'],
   };
 }
 
@@ -1151,6 +1575,8 @@ const AI_PROMPT = [
   '4. confidence is 0-1: 0.9+ only when the text is sharp and unambiguous; below 0.6 when partly blurred or the label is unclear.',
   '5. The customer is the insured person / owner, never the insurance company or the agent.',
   '6. docName: the Thai name of what this document is (for example กรมธรรม์ for any insurance policy or schedule, ภาพถ่ายรถ for a photo of a car, สลิปโอนเงิน for a bank transfer slip).',
+  '7. slot: the folder of this document (see its description). A พ.ร.บ. (compulsory insurance) is 3, not 1. Use unknown when you cannot tell.',
+  '8. plate and vin: read them from the document itself (a photo may show the plate on the car). Never guess them.',
 ].join('\n');
 
 function aiExtract(req) {
@@ -1208,7 +1634,8 @@ function aiExtract(req) {
         const r = aiAttempt(m, payload, key);
         attempts.push({ model: m.id, status: r.status, ms: r.ms, tokens: r.tokens || 0 });
         if (r.out) {
-          const res = { docType: r.out.docType || 'other', docName: String(r.out.docName || '').slice(0, 60), fields: r.out.fields || {}, model: m.id, tries: attempts.length };
+          const slot = VFILE_SLOTS.indexOf(String(r.out.slot || '')) >= 0 ? String(r.out.slot) : '';
+          const res = { docType: r.out.docType || 'other', docName: String(r.out.docName || '').slice(0, 60), slot: slot, fields: r.out.fields || {}, model: m.id, tries: attempts.length };
           try { cache.put(ck + ':res', JSON.stringify(res), AI_CACHE_S); } catch (e) { }   // kept even if the app stopped waiting
           return res;
         }
@@ -1231,7 +1658,7 @@ function aiExtract(req) {
 /** Cache key for a set of files: SHA-256 of their types and contents (the hash is not logged). */
 function aiCacheKey(files) {
   const d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, files.map(f => f.mime + ':' + f.data).join('|'));
-  return 'ai2_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');
+  return 'ai3_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');   // ai3: v4 answers (with slot); never mixed with older cached answers
 }
 function aiCached(cache, ck) {
   try { const v = cache.get(ck + ':res'); return v ? JSON.parse(v) : null; } catch (e) { return null; }
@@ -1306,7 +1733,14 @@ function dailyExpiryDigest() {
   const customers = listAll("'" + root + "' in parents and mimeType='" + FOLDER + "' and trashed=false and appProperties has { key='bimeyar' and value='item' }").map(toCustomer);
   const today = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd');
   const day = iso => Math.round((new Date(iso + 'T12:00:00Z') - new Date(today + 'T12:00:00Z')) / 864e5);
-  const rows = customers.filter(c => c.policyExpiry).map(c => ({ c, d: day(c.policyExpiry) })).filter(x => x.d <= 30 && x.d >= -7).sort((a, b) => a.d - b.d);
+  // v4: one row per vehicle (its latest month), plus the old single plate of customers that have no vehicle with that plate yet
+  const ids = {};
+  customers.forEach(c => { ids[c.id] = c; });
+  const latest = {};
+  vehicleTree(ids).vehicles.forEach(v => { const k = v.customerId + '|' + plateKey(v.plate); if (!latest[k] || v.ym > latest[k].ym) latest[k] = v; });
+  const items = Object.keys(latest).map(k => latest[k]).filter(v => v.policyExpiry).map(v => ({ c: { name: ids[v.customerId].name, phone: ids[v.customerId].phone, plate: v.plate, policyExpiry: v.policyExpiry } }));
+  customers.forEach(c => { if (c.policyExpiry && !latest[c.id + '|' + plateKey(c.plate)]) items.push({ c }); });
+  const rows = items.map(x => ({ c: x.c, d: day(x.c.policyExpiry) })).filter(x => x.d <= 30 && x.d >= -7).sort((a, b) => a.d - b.d);
   if (!rows.length) return;
   const esc = s => String(s || '').replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
   const html = '<p>Policies expiring in the next 30 days (' + rows.length + '):</p><table cellpadding="6" style="border-collapse:collapse;font-family:sans-serif;font-size:14px">' +
