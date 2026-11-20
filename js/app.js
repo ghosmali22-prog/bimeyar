@@ -1835,6 +1835,87 @@ async function oldFoldersSheet() {
     foot: `<span class="sp"></span><button class="btn primary" data-act="move-tool">${t('mv.back')}</button>` });
 }
 
+/* ---------- restore original file names (admin, v4.2) ---------- */
+/*
+ * Preview first: per customer, current name -> old name (the name before the FIRST change by the rename / move tools),
+ * editable, tick boxes, "name only" or "name + previous folder". Back = nothing changes. Apply in small batches with a
+ * progress bar; a previous folder that no longer exists is never re-created (name only + a message). Undo restore.
+ */
+let RS = null;
+async function restoreSheet() {
+  RS = null;
+  sheet({ title: t('rs.title'), sub: t('rs.sub'), cls: 'wide', body: `<p class="as-tip"><span class="spin sm"></span>${t('rs.loading')}</p>` });
+  const rows = await S.store.restorePlan();
+  RS = { rows: rows.map(r => ({ ...r, on: true, back: false, want: r.old })) };
+  drawRestore();
+}
+const rsCount = () => RS ? RS.rows.filter(r => r.on && r.want.trim()).length : 0;
+function drawRestore() {
+  const rows = RS.rows, groups = [];
+  for (const [i, r] of rows.entries()) { let g = groups.find(x => x.cid === r.customerId); if (!g) groups.push(g = { cid: r.customerId, name: cust(r.customerId)?.name || r.customer || '—', items: [] }); g.items.push(i); }
+  sheet({ title: t('rs.title'), sub: t('rs.sub'), cls: 'wide', body: `<p class="note">${icon('info', 15)}<span>${t('rs.explain')}</span></p>
+    ${rows.length ? `<div class="rn-bar"><b>${t('rs.count', { n: rows.length })}</b><span class="sp"></span><button type="button" class="link" data-act="rs-all" data-on="1">${t('rn.all')}</button><button type="button" class="link" data-act="rs-all" data-on="">${t('rn.none')}</button></div>
+    <div class="rn-list">${groups.map(g => `<details ${groups.length <= 15 ? 'open' : ''}><summary>${esc(g.name)} <em class="cnt">${num(g.items.length)}</em></summary>
+      ${g.items.map(i => { const r = rows[i]; return `<div class="rn-row rs-row" data-rs="${i}"><input type="checkbox" data-rs-on ${r.on ? 'checked' : ''} aria-label="${esc(r.name)}">
+        <div class="rn-main"><s>${esc(r.name)}</s><input data-rs-name value="${esc(r.want)}" maxlength="200" autocomplete="off" aria-label="${t('u.fileName')}">
+          <label class="rs-opt">${t('rs.what')}<select data-rs-back>${opt('', t('rs.nameOnly'), r.back ? '1' : '')}${opt('1', t('rs.nameFolder'), r.back ? '1' : '', r.from?.ok ? '' : 'disabled')}</select></label>
+          ${r.from ? (r.from.ok ? `<small class="muted">${t('rs.prevFolder', { x: iso(r.from.name) })}</small>` : `<small class="fwarn">${t('rs.folderGone', { x: iso(r.from.name) })}</small>`) : ''}
+        </div></div>`; }).join('')}</details>`).join('')}</div>` : `<p class="sh-text">${t('rs.nothing')}</p>`}`,
+    foot: `<button type="button" class="btn danger-ghost" data-act="rs-undo">${icon('history', 17)}<span>${t('rs.undo')}</span></button><span class="sp"></span>
+      <button type="button" class="btn ghost" data-act="close-sheet">${t('btn.back')}</button>${rows.length ? `<button type="button" class="btn primary" data-act="rs-apply" id="rsGo">${t('rs.apply', { n: rsCount() })}</button>` : ''}` });
+  sheetClose = () => { RS = null; };
+}
+const rsBtn = () => { const b = $('#rsGo'); if (b && RS) { const n = rsCount(); b.textContent = t('rs.apply', { n }); b.disabled = !n; } };
+async function restoreApply() {
+  const rows = RS?.rows.filter(r => r.on && r.want.trim()) || [];
+  if (!rows.length) return toast(t('rn.pick'), 'err');
+  const keep = RS;
+  if (!await confirmBox(t('rs.confirm', { n: rows.length }), t('rs.apply', { n: rows.length }), false)) { RS = keep; return drawRestore(); }
+  RS = null;
+  const batch = 'rs' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const queue = rows.map(r => ({ id: r.id, name: r.want.trim(), back: !!r.back }));
+  const total = rows.length, byId = Object.fromEntries(rows.map(r => [r.id, r]));
+  let ok = 0, moved = 0, same = 0, bad = 0, sent = 0, tries = 0, failed = null;
+  const gone = [];
+  sheet({ title: t('rs.title'), cls: 'small', body: `<p class="as-tip" id="rsProg"><span class="spin sm"></span>${t('rs.working', { a: 0, b: total })}</p><div class="prog rs-bar"><i id="rsBar" style="width:0%"></i></div>` });
+  try {
+    while (queue.length && tries++ < total + 20) {
+      const chunk = queue.splice(0, 15);
+      const r = await S.store.restoreNames(batch, chunk);
+      for (const x of r.rows) {
+        if (x.status === 'later') { queue.push(chunk.find(c => c.id === x.id)); continue; }
+        sent++;
+        if (x.status === 'ok') { ok++; if (x.moved) moved++; } else if (x.status === 'same') same++; else bad++;
+        if (x.note === 'folder_gone') gone.push(x.name || byId[x.id]?.want);
+      }
+      const pg = $('#rsProg'); if (pg) pg.innerHTML = `<span class="spin sm"></span>${t('rs.working', { a: sent, b: total })}`;
+      const bar = $('#rsBar'); if (bar) bar.style.width = Math.round(sent / total * 100) + '%';
+    }
+  } catch (e) { failed = e; }
+  await reload().catch(() => { });
+  sheet({ title: t('rs.title'), sub: t('rn.report'), cls: 'small', body: `<p class="sh-text">${t('rs.done', { n: ok })}</p>
+    ${moved ? `<p class="sh-text">${t('rs.moved', { n: moved })}</p>` : ''}${same ? `<p class="sh-text">${t('rn.same', { n: same })}</p>` : ''}
+    ${bad + queue.length ? `<p class="sh-text">${t('rn.err', { n: bad + queue.length })}</p>` : ''}
+    ${gone.length ? `<p class="note warn">${icon('alert', 15)}<span>${t('rs.goneReport', { n: gone.length })}<br>${gone.map(n => `<bdi>${esc(n)}</bdi>`).join('<br>')}</span></p>` : ''}
+    <p class="muted">${t('rs.safe')}</p>`,
+    foot: `<button type="button" class="btn danger-ghost" data-act="rs-undo">${icon('history', 17)}<span>${t('rs.undo')}</span></button><span class="sp"></span><button class="btn primary" data-act="close-sheet">${t('btn.close')}</button>` });
+  if (failed) throw failed;
+}
+async function restoreUndo() {
+  const keep = RS;
+  if (!await confirmBox(t('rs.undoQ'), t('rs.undo'), false)) { RS = keep; return keep ? drawRestore() : undefined; }
+  RS = null;
+  sheet({ title: t('rs.undo'), cls: 'small', body: `<p class="as-tip"><span class="spin sm"></span>${t('rs.undoing')}</p>` });
+  let done = 0, skipped = 0, r, guard = 0;
+  try {
+    do { r = await S.store.restoreUndo(); done += r.done; skipped += r.skipped; } while (r.more && (r.done || r.skipped) && guard++ < 50);
+  } finally {
+    await reload().catch(() => { });
+    sheet({ title: t('rs.undo'), sub: t('rn.report'), cls: 'small', body: `<p class="sh-text">${done || skipped ? t('rs.undone', { n: done }) : t('rn.undoNone')}</p>${skipped ? `<p class="sh-text">${t('rs.undoSkip', { n: skipped })}</p>` : ''}`,
+      foot: `<span class="sp"></span><button class="btn primary" data-act="close-sheet">${t('btn.close')}</button>` });
+  }
+}
+
 /* ---------- assistant ---------- */
 function assistantSheet() {
   const first = S.customers[0]?.name;
@@ -1874,6 +1955,7 @@ function settingsSheet() {
       ${signedIn ? card('lock', t('dv.title'), device.unlocked() ? t('dv.subOn') : t('dv.subOff'), `<span class="sp"></span>${!device.has() ? `<button class="btn primary" data-act="dv-set">${icon('lock', 17)}<span>${t('dv.setBtn')}</span></button>` : ''}<button class="btn ghost" data-act="devices">${icon('phone', 17)}<span>${t('dv.open')}</span></button>`) : ''}
       ${S.store ? card('invoice', t('co.title'), isAdmin() ? t('co.sub') : t('co.subRo'), `<span class="sp"></span><button class="btn ghost" data-act="company">${icon('edit', 17)}<span>${t('co.title')}</span></button>`) : ''}
       ${S.store && isAdmin() && (signedIn || !cloud) ? card('move', t('mv.title'), t('mv.sub'), `<span class="sp"></span><button class="btn ghost" data-act="move-tool">${icon('move', 17)}<span>${t('mv.open')}</span></button>`) : ''}
+      ${S.store && isAdmin() && (signedIn || !cloud) ? card('history', t('rs.title'), t('rs.sub'), `<span class="sp"></span><button class="btn ghost" data-act="restore">${icon('history', 17)}<span>${t('rn.open')}</span></button>`) : ''}
       ${S.store && isAdmin() && (signedIn || !cloud) ? card('edit', t('rn.title'), t('rn.sub'), `<span class="sp"></span><button class="btn ghost" data-act="rename">${icon('edit', 17)}<span>${t('rn.open')}</span></button>`) : ''}
       ${cloud ? `<div class="set-card"><div class="set-h">${icon('wand', 22)}<div><b>${t('ai.status')}</b><small>${S.store?.aiReady ? t('ai.on') : t('ai.off')}</small></div><span class="sp"></span><em class="st-badge ${S.store?.aiReady ? 'ok' : 'off'}">${S.store?.aiReady ? t('ai.ready') : t('ai.notSet')}</em></div></div>` : ''}
       <div class="set-card ${!cloud ? 'on' : ''}">
@@ -1959,6 +2041,10 @@ const ACT = {
   'mv-undo'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return moveUndo(); },
   'mv-old'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return oldFoldersSheet(); },
   'mv-slot'(el) { return moveCur(el.dataset.slot); },
+  restore() { if (!isAdmin()) return toast(t('err.role'), 'err'); return restoreSheet(); },
+  'rs-all'(el) { if (!RS) return; for (const r of RS.rows) r.on = !!el.dataset.on; for (const c of $$('[data-rs-on]')) c.checked = !!el.dataset.on; rsBtn(); },
+  'rs-apply'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return restoreApply(); },
+  'rs-undo'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return restoreUndo(); },
   'mv-detect'(el) { if (!isAdmin()) return toast(t('err.role'), 'err'); return detectFor(+el.dataset.g); },
   /* v4: vehicles */
   'veh-open'(el) { const id = el.dataset.id; S.openVeh = S.openVeh === id ? '' : id; S.openSlot = ''; drawPanel(false); loadThumbs(); },
@@ -2242,6 +2328,8 @@ document.addEventListener('input', e => {
     if (b) { b.disabled = !ok; b.textContent = t('mv.apply', { n: ok }); }
   }
   else if (el.dataset.invVeh !== undefined && I) invPickVehicle(el.value);
+  else if (el.dataset.rsName !== undefined && RS) { RS.rows[+el.closest('.rs-row').dataset.rs].want = el.value; rsBtn(); }
+  else if (el.dataset.rsBack !== undefined && RS) RS.rows[+el.closest('.rs-row').dataset.rs].back = el.value === '1';
   else if (el.dataset.mvdYm !== undefined && MV) {   // a detected vehicle's month: its rows follow (unless changed by hand)
     const box = el.closest('.mv-dv'), gi = +box.dataset.g, g = MV.groups[gi], v = g.det.vehicles.find(x => x.key === box.dataset.k);
     v.ym = el.value;
@@ -2266,6 +2354,7 @@ document.addEventListener('change', e => {
   if (el.type !== 'checkbox') return;
   if (el.dataset.diff && U) { U.toggles[el.dataset.diff] = el.checked; drawUpload(); }
   if (el.dataset.rnOn && RN) { RN.rows[+el.dataset.rnOn].on = el.checked; rnCount(); }
+  if (el.dataset.rsOn !== undefined && RS) { RS.rows[+el.closest('.rs-row').dataset.rs].on = el.checked; rsBtn(); }
   if (el.dataset.mvdOn !== undefined && MV) {   // untick a detected vehicle: its files are not moved
     const box = el.closest('.mv-dv'), gi = +box.dataset.g, g = MV.groups[gi], v = g.det.vehicles.find(x => x.key === box.dataset.k);
     v.on = el.checked; box.classList.toggle('off', !el.checked);

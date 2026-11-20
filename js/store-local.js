@@ -103,10 +103,12 @@ export class LocalStore {
     for (const it of items) {
       const f = await rq(this.s('files').get(it.id));
       if (!f) { rows.push({ id: it.id, status: 'error' }); continue; }
-      f.moved = { batch, folder: f.folder || '', vehicleId: f.vehicleId || '', vslot: f.vslot || '', old: f.name };
+      f.moved = { batch, folder: f.folder || '', vehicleId: f.vehicleId || '', vslot: f.vslot || '', old: f.name, first: !f.movedFrom };
+      f.movedFrom ||= { folder: f.folder || '', vehicleId: f.vehicleId || '', vslot: f.vslot || '' };
       f.folder = ''; f.vehicleId = it.vehicleId; f.vslot = it.slot;
       if (it.name) f.name = withExt(String(it.name).trim(), extOf(f.name));
       f.name = uniqueIn(f.name, await this.taken(f));
+      if (f.name !== f.moved.old) (f.hist ||= []).push({ old: f.moved.old, name: f.name });
       await rq(this.s('files', 'readwrite').put(f));
       rows.push({ id: it.id, status: 'ok', name: f.name });
     }
@@ -117,6 +119,8 @@ export class LocalStore {
     const out = { done: 0, skipped: 0, more: false };
     for (const f of await rq(this.s('files').getAll())) {
       if (!last || f.moved?.batch !== last) continue;
+      if (f.name !== f.moved.old && f.hist?.at(-1)?.name === f.name) f.hist.pop();
+      if (f.moved.first) delete f.movedFrom;
       Object.assign(f, { folder: f.moved.folder, vehicleId: f.moved.vehicleId, vslot: f.moved.vslot, name: f.moved.old });
       delete f.moved;
       f.name = uniqueIn(f.name, await this.taken(f));
@@ -149,6 +153,7 @@ export class LocalStore {
       const name = uniqueIn(withExt(String(it.name || '').trim(), extOf(f.name)), await this.taken(f));
       if (!name || name === f.name) { rows.push({ id: it.id, status: 'same' }); continue; }
       f.renamed = { batch, old: f.name, name };
+      (f.hist ||= []).push({ old: f.name, name });
       const old = f.name; f.name = name;
       await rq(this.s('files', 'readwrite').put(f));
       rows.push({ id: it.id, status: 'ok', old, name });
@@ -160,9 +165,46 @@ export class LocalStore {
     const out = { done: 0, skipped: 0, more: false };
     for (const f of await rq(this.s('files').getAll())) {
       if (!last || f.renamed?.batch !== last) continue;
-      if (f.name === f.renamed.name) { f.name = uniqueIn(f.renamed.old, await this.taken(f)); out.done++; } else out.skipped++;
+      if (f.name === f.renamed.name) { if (f.hist?.at(-1)?.name === f.name) f.hist.pop(); f.name = uniqueIn(f.renamed.old, await this.taken(f)); out.done++; } else out.skipped++;
       delete f.renamed;
       await rq(this.s('files', 'readwrite').put(f));
+    }
+    return out;
+  }
+  // Restore original file names in demo mode (same rules as the backend: oldest name, optional previous folder, undo)
+  async restorePlan() {
+    const cs = Object.fromEntries((await rq(this.s('customers').getAll())).map(c => [c.id, c.name]));
+    const label = m => m.vslot ? m.vslot : (FOLDERS.find(F => F.slot === m.folder)?.th || 'ไม่ระบุ');
+    return (await rq(this.s('files').getAll())).filter(f => f.hist?.length && f.hist[0].old !== f.name && cs[f.customerId])
+      .map(f => ({ id: f.id, customerId: f.customerId, customer: cs[f.customerId], name: f.name, old: f.hist[0].old,
+        from: f.movedFrom && (f.movedFrom.folder !== (f.folder || '') || (f.movedFrom.vslot || '') !== (f.vslot || '')) ? { id: 'local', name: label(f.movedFrom), ok: true } : null }));
+  }
+  async restoreNames(batch, items) {
+    try { localStorage.setItem('by_rs_last', batch); } catch { }
+    const rows = [];
+    for (const it of items) {
+      const f = await rq(this.s('files').get(it.id));
+      if (!f?.hist?.length) { rows.push({ id: it.id, status: 'nohistory' }); continue; }
+      const prev = { folder: f.folder || '', vehicleId: f.vehicleId || '', vslot: f.vslot || '' }, prevName = f.name;
+      const moved = !!(it.back && f.movedFrom);
+      if (moved) Object.assign(f, f.movedFrom);
+      f.name = uniqueIn(withExt(String(it.name || f.hist[0].old).trim(), extOf(f.hist[0].old) || extOf(prevName)), await this.taken(f));
+      f.restored = { batch, prevName, prev };
+      await rq(this.s('files', 'readwrite').put(f));
+      rows.push({ id: it.id, status: 'ok', name: f.name, moved });
+    }
+    return { rows };
+  }
+  async restoreUndo() {
+    let last = ''; try { last = localStorage.getItem('by_rs_last') || ''; } catch { }
+    const out = { done: 0, skipped: 0, more: false };
+    for (const f of await rq(this.s('files').getAll())) {
+      if (!last || f.restored?.batch !== last) continue;
+      Object.assign(f, f.restored.prev, { name: f.restored.prevName });
+      delete f.restored;
+      f.name = uniqueIn(f.name, await this.taken(f));
+      await rq(this.s('files', 'readwrite').put(f));
+      out.done++;
     }
     return out;
   }
