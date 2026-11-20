@@ -99,8 +99,8 @@ to a production system. Talk to the owner (Pejman) in Persian.
   Roll back: Manage deployments → edit → choose **Version 6** (v3.3.0 backend). Roll back the frontend first: files already
   moved into the v4 folders stay in Drive but the v3 app does not show them, so keep Version 7 if the move tool was used.
   Version 5 = v3.2.0 (incl. the v3.1.2 AI fixes), Version 2 = v3.0.0, Version 1 = the v2 backend.
-- **Frontend**: `main` = release tag `v4.0.0` (vehicles, folders per customer / month / plate, Smart upload, move tool).
-  Rollback tag of `main` before it: `v3.3.0-stable` (= `v3.3.0`). Before that: `v3.2-pre-device` (= `v3.2.0`),
+- **Frontend**: `main` = release tag `v4.1.0` (v4.0 + "Detect vehicles automatically" in the move tool; frontend only).
+  Rollback tag of `main` before it: `v4.0.0-stable` (= `v4.0.0`). Before that: `v3.3.0-stable` (= `v3.3.0`), `v3.2-pre-device` (= `v3.2.0`),
   `v3.1-pre-naming` (= `v3.1.0`), `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
 - Tests: `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
