@@ -25,6 +25,7 @@
  *   RENAME_LAST     id of the last batch of the "Rename files" tool, for "Undo last rename" (admin)
  *   MOVE_LAST       id of the last batch of the "Move to new folders" tool (v4), for "Undo last move" (admin)
  *   RESTORE_LAST    id of the last batch of "Restore original file names" (v4.2), for "Undo restore" (admin)
+ *   AIEDIT_LOG      the last 5 "Edit with AI" batches (v4.3): [{ b, at, by, c: customer id, cn: name, n: files }]
  *
  * v4 folders (per vehicle), all found by their tags (appProperties), never by name:
  *   customer folder
@@ -548,6 +549,63 @@ const ACTIONS = {
       return out;
     },
   },
+  /* ---------- "Edit with AI" (editor, v4.3) ---------- */
+  /**
+   * Applies what the user ticked in the "Edit with AI" preview: per file a new name and/or another folder of a vehicle
+   * of ITS OWN customer; per vehicle the ticked data (MERGED). Never deletes, never changes a file's content, never an
+   * invoice. The previous state is kept (file: "AI edit <batch>: old ⇒ new [from>to|type]" line + tag aib; vehicle:
+   * `_ai` list in its JSON + tag aib), so aiEditUndo can put it back exactly. One batch = one customer; the last 5 are kept.
+   * Small requests: at most 10 files and 20 vehicles, ~200 s.
+   */
+  aiEditApply: {
+    need: 'editor',
+    run: (req, user) => {
+      const batch = String(req.batch || '');
+      if (!/^ai[\w-]{6,38}$/.test(batch)) throw err('bad_request', 'Bad batch id');
+      const cid = String(req.customerId || '');
+      const c = assertCustomer(cid);
+      const t0 = Date.now();
+      const vrows = (Array.isArray(req.vehicles) ? req.vehicles : []).slice(0, 20).map(x => {
+        const id = String((x && x.id) || '');
+        try { return aiEditVehicle(id, (x && x.fields) || {}, batch, user, cid); } catch (e) { return { id, status: 'error', msg: String(e.message || e) }; }
+      });
+      const rows = (Array.isArray(req.items) ? req.items : []).slice(0, 10).map(it => {
+        const id = String((it && it.id) || '');
+        if (Date.now() - t0 > 200000) return { id, status: 'later' };
+        try { return aiEditOne(id, it, batch, cid); } catch (e) { return { id, status: 'error', msg: String(e.message || e) }; }
+      });
+      const n = rows.filter(r => r.status === 'ok').length + vrows.filter(r => r.status === 'ok').length;
+      if (n) aiLogBatch(batch, user, cid, Drive.Files.get(c.id, { fields: 'name' }).name, rows.filter(r => r.status === 'ok').length);
+      return { rows, vehicles: vrows };
+    },
+  },
+  /**
+   * Puts an AI-edit batch back: names, folders, file types and vehicle data. id = only that one file.
+   * A file or a vehicle field changed again since then is left as it is.
+   */
+  aiEditUndo: {
+    need: 'editor',
+    run: req => {
+      const batch = String(req.batch || '');
+      if (!/^ai[\w-]{6,38}$/.test(batch) || !aiLogGet().some(x => x.b === batch)) throw err('bad_request', 'Only the last 5 AI edits can be undone');
+      const out = { done: 0, skipped: 0, more: false };
+      const t0 = Date.now();
+      const one = req.id ? [{ id: String(req.id) }] : Drive.Files.list({ q: "appProperties has { key='aib' and value='" + batch + "' } and trashed=false", fields: 'files(id,mimeType)', pageSize: 200, spaces: 'drive' }).files || [];
+      for (const x of one) {
+        if (Date.now() - t0 > 200000) { out.more = true; break; }
+        try {
+          const ok = x.mimeType === FOLDER ? undoAiVehicle(x.id, batch) : undoAiFile(x.id, batch);
+          if (ok) out.done++; else out.skipped++;
+        } catch (e) { out.skipped++; }
+      }
+      if (one.length >= 200) out.more = true;
+      if (!req.id && !out.more) aiLogEdit(a => { const e = a.filter(x => x.b === batch)[0]; if (e) e.u = 1; });
+      return out;
+    },
+  },
+  /** The last 5 AI-edit batches (Settings, admin) */
+  aiEditList: { need: 'admin', run: () => aiLogGet() },
+
   /* ---------- restore original file names (admin, v4.2) ---------- */
   /**
    * Read only: every file inside the root whose name was changed by the rename / move tools ("Renamed: old ⇒ new"
@@ -1129,7 +1187,122 @@ function folderOfCustomer(id, customer) {
   } catch (e) { return false; }
 }
 
-const MOVED = 'Moved from: ', RESTORED = 'Restored: ';
+const MOVED = 'Moved from: ', RESTORED = 'Restored: ', AIED = 'AI edit ';
+/** v4.3: the v2/v3 file type that matches a v4 folder (kept for old screens and filters) */
+const SLOT_TYPE = { '1': 'policy', '2': 'policy', '3': 'policy', '5.2': 'policy', '4': 'payment', '5.4': 'payment', '5.1': 'car', '5.3': 'car', '5.5': 'id' };
+const AIEDIT_KEEP = 5;
+function aiLogGet() { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('AIEDIT_LOG') || '[]') || []; } catch (e) { return []; } }
+function aiLogEdit(fn) {
+  withLock(() => {
+    const a = aiLogGet();
+    fn(a);
+    PropertiesService.getScriptProperties().setProperty('AIEDIT_LOG', JSON.stringify(a.slice(-AIEDIT_KEEP)));
+  });
+}
+/** Adds (or counts up) a batch in the log; only the last 5 batches are kept and can be undone */
+function aiLogBatch(batch, user, cid, cname, n) {
+  aiLogEdit(a => {
+    let e = a.filter(x => x.b === batch)[0];
+    if (!e) { e = { b: batch, at: new Date().toISOString(), by: user.email.slice(0, 100), c: cid, cn: clean(cname, 60), n: 0 }; a.push(e); }
+    e.n += n;
+  });
+}
+/** "AI edit <b>: old ⇒ new [from>to|type]" -> { b, old, name, from, to, type } */
+function aiLine(l) {
+  if (l.indexOf(AIED) !== 0) return null;
+  const s = l.slice(AIED.length), c = s.indexOf(': '), k = s.lastIndexOf(' ['), a = s.lastIndexOf(ARROW, k);
+  if (c < 0 || k < 0 || a < c) return null;
+  const m = s.slice(k + 2).match(/^([\w-]*)>([\w-]*)\|(\w*)\]$/);
+  if (!m) return null;
+  return { b: s.slice(0, c), old: s.slice(c + 2, a), name: s.slice(a + ARROW.length, k), from: m[1], to: m[2], type: m[3] };
+}
+/** One file of aiEditApply */
+function aiEditOne(id, it, batch, cid) {
+  const m = assertFile(id);
+  if (tagOf(m, 'kind') === 'invoice') return { id, status: 'invoice' };
+  const own = ownerOf(m);
+  if (own.customer !== cid) throw err('bad_request', 'This file belongs to another customer');
+  const cur = Drive.Files.get(id, { fields: 'id,name,description,parents' });
+  const from = (cur.parents || [])[0];
+  let target = from, type = tagOf(m, 'type') || 'other';
+  if (it.vehicleId) {
+    const v = assertVehicle(String(it.vehicleId));
+    if (v.customer !== own.customer) throw err('bad_request', 'This vehicle belongs to another customer');
+    if (VFILE_SLOTS.indexOf(String(it.slot)) < 0) throw err('bad_request', 'Unknown folder');
+    target = vehicleSlots(v.id, true)[String(it.slot)];
+    type = SLOT_TYPE[String(it.slot)] || type;
+  }
+  let want = cur.name;
+  if (it.name) {
+    want = fileName(it.name);
+    const e = extOf(cur.name);
+    if (e && want.toLowerCase().slice(-e.length) !== e.toLowerCase()) want = fileName(want + e);   // the extension never changes
+    if (!want || want === e) return { id, status: 'empty' };
+  }
+  return withLock(() => {
+    const name = want === cur.name && target === from ? want : uniqueName(want, siblingNames(target, id));
+    if (name === cur.name && target === from) return { id, status: 'same' };
+    const d = descSplit(cur.description);
+    const ai = d.meta.filter(l => l.indexOf(AIED) === 0);
+    const meta = d.meta.filter(l => l.indexOf(AIED) !== 0).concat(ai.slice(-(AIEDIT_KEEP - 1)))
+      .concat([AIED + batch + ': ' + cur.name + ARROW + name + ' [' + from + '>' + target + '|' + (tagOf(m, 'type') || '') + ']']);
+    const res = { name, description: descJoin(d.note, meta), appProperties: { aib: batch, type: type } };
+    if (target !== from) Drive.Files.update(res, id, null, { addParents: target, removeParents: from });
+    else Drive.Files.update(res, id);
+    return { id, status: 'ok', name, moved: target !== from };
+  });
+}
+/** Undo of one file: only when the file is still exactly as this batch left it */
+function undoAiFile(id, batch) {
+  const m = assertFile(id), own = ownerOf(m);
+  const f = Drive.Files.get(id, { fields: 'id,name,description,parents,appProperties' });
+  const now = (f.parents || [])[0], d = descSplit(f.description);
+  let i = d.meta.length - 1;
+  while (i >= 0 && d.meta[i].indexOf(AIED) !== 0) i--;
+  const L = i >= 0 ? aiLine(d.meta[i]) : null;
+  if (!L || L.b !== batch || (f.appProperties || {}).aib !== batch || f.name !== L.name || now !== L.to) return false;
+  withLock(() => {
+    d.meta.splice(i, 1);
+    const prev = d.meta.map(aiLine).filter(Boolean).pop();
+    const target = L.from && L.from !== now && folderOfCustomer(L.from, own.customer) ? L.from : now;
+    const res = { name: uniqueName(L.old, siblingNames(target, id)), description: descJoin(d.note, d.meta), appProperties: { aib: prev ? prev.b : null, type: L.type || null } };
+    if (target !== now) Drive.Files.update(res, id, null, { addParents: target, removeParents: now });
+    else Drive.Files.update(res, id);
+  });
+  return true;
+}
+/** The ticked vehicle data of an AI edit, MERGED; the old values are kept in `_ai` (last 5) for the undo */
+function aiEditVehicle(id, fields, batch, user, cid) {
+  const own = assertVehicle(id);
+  if (own.customer !== cid) throw err('bad_request', 'This vehicle belongs to another customer');
+  const f = vehicleFields(fields);
+  delete f.plate;   // the plate (= folder name) is never changed by an AI edit
+  const cur = Drive.Files.get(id, { fields: 'id,name,description' });
+  const old = parseObj(cur.description);
+  const o = {}, n = {};
+  Object.keys(f).forEach(k => { if ((old[k] || '') !== (f[k] || '')) { o[k] = old[k] || ''; n[k] = f[k] || ''; } });
+  if (!Object.keys(n).length) return { id, status: 'same' };
+  const d = vehicleMerge(old, n, user, true);
+  d._ai = (Array.isArray(old._ai) ? old._ai : []).slice(-(AIEDIT_KEEP - 1)).concat([{ b: batch, o: o, n: n, u: old.updBy || '' }]);
+  Drive.Files.update({ description: JSON.stringify(d), appProperties: { aib: batch } }, id);
+  return { id, status: 'ok', fields: Object.keys(n) };
+}
+/** Undo of a vehicle's data: each field only when it still has the value this batch gave it */
+function undoAiVehicle(id, batch) {
+  assertVehicle(id);
+  const cur = Drive.Files.get(id, { fields: 'id,description' });
+  const d = parseObj(cur.description);
+  const list = Array.isArray(d._ai) ? d._ai : [];
+  const e = list.filter(x => x && x.b === batch)[0];
+  if (!e) return false;
+  Object.keys(e.n || {}).forEach(k => { if ((d[k] || '') === (e.n[k] || '')) { if (e.o[k]) d[k] = e.o[k]; else delete d[k]; } });
+  d._ai = list.filter(x => x !== e);
+  if (e.u) d.updBy = e.u; else delete d.updBy;   // exactly as before: also who changed it last
+  const prev = d._ai[d._ai.length - 1];
+  if (!d._ai.length) delete d._ai;
+  Drive.Files.update({ description: JSON.stringify(d), appProperties: { aib: prev ? prev.b : null } }, id);
+  return true;
+}
 /**
  * From a file's description lines: its oldest name (the "old" of the FIRST "Renamed:" line, i.e. before the first
  * change by the app) and the folder it had before the first move by the move tool ("Moved from: name [id]").
@@ -1304,6 +1477,7 @@ function toFile(x, customerId, slot, vehicleId, vslot) {
     invoice: inv ? (ap.invNo || x.name) : '',
     orig: orig ? orig.slice(ORIG.length) : '', shared: ap.link === '1',   // v3.2
     vehicleId: vehicleId || '', vslot: vslot || '',                       // v4
+    aib: ap.aib || '',                                                    // v4.3: last "Edit with AI" batch
   };
 }
 
@@ -1316,7 +1490,7 @@ function toFile(x, customerId, slot, vehicleId, vslot) {
 const ORIG = 'Original file name: ', RENAMED = 'Renamed: ', ARROW = ' ⇒ ';
 function descSplit(desc) {
   const note = [], meta = [];
-  String(desc || '').split('\n').forEach(l => (l.indexOf(ORIG) === 0 || l.indexOf(RENAMED) === 0 || l.indexOf(MOVED) === 0 || l.indexOf(RESTORED) === 0 ? meta : note).push(l));
+  String(desc || '').split('\n').forEach(l => (l.indexOf(ORIG) === 0 || l.indexOf(RENAMED) === 0 || l.indexOf(MOVED) === 0 || l.indexOf(RESTORED) === 0 || l.indexOf(AIED) === 0 ? meta : note).push(l));
   return { note: note.join('\n').trim(), meta };
 }
 function descJoin(note, meta) {

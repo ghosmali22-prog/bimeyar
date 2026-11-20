@@ -1,5 +1,25 @@
 # Changelog
 
+## v4.3.0 (2026-11-21)
+
+- **Edit with AI** (admin and editor): in the file window ("Edit with AI", that file) and on the customer screen
+  ("Re-check all files with AI", every photo and PDF of the customer; two at a time, progress bar, **Stop**; the AI's
+  answers stay 10 minutes in the cache). The existing Gemini `aiExtract` reads the file again; the app works out the
+  folder (1–4, 5.1–5.5), the vehicle (chassis no. → plate; "Add vehicle" for a new plate or a new month), the month and
+  the name `{plate} - {customer's real name}({M}) - {folder name}.{ext}` (never the nickname, so misspellings like
+  `โชควไล`, wrong spacing like `-โชค…` and nicknames like `k.june` are fixed), plus, for policies, the vehicle data.
+- **Preview before anything changes**: before → after for name, vehicle, month, folder (changes highlighted) and the
+  vehicle data; everything editable, rows can be unticked; already correct = "OK, no change"; low confidence or an AI
+  error = "Please choose" (unchanged unless you choose). **Back** = nothing changes. **Save** in small batches.
+- **Undo AI edit** in the file window (that file), on the customer screen (its newest AI edit) and in Settings (admin:
+  the last 5 AI edits, each can be undone): puts back the exact previous state (names, folders, file types, vehicle
+  data). Something changed again since then is left as it is. A vehicle made by the edit stays (empty); nothing is deleted.
+- **Backend changed → Version 9**: new actions `aiEditApply`, `aiEditUndo` (editor), `aiEditList` (admin); Script
+  property `AIEDIT_LOG` (last 5); file / vehicle tag `aib`; file description line `AI edit <batch>: old ⇒ new [from>to|type]`;
+  vehicle JSON `_ai` (old values of the last 5 edits). The plate (folder name) is never changed by an AI edit.
+  No new permission, no `setup`.
+- Tests: `node tests/aiedit.test.mjs` (107, incl. the real names), 21 new browser checks.
+
 ## v4.2.0 (2026-11-21)
 
 - **Settings → Restore original file names** (admin): lists every file inside the root whose name was changed by the
