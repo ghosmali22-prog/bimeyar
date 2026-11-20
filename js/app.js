@@ -11,7 +11,7 @@ import { calcTotals, baht, lineAmount, invoiceHtml, INVOICE_CSS } from './invoic
 import { prepare, normalize, diff, fileNote, FIELD_GROUPS, DATE_FIELDS } from './ai.js';
 import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './validate.js';
 import { buildName, docNameFromOld, plateOnly, plateFromName, followsPattern, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
-import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey } from './vehicles.js';
+import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey, needsAiRead, detectVehicles } from './vehicles.js';
 
 /*
  * Layout = the v2 design (dashboard with stat cards, dark customer panel with the purple case file,
@@ -1676,12 +1676,23 @@ function moveSheet() {
     <div class="rn-list mv-list">${MV.groups.map((g, gi) => {
       const c = cust(g.cid), plates = [...new Set(vehOf(c).map(v => v.plate).filter(Boolean))];
       const ok = g.rows.filter(r => r.on && !r.done && r.plate && r.slot && r.ym).length;
-      return `<details ${MV.groups.length <= 8 ? 'open' : ''} data-g="${gi}"><summary>${esc(c?.name || '—')} <em class="cnt">${num(g.rows.length)}</em></summary>
+      for (const v of g.det?.vehicles || []) if (!plates.includes(v.plate)) plates.push(v.plate);
+      const dv = g.det?.vehicles || [];
+      return `<details ${MV.groups.length <= 8 || g.det || g.detecting ? 'open' : ''} data-g="${gi}"><summary>${esc(c?.name || '—')} <em class="cnt">${num(g.rows.length)}</em></summary>
         <datalist id="mvp${gi}">${plates.map(p => `<option value="${esc(p)}">`).join('')}</datalist>
+        <div class="mv-det">
+          ${g.detecting ? `<p class="as-tip" id="mvDet${gi}"><span class="spin sm"></span>${t('mv.detecting', { a: g.detecting.a, b: g.detecting.b })}</p>`
+            : `<button type="button" class="btn ghost sm" data-act="mv-detect" data-g="${gi}">${icon('wand', 15)}<span>${t(g.det ? 'mv.detectAgain' : 'mv.detect')}</span></button>${aiOn() ? '' : `<small class="muted">${t('mv.noAi')}</small>`}`}
+          ${g.det ? `<p class="note">${icon('car', 15)}<span>${t('mv.detected', { n: dv.length })} ${t('mv.detNote')}</span></p>
+            ${dv.map(v => { const n = g.rows.filter(r => r.det === v.key).length; return `<label class="mv-dv ${v.on ? '' : 'off'}" data-g="${gi}" data-k="${esc(v.key)}">
+              <input type="checkbox" data-mvd-on ${v.on ? 'checked' : ''} aria-label="${esc(v.plate)}">
+              <b dir="ltr">${esc(v.plate)}</b><input type="month" data-mvd-ym value="${esc(v.ym)}" aria-label="${t('vh.month')}">
+              <small>${t('mv.srcFrom')}: ${v.src.map(s => t('mv.src.' + s)).join(', ')}${v.data.vin ? ` · <bdi dir="ltr">${esc(v.data.vin)}</bdi>` : ''}</small><em class="cnt">${t('mv.files', { n })}</em></label>`; }).join('')}` : ''}
+        </div>
         ${g.rows.map((r, ri) => `<div class="rn-row mv-row ${r.done ? 'done' : ''} ${!r.plate || !r.slot ? 'need' : ''}" data-g="${gi}" data-r="${ri}">
           <input type="checkbox" data-mv-on ${r.on ? 'checked' : ''} ${r.done ? 'disabled' : ''} aria-label="${esc(r.old)}">
           <div class="rn-main">
-            <s>${esc(r.old)}</s><small class="mv-from">${t('mv.from')}: ${fromLabel(r)}</small>
+            <s>${esc(r.old)}</s><small class="mv-from">${t('mv.from')}: ${fromLabel(r)}${r.src ? ` · ${t('mv.plateBy.' + r.src)}` : ''}</small>
             <div class="mv-to">
               <label>${t('cf.plate')}<input data-mv="plate" list="mvp${gi}" value="${esc(r.plate)}" placeholder="${esc(t('su.choose'))}" maxlength="40"></label>
               <label>${t('vh.month')}<input type="month" data-mv="ym" value="${esc(r.ym)}"></label>
@@ -1697,6 +1708,54 @@ function moveSheet() {
       <button type="button" class="btn ghost" data-act="mv-old">${icon('folder', 17)}<span>${t('mv.old')}</span></button><span class="sp"></span>
       <button type="button" class="btn ghost" data-act="close-sheet">${t('btn.close')}</button>` });
   sheetClose = () => { MV = null; };
+}
+/**
+ * v4.1 "Detect vehicles automatically" for one customer: plates and months from pattern file names, the customer's
+ * details, existing vehicles and (AI on) the policy PDFs that have no plate in their name. Only a preview: nothing is
+ * created or moved before Apply. A file with no plate anywhere stays "please choose".
+ */
+async function detectFor(gi) {
+  const g = MV?.groups[gi]; if (!g || g.detecting) return;
+  const c = cust(g.cid);
+  const files = S.files.filter(f => g.rows.some(r => r.id === f.id));
+  const ai = g.ai ||= {};
+  const toRead = aiOn() ? files.filter(f => !ai[f.id] && needsAiRead(f, g.rows.find(r => r.id === f.id)?.slot)) : [];
+  g.detecting = { a: 0, b: toRead.length };
+  moveSheet();
+  for (const f of toRead) {
+    if (MV?.groups[gi] !== g) return;   // the sheet was closed
+    try {
+      const blob = await S.store.getBlob(f.id);
+      const file = new File([blob], f.name, { type: blob.type || f.mime || 'application/pdf' });
+      const n = normalize(await S.store.aiExtract(await prepare([file])));
+      ai[f.id] = { ...n.values };
+    } catch (e) { ai[f.id] = { failed: true }; }   // the AI failed or is busy: this file stays "please choose"
+    g.detecting.a++;
+    const p = $(`#mvDet${gi}`); if (p) p.innerHTML = `<span class="spin sm"></span>${t('mv.detecting', { a: g.detecting.a, b: g.detecting.b })}`;
+  }
+  if (MV?.groups[gi] !== g) return;
+  g.detecting = null;
+  g.det = detectVehicles(c, files, S.vehicles, ai);
+  for (const r of g.rows) {
+    if (r.done || r.touched) continue;
+    const k = g.det.assign[r.id], v = g.det.vehicles.find(x => x.key === k);
+    r.det = k || ''; r.src = !k ? '' : plateFromName(r.old) ? 'name' : 'ai';
+    r.plate = v ? v.plate : ''; if (v) r.ym = v.ym;
+    r.on = true; r.nameEdited = false;
+  }
+  moveSheet();
+}
+/** After a detected vehicle was ticked / its month changed: its rows follow, without drawing the list again */
+function mvSyncRows(gi) {
+  const g = MV?.groups[gi]; if (!g) return;
+  for (const el of $$(`.mv-row[data-g="${gi}"]`)) {
+    const r = g.rows[+el.dataset.r];
+    el.querySelector('[data-mv-on]').checked = r.on;
+    el.querySelector('[data-mv="ym"]').value = r.ym;
+    const n = el.querySelector('[data-mv="name"]'); if (n && !r.nameEdited) n.value = mvRowName(r);
+  }
+  const b = $(`[data-act="mv-apply"][data-g="${gi}"]`), ok = g.rows.filter(x => x.on && !x.done && x.plate && x.slot && x.ym).length;
+  if (b) { b.disabled = !ok; b.textContent = t('mv.apply', { n: ok }); }
 }
 async function moveApply(gi) {
   const g = MV?.groups[gi]; if (!g) return;
@@ -1721,6 +1780,9 @@ async function moveApply(gi) {
       const L = vehOf(c).find(v => v.legacy && plateKey(v.plate) === plateKey(r.plate));
       const data = { customerId: c.id, ym: r.ym, plate: plateOnly(r.plate) };
       if (L && L.ym === r.ym) for (const f of VFIELDS) if (L[f] && f !== 'plate') data[f] = L[f];
+      // v4.1: what "Detect vehicles" read (chassis no., dates, insurer… from the policy PDFs)
+      const D = g.det?.vehicles.find(x => x.key === plateKey(r.plate));
+      if (D) for (const f of VFIELDS) if (D.data[f] && !data[f] && f !== 'plate') data[f] = D.data[f];
       const v = await S.store.saveVehicle(data);
       S.vehicles.push(v);
       vid[k] = v.id;
@@ -1897,6 +1959,7 @@ const ACT = {
   'mv-undo'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return moveUndo(); },
   'mv-old'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return oldFoldersSheet(); },
   'mv-slot'(el) { return moveCur(el.dataset.slot); },
+  'mv-detect'(el) { if (!isAdmin()) return toast(t('err.role'), 'err'); return detectFor(+el.dataset.g); },
   /* v4: vehicles */
   'veh-open'(el) { const id = el.dataset.id; S.openVeh = S.openVeh === id ? '' : id; S.openSlot = ''; drawPanel(false); loadThumbs(); },
   'veh-slot'(el) {
@@ -2173,12 +2236,18 @@ document.addEventListener('input', e => {
   else if (el.dataset.mv && MV) {
     const row = el.closest('.mv-row'), r = MV.groups[+row.dataset.g].rows[+row.dataset.r], k = el.dataset.mv;
     if (k === 'name') { r.name = el.value; r.nameEdited = true; }
-    else { r[k] = k === 'plate' ? el.value.trim() : el.value; const n = row.querySelector('[data-mv="name"]'); if (n && !r.nameEdited) n.value = mvRowName(r); }
+    else { r[k] = k === 'plate' ? el.value.trim() : el.value; if (k !== 'slot') r.touched = true; const n = row.querySelector('[data-mv="name"]'); if (n && !r.nameEdited) n.value = mvRowName(r); }
     row.classList.toggle('need', !r.plate || !r.slot);
     const g = MV.groups[+row.dataset.g], b = $(`[data-act="mv-apply"][data-g="${row.dataset.g}"]`), ok = g.rows.filter(x => x.on && !x.done && x.plate && x.slot && x.ym).length;
     if (b) { b.disabled = !ok; b.textContent = t('mv.apply', { n: ok }); }
   }
   else if (el.dataset.invVeh !== undefined && I) invPickVehicle(el.value);
+  else if (el.dataset.mvdYm !== undefined && MV) {   // a detected vehicle's month: its rows follow (unless changed by hand)
+    const box = el.closest('.mv-dv'), gi = +box.dataset.g, g = MV.groups[gi], v = g.det.vehicles.find(x => x.key === box.dataset.k);
+    v.ym = el.value;
+    for (const r of g.rows) if (r.det === v.key && !r.touched && !r.done) r.ym = el.value;
+    mvSyncRows(gi);
+  }
   else if (el.dataset.rnName && RN) { RN.rows[+el.dataset.rnName].name = el.value; }
   else if (el.dataset.diff && U) { U.toggles[el.dataset.diff] = el.checked; drawUpload(); }
   else if (el.dataset.i && I) {
@@ -2197,6 +2266,12 @@ document.addEventListener('change', e => {
   if (el.type !== 'checkbox') return;
   if (el.dataset.diff && U) { U.toggles[el.dataset.diff] = el.checked; drawUpload(); }
   if (el.dataset.rnOn && RN) { RN.rows[+el.dataset.rnOn].on = el.checked; rnCount(); }
+  if (el.dataset.mvdOn !== undefined && MV) {   // untick a detected vehicle: its files are not moved
+    const box = el.closest('.mv-dv'), gi = +box.dataset.g, g = MV.groups[gi], v = g.det.vehicles.find(x => x.key === box.dataset.k);
+    v.on = el.checked; box.classList.toggle('off', !el.checked);
+    for (const r of g.rows) if (r.det === v.key && !r.done) r.on = el.checked;
+    mvSyncRows(gi);
+  }
   if (el.dataset.mvOn !== undefined && MV) {
     const row = el.closest('.mv-row'), g = MV.groups[+row.dataset.g]; g.rows[+row.dataset.r].on = el.checked;
     const b = $(`[data-act="mv-apply"][data-g="${row.dataset.g}"]`), ok = g.rows.filter(x => x.on && !x.done && x.plate && x.slot && x.ym).length;

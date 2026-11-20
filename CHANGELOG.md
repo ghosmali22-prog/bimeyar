@@ -1,5 +1,23 @@
 # Changelog
 
+## v4.1.0 (2026-11-21)
+
+- **Move to new folders → "Detect vehicles automatically"** (per customer): builds the customer's vehicles from what is
+  already there, so nothing has to be entered again:
+  - plates and months in file names that follow the pattern (`99-0016 - …(11) - …`), the year from the file's date
+    (a file saved in January named `(12)` = December of the year before),
+  - the customer's details (plate, contract date, policy start) and vehicles that already exist,
+  - policy PDFs without a plate in the name, read by the existing AI (plate, chassis no., contract / start date).
+  One vehicle per plate; month = contract date → policy start → the `(month)` of a file name.
+- Preview first: detected vehicles (plate, month, where it came from, number of files) and every file → plate → month →
+  folder → name. Months editable, vehicles and rows can be unticked. Nothing is created or moved before **Apply**.
+  Apply creates the ticked vehicles (with the chassis no. / dates the AI read), then moves the files with the same rules
+  (correct names kept, never deleted, **Undo last move** for the whole batch; the vehicles made stay, nothing is deleted).
+  A file with no plate anywhere (e.g. company certificate) stays "please choose" and is not moved.
+- **Backend unchanged** (still Version 7): uses `getFile`, `aiExtract`, `saveVehicle`, `moveNew`.
+- Tests: 12 new checks in `tests/vehicles.test.mjs` (4 plates in 2 months from file names only, a policy PDF without a
+  plate in its name, year from the file date), 10 new browser checks.
+
 ## v4.0.0 (2026-11-21)
 
 - **Many vehicles per customer** (1 to 100+): plate, province, brand/model, chassis no., engine no., year, body type,

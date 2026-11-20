@@ -3,7 +3,7 @@
 // Run: node tests/vehicles.test.mjs
 import { readFileSync } from 'node:fs';
 import { buildName, customerPart, followsPattern } from '../js/naming.js';
-import { VSLOTS, FILE_SLOTS, ymOf, ymFolder, ymText, vehiclesOf, latestOf, vehicleFileName, slotFromAi, slotForOld, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey } from '../js/vehicles.js';
+import { VSLOTS, FILE_SLOTS, ymOf, ymFolder, ymText, vehiclesOf, latestOf, vehicleFileName, slotFromAi, slotForOld, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, monthInName, ymNear, needsAiRead, detectVehicles } from '../js/vehicles.js';
 
 let fail = 0, pass = 0;
 const eq = (a, b, msg) => { if (JSON.stringify(a) !== JSON.stringify(b)) { fail++; console.error('FAIL', msg, '\n   got     ', a, '\n   expected', b); } else pass++; };
@@ -97,6 +97,39 @@ plan[1].plate = '99-0017'; plan[1].ym = '2026-07';
 eq(moveName(plan[1], cust1), '99-0017 - สมมติชัย ทรานสปอร์ต(7) - รูปรถ.jpg', 'pattern name with the customer name, not the nickname');
 eq(movePlan(legacyC, [{ id: 'F3', customerId: 'C2', name: 'scan.pdf', folder: 'policy', type: 'policy' }], [])[0].plate, '1กข 1234', 'one plate -> that plate');
 eq(plateKey('๙๙-๐๐๑๖'), '990016', 'Thai digits');
+
+// v4.1 "Detect vehicles automatically"
+eq(monthInName('99-0016 - สมมติชัย(11) - กรมธรรม์.pdf'), 11, 'month from a pattern name');
+eq(ymNear(11, '2026-11-20T03:00:00Z'), '2026-11', 'month in the name, year from the file date');
+eq(ymNear(12, '2026-01-05'), '2025-12', 'saved in January, named (12) -> December of the year before');
+eq(ymNear(1, '2026-12-28'), '2027-01', 'saved in late December, named (1) -> January next year');
+// a customer with 4 plates in 2 months, from file names only (no plate in the customer details)
+const four = { id: 'C4', name: 'บริษัท สี่คัน จำกัด', nick: 'k.four' };
+const fourFiles = [
+  { id: 'a1', customerId: 'C4', name: '70-1111 - สี่คัน(7) - กรมธรรม์.pdf', folder: 'policy', type: 'policy', mime: 'application/pdf', at: '2026-07-03T00:00:00Z' },
+  { id: 'a2', customerId: 'C4', name: '70-1111 - สี่คัน(7) - ทะเบียนรถ.jpg', folder: 'docs', type: 'car', mime: 'image/jpeg', at: '2026-07-03T00:00:00Z' },
+  { id: 'a3', customerId: 'C4', name: '70-2222 - สี่คัน(7) - กรมธรรม์.pdf', folder: 'policy', type: 'policy', mime: 'application/pdf', at: '2026-07-04T00:00:00Z' },
+  { id: 'a4', customerId: 'C4', name: '70-3333 - สี่คัน(9) - กรมธรรม์.pdf', folder: 'policy', type: 'policy', mime: 'application/pdf', at: '2026-09-01T00:00:00Z' },
+  { id: 'a5', customerId: 'C4', name: '70-4444 - สี่คัน(9) - สลิปโอนเงิน.jpg', folder: 'pay', type: 'payment', mime: 'image/jpeg', at: '2026-09-02T00:00:00Z' },
+  { id: 'a6', customerId: 'C4', name: 'หนังสือรับรองบริษัท.pdf', folder: 'docs', type: 'car', mime: 'application/pdf', at: '2026-07-01T00:00:00Z' },
+];
+const det = detectVehicles(four, fourFiles, []);
+eq(det.vehicles.map(v => [v.plate, v.ym, v.src.join()]), [['70-1111', '2026-07', 'name'], ['70-2222', '2026-07', 'name'], ['70-3333', '2026-09', 'name'], ['70-4444', '2026-09', 'name']], '4 plates in 2 months from file names only');
+eq([det.assign.a1, det.assign.a2, det.assign.a5], ['701111', '701111', '704444'], 'every named file assigned to its plate');
+eq(det.assign.a6, undefined, 'company certificate without a plate anywhere -> please choose');
+// a policy PDF without a plate in its name: the AI read it
+const legacy4 = { id: 'C5', name: 'นายสมชาย ใจดี', plate: '1กข 1234 กรุงเทพมหานคร', policyStart: '2026-02-10', insurer: 'X' };
+const pFiles = [
+  { id: 'p1', customerId: 'C5', name: 'scan0001.pdf', folder: 'policy', type: 'policy', mime: 'application/pdf', at: '2026-03-01T00:00:00Z' },
+  { id: 'p2', customerId: 'C5', name: 'IMG_7.jpg', folder: 'docs', type: 'car', mime: 'image/jpeg', at: '2026-03-01T00:00:00Z' },
+];
+eq([needsAiRead(pFiles[0], '1'), needsAiRead(pFiles[1], '5.3'), needsAiRead(fourFiles[0], '1')], [true, false, false], 'only policy PDFs without a plate in the name are read by the AI');
+const det2 = detectVehicles(legacy4, pFiles, [], { p1: { plate: '2ขค 5678', vin: 'VIN555666', contractDate: '2026-04-05', policyStart: '2026-04-05', insurer: 'Viriyah' } });
+eq(det2.vehicles.map(v => [v.plate, v.ym, v.src.join()]), [['1กข 1234', '2026-02', 'customer'], ['2ขค 5678', '2026-04', 'ai']], 'customer details + AI plate -> 2 vehicles, month = contract date');
+eq([det2.assign.p1, det2.assign.p2, det2.vehicles[1].data.vin], ['2ขค5678', undefined, 'VIN555666'], 'policy PDF assigned by the AI; photo without plate -> please choose');
+const det3 = detectVehicles(legacy4, [{ id: 'q', customerId: 'C5', name: '1กข 1234 - สมชาย(1) - กรมธรรม์.pdf', at: '2026-01-20' }], []);
+eq(det3.vehicles.map(v => v.ym), ['2026-02'], 'policy start in the customer details wins over the month in a file name');
+eq(detectVehicles(cust1, [], V).vehicles.map(v => [v.plate, v.src.join()]), [['99-0016', 'vehicle'], ['99-0017', 'vehicle'], ['71-0001', 'vehicle']], 'existing vehicles are reused, not made twice');
 
 /* ================= backend with a fake Drive ================= */
 const FOLDER = 'application/vnd.google-apps.folder';
