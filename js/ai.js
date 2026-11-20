@@ -6,12 +6,12 @@ import { toIsoDate, thaiPhone, thaiId, money, latinDigits, beToCe } from './vali
 
 /** Customer fields, grouped for the forms. */
 export const FIELD_GROUPS = {
-  customer: ['name', 'nameEn', 'phone', 'idNo', 'dob', 'address'],
+  customer: ['name', 'nick', 'nameEn', 'phone', 'idNo', 'dob', 'address'],
   vehicle: ['brand', 'model', 'year', 'color', 'plate', 'province', 'vin', 'engineNo'],
-  policy: ['insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'policyStart', 'policyExpiry'],
+  policy: ['insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'contractDate', 'policyStart', 'policyExpiry'],
 };
 export const ALL_FIELDS = [...FIELD_GROUPS.customer, ...FIELD_GROUPS.vehicle, ...FIELD_GROUPS.policy];
-export const DATE_FIELDS = new Set(['dob', 'policyStart', 'policyExpiry']);
+export const DATE_FIELDS = new Set(['dob', 'contractDate', 'policyStart', 'policyExpiry']);
 
 /** Which customer fields a document type may change */
 const UPDATES = {
@@ -64,14 +64,14 @@ export function normalize(r) {
   for (const k of ['address', 'brand', 'model', 'color', 'plate', 'province', 'vin', 'engineNo', 'insurer', 'policyNo', 'policyType']) { [v, c] = get(k); put(k, latinDigits(v), c); }
   [v, c] = get('year'); if (v) { const y = +(latinDigits(v).match(/\d{4}/) || [])[0]; put('year', y ? String(beToCe(y)) : v, c, y ? '' : 'v.year'); }
   for (const k of ['coverage', 'premium']) { [v, c] = get(k); if (v) { const m = money(v); put(k, m != null ? String(m) : v, c, m != null ? '' : 'v.money'); } }
-  for (const k of ['dob', 'policyStart', 'policyExpiry']) { [v, c] = get(k); if (v) { const d = toIsoDate(v); if (d) put(k, d, c); else notes[k] = 'v.date'; } }
+  for (const k of ['dob', 'contractDate', 'policyStart', 'policyExpiry']) { [v, c] = get(k); if (v) { const d = toIsoDate(v); if (d) put(k, d, c); else notes[k] = 'v.date'; } }
   if (values.policyStart && values.policyExpiry && values.policyExpiry <= values.policyStart) { conf.policyExpiry = Math.min(conf.policyExpiry, 0.4); notes.policyExpiry = 'v.order'; }
 
   const receipt = {};
   [v, c] = get('receiptAmount'); if (v) receipt.amount = money(v);
   [v, c] = get('receiptDate'); if (v) receipt.date = toIsoDate(v);
   [v, c] = get('payer'); if (v) receipt.payer = v;
-  return { docType: r?.docType || 'other', values, conf, notes, receipt };
+  return { docType: r?.docType || 'other', docName: String(r?.docName || '').trim(), values, conf, notes, receipt };
 }
 
 /** Folder the AI suggests for this document (the user always confirms). null = no suggestion. */

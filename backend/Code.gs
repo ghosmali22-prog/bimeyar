@@ -18,6 +18,7 @@
  *   COMPANY         company info for invoices (set from the app, admin only)
  *   INV_SEQ         last invoice number per year (set automatically, under a lock)
  *   AI_LOG          last 200 AI calls: time, ms, size, tokens, result. No customer data.
+ *   RENAME_LAST     id of the last batch of the "Rename files" tool, for "Undo last rename" (admin)
  */
 
 // Web OAuth Client ID used by the frontend's "Sign in with Google" (public, not a secret).
@@ -80,6 +81,7 @@ const CFIELDS = {
   brand: 40, model: 60, year: 4, color: 30, province: 60, vin: 40, engineNo: 40,
   insurer: 80, policyNo: 60, policyType: 60, coverage: 20, premium: 20,
   policyStart: 'date', policyExpiry: 'date', note: 500,
+  nick: 40, contractDate: 'date',                                       // v3.2: nickname for file names, contract date (วันทำสัญญาประกันภัย)
 };
 
 /* ============================ entry points ============================ */
@@ -196,7 +198,9 @@ const ACTIONS = {
       if (!req.data) throw err('bad_request', 'No file data');
       const bytes = Utilities.base64Decode(req.data);
       if (bytes.length > MAX_BYTES) throw err('too_big', 'File is larger than 25 MB');
-      const name = clean(m.name, 200) || 'file';
+      const orig = clean(m.orig, 200);   // v3.2: the original file name, kept in the description
+      let name = fileName(m.name) || fileName(orig) || 'file';
+      if (!extOf(name) && extOf(orig)) name = fileName(name + extOf(orig));
       const mime = clean(m.mime, 120) || 'application/octet-stream';
       // New in v3: a sub-folder slot. Without one (old clients) the file goes into the customer folder, as before.
       let parent = m.customerId;
@@ -204,15 +208,16 @@ const ACTIONS = {
         if (SLOTS.indexOf(m.folder) < 0) throw err('bad_request', 'Unknown folder');
         parent = ensureSubs(m.customerId, false).folders[m.folder];
       }
+      name = uniqueName(name, siblingNames(parent));   // never the same name twice in a folder: " (2)", " (3)"…
       const blob = Utilities.newBlob(bytes, mime, name);
-      const f = Drive.Files.create({
-        name, mimeType: mime, parents: [parent], description: clean(m.note, 2000),
+      const f0 = Drive.Files.create({
+        name, mimeType: mime, parents: [parent], description: descJoin(clean(m.note, 2000), orig ? [ORIG + orig] : []),
         appProperties: {
           bimeyar: 'item', kind: 'file', type: type(m.type), expiry: date(m.expiry),
           by: user.email.slice(0, 100), at: new Date().toISOString(),
         },
       }, blob, { fields: FIELDS });
-      return toFile(f, m.customerId, m.folder || '');
+      return toFile(settleName(f0, parent), m.customerId, m.folder || '');
     },
   },
 
@@ -224,7 +229,10 @@ const ACTIONS = {
       const own = ownerOf(m);
       const res = { name: clean(f.name, 200) || undefined, appProperties: { type: type(f.type), expiry: date(f.expiry) } };
       // An invoice keeps its data in the description; never overwrite it with a note.
-      if (!(m.appProperties && m.appProperties.kind === 'invoice')) res.description = clean(f.note, 2000);
+      // The original-name / rename lines of the description are kept (the app shows only the note).
+      if (!(m.appProperties && m.appProperties.kind === 'invoice')) {
+        res.description = descJoin(clean(f.note, 2000), descSplit(Drive.Files.get(f.id, { fields: 'description' }).description).meta);
+      }
       return toFile(Drive.Files.update(res, f.id, null, { fields: FIELDS }), own.customer, own.slot);
     },
   },
@@ -247,6 +255,92 @@ const ACTIONS = {
   deleteFile: {
     need: 'editor',
     run: req => { assertFile(req.id); Drive.Files.update({ trashed: true }, req.id); return true; },
+  },
+
+  /* ---------- share ONE file by link (v3.2) ---------- */
+  /**
+   * Makes only this file "Anyone with the link: Viewer" and returns its link. assertFile refuses folders
+   * (customer folders, sub-folders, the Bimeyar folder) and anything outside Bimeyar, so nothing else is ever shared.
+   */
+  shareFile: {
+    need: 'editor',
+    run: req => {
+      const m = assertFile(req.id), own = ownerOf(m);
+      const perms = Drive.Permissions.list(req.id, { fields: 'permissions(id,type,role)' }).permissions || [];
+      const anyone = perms.filter(p => p.type === 'anyone');
+      if (!anyone.length) Drive.Permissions.create({ type: 'anyone', role: 'reader', allowFileDiscovery: false }, req.id);
+      anyone.forEach(p => { if (p.role !== 'reader') Drive.Permissions.update({ role: 'reader' }, req.id, p.id); });   // viewer only
+      const f = Drive.Files.update({ appProperties: { link: '1' } }, req.id, null, { fields: FIELDS + ',webViewLink' });
+      return { file: toFile(f, own.customer, own.slot), link: f.webViewLink || ('https://drive.google.com/file/d/' + req.id + '/view?usp=sharing') };
+    },
+  },
+  /** Makes the file private again: removes only the "anyone with the link" permission. */
+  unshareFile: {
+    need: 'editor',
+    run: req => {
+      const m = assertFile(req.id), own = ownerOf(m);
+      const perms = Drive.Permissions.list(req.id, { fields: 'permissions(id,type)' }).permissions || [];
+      perms.filter(p => p.type === 'anyone').forEach(p => Drive.Permissions.remove(req.id, p.id));
+      const f = Drive.Files.update({ appProperties: { link: null } }, req.id, null, { fields: FIELDS });
+      return toFile(f, own.customer, own.slot);
+    },
+  },
+
+  /* ---------- rename existing files (admin, v3.2) ---------- */
+  /**
+   * Renames the given files ONLY: no move, no delete, no content change. Invoices are never renamed.
+   * The old name is written in the description ("Renamed: old ⇒ new") and the file is tagged with the batch id,
+   * so "Undo last rename" can put the old names back. A name already used in the folder gets " (2)", " (3)"…
+   */
+  renameFiles: {
+    need: 'admin',
+    run: req => {
+      const batch = String(req.batch || '');
+      if (!/^[\w-]{6,40}$/.test(batch)) throw err('bad_request', 'Bad batch id');
+      const t0 = Date.now();
+      const rows = (Array.isArray(req.items) ? req.items : []).slice(0, 50).map(it => {
+        const id = String((it && it.id) || '');
+        if (Date.now() - t0 > 240000) return { id, status: 'later' };
+        try { return renameOne(id, it.name, batch); } catch (e) { return { id, status: 'error', msg: String(e.message || e) }; }
+      });
+      // remembered for "Undo last rename" only when something was renamed, so an empty run never hides the previous undo
+      if (rows.some(r => r.status === 'ok')) PropertiesService.getScriptProperties().setProperty('RENAME_LAST', batch);
+      return { rows };
+    },
+  },
+  /** Puts back the old names of the last rename batch. A file renamed again since then is left as it is. */
+  renameUndo: {
+    need: 'admin',
+    run: () => {
+      const batch = PropertiesService.getScriptProperties().getProperty('RENAME_LAST') || '';
+      const out = { done: 0, skipped: 0, more: false };
+      if (!/^[\w-]{6,40}$/.test(batch)) return out;
+      const list = Drive.Files.list({ q: "appProperties has { key='rnb' and value='" + batch + "' } and trashed=false", fields: 'files(id)', pageSize: 200, spaces: 'drive' }).files || [];
+      const t0 = Date.now();
+      for (const x of list) {
+        if (Date.now() - t0 > 240000) { out.more = true; break; }
+        try { assertFile(x.id); } catch (e) { continue; }
+        const f = Drive.Files.get(x.id, { fields: 'id,name,description,parents' });
+        const d = descSplit(f.description);
+        let i = d.meta.length - 1;
+        while (i >= 0 && d.meta[i].indexOf(RENAMED) !== 0) i--;
+        const s = i >= 0 ? d.meta[i].slice(RENAMED.length) : '', k = s.lastIndexOf(ARROW);
+        const oldName = k > 0 ? s.slice(0, k) : '', newName = k > 0 ? s.slice(k + ARROW.length) : '';
+        if (!oldName || newName !== f.name) {   // renamed again since: leave it as it is, only drop the batch tag
+          Drive.Files.update({ appProperties: { rnb: null } }, x.id);
+          out.skipped++;
+          continue;
+        }
+        withLock(() => {
+          d.meta.splice(i, 1);
+          const name = uniqueName(oldName, siblingNames((f.parents || [])[0], x.id));
+          Drive.Files.update({ name, description: descJoin(d.note, d.meta), appProperties: { rnb: null } }, x.id);
+        });
+        out.done++;
+      }
+      if (list.length >= 200) out.more = true;
+      return out;
+    },
   },
 
   // File content as base64 (files are private, so the browser can't load them from Drive directly)
@@ -553,11 +647,88 @@ function toCustomer(x) {
 function toFile(x, customerId, slot) {
   const ap = x.appProperties || {};
   const inv = ap.kind === 'invoice';
+  const d = inv ? { note: '', meta: [] } : descSplit(x.description);
+  const orig = d.meta.filter(l => l.indexOf(ORIG) === 0)[0];
   return {
     id: x.id, customerId: customerId || (x.parents || [])[0] || '', folder: slot || '', name: x.name, type: ap.type || 'other', expiry: ap.expiry || '',
-    note: inv ? '' : (x.description || ''), mime: x.mimeType, size: +x.size || 0, createdAt: x.createdTime, by: ap.by || '', at: ap.at || x.createdTime,
+    note: d.note, mime: x.mimeType, size: +x.size || 0, createdAt: x.createdTime, by: ap.by || '', at: ap.at || x.createdTime,
     invoice: inv ? (ap.invNo || x.name) : '',
+    orig: orig ? orig.slice(ORIG.length) : '', shared: ap.link === '1',   // v3.2
   };
+}
+
+/* ---------- file names and description lines (v3.2) ---------- */
+
+/**
+ * Lines the app adds to a file's description: the original file name and the rename history.
+ * The app shows the rest of the description as the file's note and never changes these lines.
+ */
+const ORIG = 'Original file name: ', RENAMED = 'Renamed: ', ARROW = ' ⇒ ';
+function descSplit(desc) {
+  const note = [], meta = [];
+  String(desc || '').split('\n').forEach(l => (l.indexOf(ORIG) === 0 || l.indexOf(RENAMED) === 0 ? meta : note).push(l));
+  return { note: note.join('\n').trim(), meta };
+}
+function descJoin(note, meta) {
+  meta = meta.slice();
+  // keep the description short: the original name + the last 10 renames
+  while (meta.filter(l => l.indexOf(RENAMED) === 0).length > 10) meta.splice(meta.findIndex(l => l.indexOf(RENAMED) === 0), 1);
+  return (note ? note + (meta.length ? '\n\n' : '') : '') + meta.join('\n');
+}
+/** File name without / \ : * ? " < > | (and control characters), at most 200 characters, extension kept. */
+function fileName(s) {
+  let n = String(s == null ? '' : s).replace(/[\/\\:*?"<>|\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim();
+  if (n.length > 200) { const e = extOf(n); n = n.slice(0, 200 - e.length).trim() + e; }
+  return n;
+}
+function extOf(name) { const m = String(name || '').match(/\.([A-Za-z0-9]{1,8})$/); return m ? '.' + m[1] : ''; }
+/** Names of everything else in a folder, as { name: 1 }. */
+function siblingNames(parent, exceptId) {
+  const names = {};
+  let page;
+  do {
+    const r = Drive.Files.list({ q: "'" + parent + "' in parents and trashed=false", fields: 'nextPageToken,files(id,name)', pageSize: 1000, pageToken: page, spaces: 'drive' });
+    (r.files || []).forEach(f => { if (f.id !== exceptId) names[f.name] = 1; });
+    page = r.nextPageToken;
+  } while (page);
+  return names;
+}
+/** "name.pdf" -> "name (2).pdf", "name (3).pdf"… until it is free. Same rule as uniqueIn in js/naming.js. */
+function uniqueName(name, taken) {
+  if (!taken[name]) return name;
+  const e = extOf(name), base = e ? name.slice(0, -e.length) : name;
+  for (let i = 2; i < 1000; i++) { const n = base + ' (' + i + ')' + e; if (!taken[n]) return n; }
+  return base + ' (' + Date.now() + ')' + e;
+}
+/**
+ * Two uploads at the same moment can pick the same free name. After saving, the later one moves on to the next number.
+ * Only the name changes. A busy lock never fails an upload that is already saved.
+ */
+function settleName(f, parent) {
+  try {
+    return withLock(() => {
+      const taken = siblingNames(parent, f.id);
+      return taken[f.name] ? Drive.Files.update({ name: uniqueName(f.name, taken) }, f.id, null, { fields: FIELDS }) : f;
+    });
+  } catch (e) { return f; }
+}
+/** One file of the rename tool. Only the name (and the description line + batch tag) change. */
+function renameOne(id, newName, batch) {
+  const m = assertFile(id);
+  if (m.appProperties && m.appProperties.kind === 'invoice') return { id, status: 'invoice' };
+  const cur = Drive.Files.get(id, { fields: 'id,name,description,parents' });
+  let name = fileName(newName);
+  const e = extOf(cur.name);
+  if (e && name.toLowerCase().slice(-e.length) !== e.toLowerCase()) name = fileName(name + e);   // the extension never changes
+  if (!name || name === e) return { id, status: 'empty' };
+  if (name === cur.name) return { id, status: 'same', name };
+  return withLock(() => {
+    name = uniqueName(name, siblingNames((cur.parents || [])[0], id));
+    if (name === cur.name) return { id, status: 'same', name };
+    const d = descSplit(cur.description);
+    Drive.Files.update({ name, description: descJoin(d.note, d.meta.concat([RENAMED + cur.name + ARROW + name])), appProperties: { rnb: batch } }, id);
+    return { id, status: 'ok', old: cur.name, name };
+  });
 }
 
 /* ============================ company settings ============================ */
@@ -839,9 +1010,13 @@ const AI_FIELDS = {
   insurer: 'Insurance company name', policyNo: 'Policy number', policyType: 'Policy type or class, e.g. ชั้น 1, 2+, 3, พ.ร.บ.',
   coverage: 'Sum insured / coverage amount, digits only', premium: 'Total premium, digits only, with decimals if printed',
   policyStart: 'Coverage start date, YYYY-MM-DD with the year exactly as printed', policyExpiry: 'Coverage end date, YYYY-MM-DD with the year exactly as printed',
+  contractDate: 'Contract date of the insurance (วันทำสัญญาประกันภัย / วันที่ทำสัญญา), YYYY-MM-DD with the year exactly as printed',
   receiptAmount: 'For a payment receipt or slip: amount paid, digits only', receiptDate: 'For a payment receipt: payment date, YYYY-MM-DD with the year exactly as printed',
   payer: 'For a payment receipt: name of the payer',
 };
+
+/** Thai document names for file names (v3.2); the same names as DOC_NAMES in js/naming.js. */
+const AI_DOC_NAMES = ['กรมธรรม์', 'บัตรประชาชน', 'ทะเบียนรถ', 'ใบขับขี่', 'หนังสือเดินทาง', 'หนังสือรับรองบริษัท', 'ภาพถ่ายรถ', 'สลิปโอนเงิน', 'ใบแจ้งหนี้', 'ใบเสร็จ'];
 
 function aiSchema() {
   const field = { type: 'object', properties: { value: { type: ['string', 'null'] }, confidence: { type: 'number', minimum: 0, maximum: 1 } }, required: ['value', 'confidence'] };
@@ -851,9 +1026,10 @@ function aiSchema() {
     type: 'object',
     properties: {
       docType: { type: 'string', enum: ['policy', 'registration', 'id_card', 'receipt', 'other'], description: 'policy = insurance policy or schedule; registration = vehicle registration book; id_card = ID card, passport or driving licence; receipt = payment receipt, transfer slip or invoice' },
+      docName: { type: 'string', description: 'Short Thai name of this document. Use one of: ' + AI_DOC_NAMES.join(', ') + '. If none fits, a short Thai name of the document as it calls itself.' },
       fields: { type: 'object', properties: props, required: Object.keys(AI_FIELDS) },
     },
-    required: ['docType', 'fields'],
+    required: ['docType', 'docName', 'fields'],
   };
 }
 
@@ -866,6 +1042,7 @@ const AI_PROMPT = [
   '3. Dates: return YYYY-MM-DD but keep the YEAR NUMBER EXACTLY AS PRINTED (for example a Buddhist year 2569 stays 2569). Do not convert eras.',
   '4. confidence is 0-1: 0.9+ only when the text is sharp and unambiguous; below 0.6 when partly blurred or the label is unclear.',
   '5. The customer is the insured person / owner, never the insurance company or the agent.',
+  '6. docName: the Thai name of what this document is (for example กรมธรรม์ for any insurance policy or schedule, ภาพถ่ายรถ for a photo of a car, สลิปโอนเงิน for a bank transfer slip).',
 ].join('\n');
 
 function aiExtract(req) {
@@ -923,7 +1100,7 @@ function aiExtract(req) {
         const r = aiAttempt(m, payload, key);
         attempts.push({ model: m.id, status: r.status, ms: r.ms, tokens: r.tokens || 0 });
         if (r.out) {
-          const res = { docType: r.out.docType || 'other', fields: r.out.fields || {}, model: m.id, tries: attempts.length };
+          const res = { docType: r.out.docType || 'other', docName: String(r.out.docName || '').slice(0, 60), fields: r.out.fields || {}, model: m.id, tries: attempts.length };
           try { cache.put(ck + ':res', JSON.stringify(res), AI_CACHE_S); } catch (e) { }   // kept even if the app stopped waiting
           return res;
         }
@@ -946,7 +1123,7 @@ function aiExtract(req) {
 /** Cache key for a set of files: SHA-256 of their types and contents (the hash is not logged). */
 function aiCacheKey(files) {
   const d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, files.map(f => f.mime + ':' + f.data).join('|'));
-  return 'ai1_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');
+  return 'ai2_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');
 }
 function aiCached(cache, ck) {
   try { const v = cache.get(ck + ':res'); return v ? JSON.parse(v) : null; } catch (e) { return null; }

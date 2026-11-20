@@ -1,6 +1,7 @@
 // On-device storage (IndexedDB), for trying the app out or working without Drive
 import { uid } from './util.js';
 import { calcTotals } from './invoice.js';
+import { uniqueIn, extOf, withExt } from './naming.js';
 
 const rq = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
 
@@ -40,8 +41,13 @@ export class LocalStore {
     for (const i of (await rq(this.s('invoices').getAll())).filter(i => i.customerId === id)) await rq(this.s('invoices', 'readwrite').delete(i.id));
     await rq(this.s('customers', 'readwrite').delete(id));
   }
+  /** Names of the other files in the same customer folder (same rule as Drive: never the same name twice) */
+  async taken(f) {
+    return new Set((await rq(this.s('files').getAll())).filter(x => x.id !== f.id && x.customerId === f.customerId && (x.folder || '') === (f.folder || '')).map(x => x.name));
+  }
   async addFile(blob, meta, onProgress) {
     const f = { id: uid(), createdAt: new Date().toISOString(), size: blob.size, mime: blob.type || 'application/octet-stream', folder: '', ...meta };
+    f.name = uniqueIn(f.name, await this.taken(f));
     await rq(this.s('blobs', 'readwrite').put(blob, f.id));
     await rq(this.s('files', 'readwrite').put(f));
     onProgress?.(1);
@@ -54,6 +60,34 @@ export class LocalStore {
     await rq(this.s('blobs', 'readwrite').delete(id));
   }
   getBlob(id) { return rq(this.s('blobs').get(id)); }
+
+  // Rename tool in demo mode (same rules as the backend: only the name changes, undo puts the old name back)
+  async renameFiles(batch, items) {
+    try { localStorage.setItem('by_rn_last', batch); } catch { }
+    const rows = [];
+    for (const it of items) {
+      const f = await rq(this.s('files').get(it.id));
+      if (!f) { rows.push({ id: it.id, status: 'error' }); continue; }
+      const name = uniqueIn(withExt(String(it.name || '').trim(), extOf(f.name)), await this.taken(f));
+      if (!name || name === f.name) { rows.push({ id: it.id, status: 'same' }); continue; }
+      f.renamed = { batch, old: f.name, name };
+      const old = f.name; f.name = name;
+      await rq(this.s('files', 'readwrite').put(f));
+      rows.push({ id: it.id, status: 'ok', old, name });
+    }
+    return { rows };
+  }
+  async renameUndo() {
+    let last = ''; try { last = localStorage.getItem('by_rn_last') || ''; } catch { }
+    const out = { done: 0, skipped: 0, more: false };
+    for (const f of await rq(this.s('files').getAll())) {
+      if (!last || f.renamed?.batch !== last) continue;
+      if (f.name === f.renamed.name) { f.name = uniqueIn(f.renamed.old, await this.taken(f)); out.done++; } else out.skipped++;
+      delete f.renamed;
+      await rq(this.s('files', 'readwrite').put(f));
+    }
+    return out;
+  }
   async quota() { return null; }
 
   // Company settings are kept in this browser in demo mode
