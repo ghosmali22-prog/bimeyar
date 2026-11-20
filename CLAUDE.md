@@ -74,11 +74,13 @@ to a production system. Talk to the owner (Pejman) in Persian.
 
 ## Current deployment
 
-- **Backend**: Apps Script deployment **Version 2** ("v3.0.0"), live since 2026-11-17. Version 1 is the v2 backend.
-- **Frontend**: `main` = release tag `v3.1.0` (v2 design with the v3 features). Before it: `v3.0.1-stable` (v3.0 look).
-- v3.2.0 (file naming, rename tool, nickname, share link) is on branch `feature/file-naming-share`; rollback tag of `main` before it: `v3.1-pre-naming`.
-  Tests: `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive).
+- **Backend**: Apps Script deployment **Version 5** ("v3.2.0"), live since 2026-11-20, same `/exec` URL. It includes the v3.1.2 AI fixes.
+  Roll back: Manage deployments → edit → choose the version before 5 (v3.1.2 backend; it works with the v3.2.0 frontend except
+  share link, rename tool and the original-name line). Version 2 = v3.0.0, Version 1 = the v2 backend.
+- **Frontend**: `main` = release tag `v3.2.0` (automatic file names, rename tool with undo, nickname + contract date, share one file by link).
+  Rollback tag of `main` before it: `v3.1-pre-naming` (= `v3.1.0`). Before that: `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
+- Tests: `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
 
 ## Design (owner's decision)
 
