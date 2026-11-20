@@ -1,5 +1,21 @@
 # Changelog
 
+## v4.2.0 (2026-11-21)
+
+- **Settings → Restore original file names** (admin): lists every file inside the root whose name was changed by the
+  rename or move tools ("Renamed: old ⇒ new" lines), with the name it had BEFORE the first change. Names given at
+  upload are not listed; invoices never. Preview per customer: current name → old name (editable), tick boxes,
+  Tick all / Untick all, and per row "Name only" (default) or "Name + previous folder" (the folder before the move tool,
+  from the "Moved from:" line). **Back** changes nothing; nothing changes before **Apply**.
+- Apply (batches of 15, progress bar) only renames, and moves back when chosen. If the previous folder no longer exists
+  (or is not this customer's), only the name is restored, the file stays where it is and the report lists it; old
+  folders are never re-created. A name already in the folder gets " (2)". Never deletes, never changes the content.
+  History lines stay; "Restored: new ⇒ old" is added. **Undo restore** puts the last batch back.
+- The description now always keeps the FIRST "Renamed:" line (plus the last 9), so the oldest name is never lost again.
+- **Backend changed → Version 8**: new actions `restorePlan` (read only), `restoreNames`, `restoreUndo`; Script property
+  `RESTORE_LAST`; file tags `rsb` / `rsf` / `rst`. No new permission, no `setup`.
+- Tests: `node tests/restore.test.mjs` (30), 14 new browser checks.
+
 ## v4.1.0 (2026-11-21)
 
 - **Move to new folders → "Detect vehicles automatically"** (per customer): builds the customer's vehicles from what is

@@ -24,6 +24,7 @@
  *   AI_LOG          last 200 AI calls: time, ms, size, tokens, result. No customer data.
  *   RENAME_LAST     id of the last batch of the "Rename files" tool, for "Undo last rename" (admin)
  *   MOVE_LAST       id of the last batch of the "Move to new folders" tool (v4), for "Undo last move" (admin)
+ *   RESTORE_LAST    id of the last batch of "Restore original file names" (v4.2), for "Undo restore" (admin)
  *
  * v4 folders (per vehicle), all found by their tags (appProperties), never by name:
  *   customer folder
@@ -547,6 +548,75 @@ const ACTIONS = {
       return out;
     },
   },
+  /* ---------- restore original file names (admin, v4.2) ---------- */
+  /**
+   * Read only: every file inside the root whose name was changed by the rename / move tools ("Renamed: old ⇒ new"
+   * lines), with its oldest name (before the FIRST change) and, when the move tool moved it, its previous folder and
+   * whether that folder still exists for the same customer. Names given at upload are not listed. Invoices never.
+   */
+  restorePlan: {
+    need: 'admin',
+    run: () => {
+      const root = rootId();
+      const all = listAll(tagQuery('item'));
+      const ids = {};
+      all.forEach(f => { if (f.mimeType === FOLDER && (f.parents || []).indexOf(root) >= 0) ids[f.id] = f.name; });
+      const own = {};   // folder id -> customer id (customer folders, v3 sub-folders, v4 file folders)
+      Object.keys(ids).forEach(id => { own[id] = id; });
+      listAll(tagQuery('sub')).forEach(x => { const c = (x.parents || [])[0]; if (ids[c] && SLOTS.indexOf(tagOf(x, 'slot')) >= 0) own[x.id] = c; });
+      const tree = vehicleTree(ids);
+      Object.keys(tree.slotOf).forEach(id => { if (tree.slotOf[id].slot !== '5') own[id] = tree.slotOf[id].v.customerId; });
+      const rows = [];
+      all.forEach(f => {
+        if (f.mimeType === FOLDER || tagOf(f, 'kind') === 'invoice') return;
+        const p = (f.parents || [])[0], cid = own[p];
+        if (!cid) return;
+        const h = nameHistory(descSplit(f.description).meta);
+        if (!h.oldest || h.oldest === f.name) return;
+        const from = h.fromId && h.fromId !== p ? { id: h.fromId, name: h.fromName, ok: own[h.fromId] === cid } : null;
+        rows.push({ id: f.id, customerId: cid, customer: ids[cid], name: f.name, old: h.oldest, from });
+      });
+      return rows.sort((a, b) => a.customer.localeCompare(b.customer) || a.name.localeCompare(b.name));
+    },
+  },
+  /**
+   * Gives the files back their old name (and, with back: true, puts them back into their previous folder when it
+   * still exists for the same customer; otherwise only the name, note 'folder_gone'). Never deletes, never changes
+   * the content. The history lines stay; a line "Restored: new ⇒ old" is added. Small batches (20 files, ~200 s).
+   */
+  restoreNames: {
+    need: 'admin',
+    run: req => {
+      const batch = String(req.batch || '');
+      if (!/^[\w-]{6,40}$/.test(batch)) throw err('bad_request', 'Bad batch id');
+      const t0 = Date.now();
+      const rows = (Array.isArray(req.items) ? req.items : []).slice(0, 20).map(it => {
+        const id = String((it && it.id) || '');
+        if (Date.now() - t0 > 200000) return { id, status: 'later' };
+        try { return restoreOne(id, it, batch); } catch (e) { return { id, status: 'error', msg: String(e.message || e) }; }
+      });
+      if (rows.some(r => r.status === 'ok')) PropertiesService.getScriptProperties().setProperty('RESTORE_LAST', batch);
+      return { rows };
+    },
+  },
+  /** Puts the last restore batch back (name and folder). A file changed again since then is left as it is. */
+  restoreUndo: {
+    need: 'admin',
+    run: () => {
+      const batch = PropertiesService.getScriptProperties().getProperty('RESTORE_LAST') || '';
+      const out = { done: 0, skipped: 0, more: false };
+      if (!/^[\w-]{6,40}$/.test(batch)) return out;
+      const list = Drive.Files.list({ q: "appProperties has { key='rsb' and value='" + batch + "' } and trashed=false", fields: 'files(id)', pageSize: 200, spaces: 'drive' }).files || [];
+      const t0 = Date.now();
+      for (const x of list) {
+        if (Date.now() - t0 > 200000) { out.more = true; break; }
+        try { if (undoRestoreOne(x.id)) out.done++; else out.skipped++; } catch (e) { out.skipped++; }
+      }
+      if (list.length >= 200) out.more = true;
+      return out;
+    },
+  },
+
   /**
    * The v3 folders (01_… 04_) with the number of items still inside, so the owner can delete the empty ones
    * by hand in Drive. This action only reads: it never deletes anything.
@@ -1059,7 +1129,66 @@ function folderOfCustomer(id, customer) {
   } catch (e) { return false; }
 }
 
-const MOVED = 'Moved from: ';
+const MOVED = 'Moved from: ', RESTORED = 'Restored: ';
+/**
+ * From a file's description lines: its oldest name (the "old" of the FIRST "Renamed:" line, i.e. before the first
+ * change by the app) and the folder it had before the first move by the move tool ("Moved from: name [id]").
+ */
+function nameHistory(meta) {
+  const ren = meta.filter(l => l.indexOf(RENAMED) === 0)[0];
+  const mv = meta.filter(l => l.indexOf(MOVED) === 0)[0];
+  let oldest = '', fromId = '', fromName = '';
+  if (ren) { const s = ren.slice(RENAMED.length), k = s.lastIndexOf(ARROW); if (k > 0) oldest = s.slice(0, k); }
+  if (mv) { const m = mv.slice(MOVED.length).match(/^(.*) \[([\w-]{10,})\]$/); if (m) { fromName = m[1]; fromId = m[2]; } }
+  return { oldest, fromId, fromName };
+}
+/** One file of restoreNames */
+function restoreOne(id, it, batch) {
+  const m = assertFile(id);
+  if (tagOf(m, 'kind') === 'invoice') return { id, status: 'invoice' };   // an invoice keeps its number as name
+  const own = ownerOf(m);
+  const cur = Drive.Files.get(id, { fields: 'id,name,description,parents' });
+  const d = descSplit(cur.description), h = nameHistory(d.meta);
+  if (!h.oldest) return { id, status: 'nohistory' };
+  let want = fileName((it && it.name) || h.oldest);
+  const e = extOf(h.oldest) || extOf(cur.name);
+  if (e && want.toLowerCase().slice(-e.length) !== e.toLowerCase()) want = fileName(want + e);   // never without its extension
+  if (!want || want === e) return { id, status: 'empty' };
+  const from = (cur.parents || [])[0];
+  let target = from, note = '';
+  if (it && it.back && h.fromId && h.fromId !== from) {
+    if (folderOfCustomer(h.fromId, own.customer)) target = h.fromId; else note = 'folder_gone';   // never re-created
+  }
+  return withLock(() => {
+    const name = uniqueName(want, siblingNames(target, id));
+    if (name === cur.name && target === from) return { id, status: 'same', note };
+    const res = { name, description: descJoin(d.note, d.meta.concat([RESTORED + cur.name + ARROW + name])), appProperties: { rsb: batch, rsf: from, rst: target } };
+    if (target !== from) Drive.Files.update(res, id, null, { addParents: target, removeParents: from });
+    else Drive.Files.update(res, id);
+    return { id, status: 'ok', name, moved: target !== from, note };
+  });
+}
+/** Undo of one restored file. false = left as it is (changed again since, or the folder it came from is gone). */
+function undoRestoreOne(id) {
+  const m = assertFile(id), own = ownerOf(m);
+  const f = Drive.Files.get(id, { fields: 'id,name,description,parents,appProperties' });
+  const a = f.appProperties || {}, now = (f.parents || [])[0];
+  const clear = { rsb: null, rsf: null, rst: null };
+  const d = descSplit(f.description);
+  let i = d.meta.length - 1;
+  while (i >= 0 && d.meta[i].indexOf(RESTORED) !== 0) i--;
+  const s = i >= 0 ? d.meta[i].slice(RESTORED.length) : '', k = s.lastIndexOf(ARROW);
+  const before = k > 0 ? s.slice(0, k) : '', after = k > 0 ? s.slice(k + ARROW.length) : '';
+  if (!before || after !== f.name || now !== a.rst) { Drive.Files.update({ appProperties: clear }, id); return false; }
+  withLock(() => {
+    d.meta.splice(i, 1);
+    const target = a.rsf && a.rsf !== now && folderOfCustomer(a.rsf, own.customer) ? a.rsf : now;
+    const res = { name: uniqueName(before, siblingNames(target, id)), description: descJoin(d.note, d.meta), appProperties: clear };
+    if (target !== now) Drive.Files.update(res, id, null, { addParents: target, removeParents: now });
+    else Drive.Files.update(res, id);
+  });
+  return true;
+}
 /** One file of the move tool (see moveNew). */
 function moveOne(id, it, batch) {
   const m = assertFile(id), own = ownerOf(m);
@@ -1187,13 +1316,17 @@ function toFile(x, customerId, slot, vehicleId, vslot) {
 const ORIG = 'Original file name: ', RENAMED = 'Renamed: ', ARROW = ' ⇒ ';
 function descSplit(desc) {
   const note = [], meta = [];
-  String(desc || '').split('\n').forEach(l => (l.indexOf(ORIG) === 0 || l.indexOf(RENAMED) === 0 || l.indexOf(MOVED) === 0 ? meta : note).push(l));
+  String(desc || '').split('\n').forEach(l => (l.indexOf(ORIG) === 0 || l.indexOf(RENAMED) === 0 || l.indexOf(MOVED) === 0 || l.indexOf(RESTORED) === 0 ? meta : note).push(l));
   return { note: note.join('\n').trim(), meta };
 }
 function descJoin(note, meta) {
   meta = meta.slice();
-  // keep the description short: the original name + the last 10 renames
-  while (meta.filter(l => l.indexOf(RENAMED) === 0).length > 10) meta.splice(meta.findIndex(l => l.indexOf(RENAMED) === 0), 1);
+  // keep the description short: the original name, the FIRST rename (v4.2: the oldest name is never lost) + the last 9
+  for (;;) {
+    const at = meta.map((l, i) => l.indexOf(RENAMED) === 0 ? i : -1).filter(i => i >= 0);
+    if (at.length <= 10) break;
+    meta.splice(at[1], 1);
+  }
   return (note ? note + (meta.length ? '\n\n' : '') : '') + meta.join('\n');
 }
 /** File name without / \ : * ? " < > | (and control characters), at most 200 characters, extension kept. */

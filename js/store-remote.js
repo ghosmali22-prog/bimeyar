@@ -115,6 +115,10 @@ export class ApiStore {
   moveNew(batch, items) { return call('moveNew', { batch, items }); }
   moveUndo() { return call('moveUndo'); }
   oldFolders() { return call('oldFolders'); }
+  // Restore original file names (admin, v4.2): preview, apply in small batches, undo
+  restorePlan() { return call('restorePlan'); }
+  restoreNames(batch, items) { return call('restoreNames', { batch, items }); }
+  restoreUndo() { return call('restoreUndo'); }
   // Share ONE file by link (v3.2): "anyone with the link" can view that file only
   shareFile(id) { return call('shareFile', { id }); }
   unshareFile(id) { return call('unshareFile', { id }); }
