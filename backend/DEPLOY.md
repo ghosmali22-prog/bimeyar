@@ -106,6 +106,19 @@ Roll back: Deploy → Manage deployments → ✏️ → choose **Version 6** →
 there and stay in Drive; the v3 app shows them only after v4 is back, so roll back the frontend first and keep
 Version 7 if any file was moved).
 
+## v4.2 update (restore original file names) = Version 8
+
+Only steps 1 (paste `Code.gs`; `appsscript.json` did not change) and 4 (✏️ → **New version**, description `v4.2.0`).
+No new permission, no `setup` run, no Script property to add (`RESTORE_LAST` is created by itself). `ACL`, `ROOT_ID`,
+`CLIENT_ID`, `DEVICE_SESSIONS` and the `/exec` URL are not touched. The v4.1 app keeps working with this backend, so
+deploy the backend first, then merge the frontend. After merging:
+
+1. Settings → **Restore original file names**: the list shows only files changed by the rename / move tools. Press
+   **Back**: nothing changed.
+2. Tick ONE file → Apply → check its name in Drive → **Undo restore** → the name is as before.
+
+Roll back: Deploy → Manage deployments → ✏️ → choose **Version 7** → Deploy (the v4.1 app does not need the new actions).
+
 ## AI usage log
 
 Every AI **attempt** is logged without any customer data (time, model, status such as `ok` / `http503` /
