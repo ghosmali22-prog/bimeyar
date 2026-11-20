@@ -255,4 +255,69 @@ export function moveName(row, c) {
   if (row.keep) return row.old;
   return vehicleFileName({ vehicle: { plate: row.plate, ym: row.ym }, customer: c, slot: row.slot, ext: extOf(row.old) });
 }
+
+/* ---------------- "Detect vehicles automatically" (v4.1, move tool) ---------------- */
+/** The month number in a pattern name: "70-5416 - X(11) - Y.pdf" -> 11 (0 when there is none) */
+export function monthInName(name) {
+  const m = String(name || '').match(/^.+? - .+\((\d{1,2})\) - /);
+  return m && +m[1] >= 1 && +m[1] <= 12 ? +m[1] : 0;
+}
+/**
+ * "YYYY-MM" for a month number found in a file name, with the year taken from the file's date: the year that puts
+ * the month closest to that date (a file saved in January named "(12)" belongs to December of the year before).
+ */
+export function ymNear(month, iso) {
+  const d = String(iso || '').match(/^(\d{4})-(\d{2})/);
+  if (!month || !d) return '';
+  const y = +d[1], at = y * 12 + +d[2] - 1;
+  const best = [y - 1, y, y + 1].map(yy => ({ yy, gap: Math.abs(yy * 12 + month - 1 - at) })).sort((a, b) => a.gap - b.gap)[0];
+  return `${best.yy}-${String(month).padStart(2, '0')}`;
+}
+/** Which old files are worth reading with the AI: policy PDFs whose name has no plate */
+export const needsAiRead = (f, slot) => !plateFromName(f.name) && /pdf/i.test(String(f.mime || '') + ' ' + f.name) && ['1', '2', '3', '5.2'].includes(slot);
+
+/**
+ * Builds the vehicles of one customer from what is already there (nothing is created here):
+ *  - existing v4 vehicles of the customer (src 'vehicle'),
+ *  - the customer's own details: plate + contract date / policy start (src 'customer'),
+ *  - plates and months in pattern file names (src 'name'), the year from the file's date,
+ *  - what the AI read from policy PDFs without a plate in the name (src 'ai'): plate, chassis, dates.
+ * One vehicle per plate. Its month: contract date -> policy start -> the (month) of a file name; the newest wins
+ * among equally good sources. Returns { vehicles: [{ key, plate, ym, src: [...], data }], assign: { fileId: key } }.
+ * A file is assigned only when its own name or its own AI reading has a plate: no plate anywhere = "please choose".
+ */
+export function detectVehicles(c, files, vehicles = [], ai = {}) {
+  const V = new Map(), assign = {};
+  const add = (plate, src, ym, rank, data = {}) => {
+    const p = plateOnly(plate), k = plateKey(p);
+    if (!k || k.length < 3) return '';
+    if (!V.has(k)) V.set(k, { key: k, plate: p, src: new Set(), cands: [], data: {} });
+    const v = V.get(k);
+    v.src.add(src);
+    if (ym) v.cands.push({ ym, rank });
+    for (const [f, x] of Object.entries(data)) if (x && !v.data[f]) v.data[f] = x;
+    return k;
+  };
+  for (const v of vehicles.filter(x => x.customerId === c.id && !x.legacy)) add(v.plate, 'vehicle', v.ym, 0);
+  if (c.plate) {
+    const data = {};
+    for (const k of LEGACY_KEYS) if (c[k]) data[k] = c[k];
+    add(plateOnly(c.plate, c.province), 'customer', ymOf(c.contractDate) || ymOf(c.policyStart), c.contractDate ? 1 : 2, data);
+  }
+  for (const f of files.filter(x => x.customerId === c.id && !x.vslot)) {
+    const p = plateFromName(f.name);
+    if (p) { assign[f.id] = add(p, 'name', ymNear(monthInName(f.name), f.at || f.createdAt), 3); continue; }
+    const r = ai[f.id];
+    if (!r?.plate) continue;
+    const data = {};
+    for (const k of VFIELDS) if (r[k] && k !== 'plate') data[k] = r[k];
+    const ym = ymOf(r.contractDate) || ymOf(r.policyStart);
+    assign[f.id] = add(plateOnly(r.plate, r.province), 'ai', ym, r.contractDate ? 1 : 2, data);
+  }
+  const out = [...V.values()].map(v => {
+    const best = v.cands.sort((a, b) => a.rank - b.rank || b.ym.localeCompare(a.ym))[0];
+    return { key: v.key, plate: v.plate, ym: best?.ym || ymOf(new Date().toISOString()), src: [...v.src], data: v.data, on: true };
+  }).sort((a, b) => a.ym.localeCompare(b.ym) || a.plate.localeCompare(b.plate));
+  return { vehicles: out, assign };
+}
 export { safeName };
