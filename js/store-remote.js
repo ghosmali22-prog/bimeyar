@@ -2,6 +2,7 @@
 // Requests are POST with Content-Type text/plain and a JSON body, so the browser sends no CORS preflight.
 import { API_URL, MAX_UPLOAD_MB } from './config.js';
 import { getToken, drop } from './auth.js';
+import * as device from './device.js';
 
 export class ApiError extends Error {
   constructor(code, message, extra = {}) { super(message); this.code = code; Object.assign(this, extra); if (code === 'auth') this.auth = true; }
@@ -18,7 +19,7 @@ function post(body, onProgress, timeout = 300000) {
     x.onload = () => {
       let j;
       try { j = JSON.parse(x.responseText); } catch { return rej(new ApiError('network', `HTTP ${x.status}`)); }
-      if (j.ok) { onProgress?.(1); res(j.data); } else rej(new ApiError(j.error, j.message, { email: j.email }));
+      if (j.ok) { onProgress?.(1); res(j.data); } else rej(new ApiError(j.error, j.message, { email: j.email, left: j.left, session: j.session }));
     };
     x.onerror = () => rej(new ApiError(navigator.onLine === false ? 'offline' : 'network', 'network'));
     x.ontimeout = () => rej(new ApiError('timeout', 'timeout'));
@@ -26,7 +27,24 @@ function post(body, onProgress, timeout = 300000) {
   });
 }
 
+/**
+ * With a device password (v3.3) every request carries the device session instead of the Google ID token.
+ * Locked device: no request at all (and no Google popup). Session ended on the server: removed from this device.
+ */
 async function call(action, params = {}, onProgress, timeout) {
+  if (!device.has()) return googleCall(action, params, onProgress, timeout);
+  const c = device.current();
+  if (!c) throw new ApiError('locked', 'locked');
+  device.touch();
+  try { return await post({ dev: { sid: c.sid, key: c.key }, action, ...params }, onProgress, timeout); }
+  catch (e) {
+    if (e.code === 'bad_pin') device.lock();
+    else if ((e.code === 'auth' && e.session === 'gone') || e.code === 'forbidden') device.forget();
+    throw e;
+  }
+}
+
+async function googleCall(action, params = {}, onProgress, timeout) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const token = await getToken();
     if (!token) throw new ApiError('auth', 'signin');
@@ -124,6 +142,13 @@ export class ApiStore {
   // AI (editor+). The backend starts its last Gemini attempt within 45 s and is normally done by ~225 s; 240 s leaves
   // room for the upload. A result that comes later is cached in the backend for 10 min ("Try again" gets it at once).
   aiExtract(files) { return call('aiExtract', { files }, null, 240000); }
+
+  // Device password (v3.3). A new device session needs the Google ID token, never the device session.
+  createDeviceSession(name, replace) { return googleCall('createDeviceSession', { name, replace: replace || '' }); }
+  listMySessions() { return call('listMySessions'); }
+  revokeSession(sid) { return call('revokeSession', { sid }); }
+  listAllSessions() { return call('listAllSessions'); }
+  revokeAny(sid) { return call('revokeAny', { sid }); }
 
   // Team / access (admin only)
   aclList() { return call('aclList'); }
