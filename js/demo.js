@@ -1,5 +1,6 @@
 // Fictional sample data for previewing the app in "this device" mode
 import { isoDay } from './util.js';
+import { vehicleFileName } from './vehicles.js';
 
 const ago = d => new Date(Date.now() - d * 864e5).toISOString();
 const inDays = d => isoDay(Date.now() + d * 864e5);
@@ -55,23 +56,48 @@ const FILES = {
 };
 const PLAN = [{ d: 150, exp: 12 }, { d: 110, exp: -6 }, { d: 70, exp: 210 }, { d: 26, exp: 27 }, { d: 9, exp: 330 }];
 
-/** Fictional sample data, in the app's current language */
+/**
+ * Fictional sample data, in the app's current language (v4): customer 1 has 3 vehicles in 2 months, customers 3-5
+ * have one vehicle each; customer 2 is a customer from before v4 (single plate in the customer details, files in the
+ * old folders) to try "Move to new folders".
+ */
 export async function seedDemo(store, lang = 'en') {
   const N = FILES[lang] || FILES.en;
   for (const [i, person] of (PEOPLE[lang] || PEOPLE.en).entries()) {
     const p = { ...person, ...PLAN[i] };
-    const c = await store.saveCustomer({ name: p.name, phone: p.phone, plate: p.plate, car: p.car, createdAt: ago(p.d), demo: true });
-    const add = (blob, meta) => store.addFile(blob, { customerId: c.id, note: '', expiry: '', demo: true, ...meta });
-    await add(tinyPdf('Compulsory insurance policy'), { name: `${N.policy} ${p.name}.pdf`, type: 'policy', expiry: inDays(p.exp), createdAt: ago(p.d - 1) });
+    if (i === 1) { await seedOld(store, p, N, i); continue; }
+    const c = await store.saveCustomer({ name: p.name, phone: p.phone, nick: i === 0 ? 'k.demo' : '', createdAt: ago(p.d), demo: true });
+    const start = inDays(p.exp - 365);
+    const v = await store.saveVehicle({ customerId: c.id, plate: p.plate, model: p.car, insurer: 'Demo Insurance', policyNo: `DEMO-${1000 + i}`, policyType: 'ชั้น 1', contractDate: start, policyStart: start, policyExpiry: inDays(p.exp), premium: String(15000 + i * 1200) });
+    const nm = (veh, slot, ext) => vehicleFileName({ vehicle: veh, customer: c, slot, ext });
+    const put = (veh, slot, blob, meta) => store.addFile(blob, { customerId: c.id, vehicleId: veh.id, slot, note: '', expiry: '', demo: true, name: nm(veh, slot, meta.ext), ...meta, ext: undefined });
+    await put(v, '1', tinyPdf('Car insurance policy'), { ext: '.pdf', type: 'policy', expiry: inDays(p.exp), createdAt: ago(p.d - 1) });
+    await put(v, '3', tinyPdf('Compulsory insurance'), { ext: '.pdf', type: 'policy', expiry: inDays(p.exp), createdAt: ago(p.d - 1) });
     const card = picture('Vehicle registration', 250 + i * 22);
-    await add(card.blob, { name: `${N.card}.svg`, type: 'car', thumb: card.thumb, createdAt: ago(p.d - 2) });
-    const lic = picture('Driving licence', 190 + i * 30);
-    await add(lic.blob, { name: `${N.lic}.svg`, type: 'id', thumb: lic.thumb, createdAt: ago(Math.max(0, p.d - 20)) });
-    if (i % 2 === 0) {
-      await add(tinyPdf('Payment receipt'), { name: `${N.pay}.pdf`, type: 'payment', createdAt: ago(Math.max(0, p.d - 45)) });
-      const cl = picture('Accident sketch', 10 + i * 12);
-      await add(cl.blob, { name: `${N.claim}.svg`, type: 'claim', thumb: cl.thumb, createdAt: ago(Math.max(0, p.d - 75)) });
+    await put(v, '5.1', card.blob, { ext: '.svg', type: 'car', thumb: card.thumb, createdAt: ago(p.d - 2) });
+    const photo = picture('Car photo', 190 + i * 30);
+    await put(v, '5.3', photo.blob, { ext: '.svg', type: 'car', thumb: photo.thumb, createdAt: ago(Math.max(0, p.d - 20)) });
+    if (i % 2 === 0) await put(v, '5.4', tinyPdf('Transfer slip'), { ext: '.pdf', type: 'payment', createdAt: ago(Math.max(0, p.d - 45)) });
+    if (i === 0) {
+      // two more vehicles: one in the same month, one in another month
+      const v2 = await store.saveVehicle({ customerId: c.id, ym: v.ym, plate: p.plate.replace(/\d$/, d => String((+d + 1) % 10)), model: p.car, insurer: 'Demo Insurance', policyStart: start, policyExpiry: inDays(p.exp) });
+      await put(v2, '1', tinyPdf('Car insurance policy'), { ext: '.pdf', type: 'policy', expiry: inDays(p.exp), createdAt: ago(5) });
+      const start3 = inDays(140 - 365);
+      const v3 = await store.saveVehicle({ customerId: c.id, plate: p.plate.replace(/\d$/, d => String((+d + 2) % 10)), model: 'Isuzu D-Max', insurer: 'Demo Insurance', contractDate: start3, policyStart: start3, policyExpiry: inDays(140) });
+      await put(v3, '1', tinyPdf('Car insurance policy'), { ext: '.pdf', type: 'policy', expiry: inDays(140), createdAt: ago(3) });
+      const ph = picture('Car photo', 30);
+      await put(v3, '5.3', ph.blob, { ext: '.svg', type: 'car', thumb: ph.thumb, createdAt: ago(3) });
     }
-    if (i === 0) await add(tinyPdf('Comprehensive policy'), { name: `${N.body}.pdf`, type: 'policy', expiry: inDays(140), createdAt: ago(3) });
   }
+}
+/** A customer as saved before v4: plate and policy in the customer details, files in the old 4 folders / loose */
+async function seedOld(store, p, N, i) {
+  const c = await store.saveCustomer({ name: p.name, phone: p.phone, plate: p.plate, car: p.car, insurer: 'Demo Insurance', policyStart: inDays(p.exp - 365), policyExpiry: inDays(p.exp), createdAt: ago(p.d), demo: true });
+  const add = (blob, meta) => store.addFile(blob, { customerId: c.id, note: '', expiry: '', demo: true, ...meta });
+  await add(tinyPdf('Compulsory insurance policy'), { name: `${N.policy} ${p.name}.pdf`, folder: 'policy', type: 'policy', expiry: inDays(p.exp), createdAt: ago(p.d - 1) });
+  const card = picture('Vehicle registration', 250 + i * 22);
+  await add(card.blob, { name: `${N.card}.svg`, folder: 'docs', type: 'car', thumb: card.thumb, createdAt: ago(p.d - 2) });
+  const lic = picture('Driving licence', 190 + i * 30);
+  await add(lic.blob, { name: `${N.lic}.svg`, type: 'id', thumb: lic.thumb, createdAt: ago(Math.max(0, p.d - 20)) });
+  await add(tinyPdf('Payment receipt'), { name: `${N.pay}.pdf`, folder: 'pay', type: 'payment', createdAt: ago(Math.max(0, p.d - 45)) });
 }

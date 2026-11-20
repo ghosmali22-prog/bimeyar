@@ -67,11 +67,15 @@ export function normalize(r) {
   for (const k of ['dob', 'contractDate', 'policyStart', 'policyExpiry']) { [v, c] = get(k); if (v) { const d = toIsoDate(v); if (d) put(k, d, c); else notes[k] = 'v.date'; } }
   if (values.policyStart && values.policyExpiry && values.policyExpiry <= values.policyStart) { conf.policyExpiry = Math.min(conf.policyExpiry, 0.4); notes.policyExpiry = 'v.order'; }
 
+  // v4: who is insured (to find the customer) and the body type of the vehicle
+  [v, c] = get('insuredName'); put('insuredName', v, c);
+  [v, c] = get('bodyType'); put('body', v, c);
+
   const receipt = {};
   [v, c] = get('receiptAmount'); if (v) receipt.amount = money(v);
   [v, c] = get('receiptDate'); if (v) receipt.date = toIsoDate(v);
   [v, c] = get('payer'); if (v) receipt.payer = v;
-  return { docType: r?.docType || 'other', docName: String(r?.docName || '').trim(), values, conf, notes, receipt };
+  return { docType: r?.docType || 'other', docName: String(r?.docName || '').trim(), slot: String(r?.slot || ''), values, conf, notes, receipt };
 }
 
 /** Folder the AI suggests for this document (the user always confirms). null = no suggestion. */
