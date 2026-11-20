@@ -10,13 +10,15 @@ It installs on an iPhone like a normal app (PWA) and works in **English**, **Tha
 > Changing the code? Read **[CLAUDE.md](CLAUDE.md)** first. This app stores real company data.
 > Deploying the backend? Follow **[backend/DEPLOY.md](backend/DEPLOY.md)**.
 
-## What it does (v3)
+## What it does (v4)
 
 - **Customers**: cards with a status badge (Active / Expiring within 30 days / Expired / Not set), search by name,
   phone or plate, and filters. At the top: total customers, policies expiring this month, expired.
-- **Customer page**: customer, vehicle and policy details; call in one tap; files grouped in the 4 Drive folders
-  with thumbnails; invoices of that customer.
-- **Expiring**: policies sorted by the nearest expiry, grouped: expired / next 7 / next 30 / next 60 days.
+- **Customer page**: customer details, then month cards → vehicle (plate) cards → the 5 folders (5.1–5.5 inside 5)
+  with file counts and thumbnails; add / edit / remove vehicles (1 to 100+ per customer); invoices of that customer.
+- **Smart upload**: drop any files without choosing a customer; the AI finds customer (chassis no., plate, insured name),
+  vehicle, month and folder; a review list shows everything (editable) before anything is saved.
+- **Expiring**: one row per vehicle, sorted by the nearest expiry, grouped: expired / next 7 / next 30 / next 60 days.
 - **Invoices**: create an invoice from a customer (everything is pre-filled), A4 PDF with Thai font, saved
   automatically in the customer's payment folder, share or download on the phone, mark as paid, re-generate.
 - **AI (Gemini)**: take a photo of a policy and the app fills in the new customer for you. You check every field
@@ -25,22 +27,27 @@ It installs on an iPhone like a normal app (PWA) and works in **English**, **Tha
 - Deletes go to the Drive trash and can be restored for 30 days.
 - **This device only** demo mode with sample data, for trying the app without signing in.
 
-## Drive folders
+## Drive folders (v4)
 
 ```
-Bimeyar/                          ← the app's folder in the owner's Drive
-  <customer name>/                ← one folder per customer (details are saved in the folder's description)
-    01_กรมธรรม์/                    policy
-    02_เอกสาร/                      documents (vehicle book, ID card, ...)
-    03_กรมธรรม์เดิม/                 previous policy
-    04_หลักฐานการชำระเงิน/            payment receipts + invoices (PDF)
-    (older files)                 files saved before v3 stay here; the app shows them under "Other / ไม่ระบุ"
+RICH INSURANSE/                         ← the app's root folder in the owner's Drive (found by ROOT_ID, not by name)
+  <customer name>/                      ← one folder per customer (details are saved in the folder's description)
+    07 July 2026/                       ← month of the contract date ("MM MonthName YYYY", the number is for sorting)
+      70-5416/                          ← one folder per vehicle (plate only); the vehicle's data is in its description
+        1. กรมธรรม์รถยนต์/
+        2. กรมธรรม์ขนส่งสินค้า/
+        3. พรบ./
+        4. ใบวางบิล/ใบเสนอราคา/           ← also the invoices the app makes (RI-YYYY-NNNN.pdf)
+        5. เอกสารตัวรถยนต์/
+          5.1 สำเนาทะเบียนรถ/  5.2 สำเนากรมธรรม์เดิม/  5.3 รูปรถ/  5.4 หลักฐานการโอนเงิน/  5.5 หนังสือแต่งตั้ง/หนังสือรับรองบริษัท/
+    01_กรมธรรม์/ … 04_หลักฐานการชำระเงิน/   ← v3 folders and v2 loose files: still shown ("Old folders") until moved
 ```
 
-The folder names are set in one place: `SUBFOLDERS` in `backend/Code.gs` (and `FOLDERS` in `js/config.js` for the
-labels in the app). The app finds the folders by a hidden tag, not by name, so they can be renamed later.
-New customers get the 4 folders automatically. For older customers use **Settings → Drive folders**
-(first "Check", which changes nothing, then "Create missing folders"). This never moves, renames or deletes a file.
+Every folder is found by a hidden tag (appProperties), never by name. The month and plate folders (with the 5 folders
+and 5.1–5.5) are created the first time they are needed. Next year's renewal of the same plate goes into that year's
+month folder. File names: `{plate} - {customer}({month}) - {document}.{ext}`, e.g.
+`70-5416 - โชควิไล ทรานสปอร์ต(7) - กรมธรรม์รถยนต์.pdf` (the customer name without บริษัท / จำกัด / …, never the nickname).
+Old files are moved with **Settings → Move to new folders** (admin): preview, per customer, only moves, with undo.
 
 ## How it works
 

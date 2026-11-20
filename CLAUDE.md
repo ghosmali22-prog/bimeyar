@@ -11,7 +11,7 @@ to a production system. Talk to the owner (Pejman) in Persian.
 - **Backend**: Google Apps Script web app "Bimeyar backend", owned by ghosmali22@gmail.com, deployed as
   *Execute as: Me*, *Who has access: Anyone*. Source: `backend/Code.gs` + `backend/appsscript.json`.
   The live URL is `API_URL` in `js/config.js`.
-- **Data**: all files are in the **"Bimeyar"** folder in the owner's Google Drive and are owned by the owner.
+- **Data**: all files are in the root folder (named **"RICH INSURANSE"** in Drive since v4, found only by `ROOT_ID`) in the owner's Google Drive and are owned by the owner.
   Customer = a folder inside "Bimeyar" (details as JSON in the folder description; all fields except the name are optional,
   see `CFIELDS` in `backend/Code.gs`). `saveCustomer` MERGES into the existing JSON: never write code that replaces it.
   Sub-folders (v3) = 4 folders inside a customer folder, tagged `appProperties.bimeyar = 'sub'` + `slot` (`policy`, `docs`, `prev`, `pay`).
@@ -24,7 +24,16 @@ to a production system. Talk to the owner (Pejman) in Persian.
   `updateFile` keeps them (`descSplit` / `descJoin`). Never write them into an invoice description (that is JSON).
   File names are built in `js/naming.js` (`{plate} - {customer}({month}) - {document}.{ext}`); the backend only cleans the name and
   adds " (2)", " (3)"… (`uniqueName`): never overwrite, never delete. Customer fields `nick` and `contractDate` are optional (v3.2).
-  Invoice = a PDF file in the `pay` sub-folder with `appProperties.kind = 'invoice'`, `invNo`, `status`; the invoice data is JSON in its description.
+  **Vehicles (v4)**: customer folder → month folder (`bimeyar = 'month'`, `year`, `month` = '07'; name "07 July 2026",
+  month of the contract date, else policy start, else the day added) → plate folder (`bimeyar = 'vehicle'`, `plate`, `year`,
+  `month`; name = plate only) → folders `1`…`5` and `5.1`…`5.5` inside `5` (`bimeyar = 'slot'`, `slot`). Names in `VSLOTS`
+  (backend) and `VSLOTS` (`js/vehicles.js`); found by tags only. Files go only into 1–4 and 5.1–5.5, never into 5.
+  The vehicle's data (`VFIELDS`) is JSON in the plate folder's description and `saveVehicle` MERGES it (never replace).
+  One record = one plate in one month; a renewal is a new record in the new month. A customer's old single plate/policy
+  in the customer JSON is shown as "vehicle #1" (`L:<id>`, js only) and becomes a record when first used; the customer
+  JSON is never changed for this. File names (v4): `{plate} - {customer name, never the nickname}({M}) - {folder name}`.
+  `upload` / `moveFile` / `createInvoice` take `vehicleId` + `slot`; without them they work as in v3.
+  Invoice = a PDF file in the `pay` sub-folder (v3) or folder `4` of a vehicle (v4) with `appProperties.kind = 'invoice'`, `invNo`, `status`; the invoice data is JSON in its description.
   Invoice numbers come from Script property `INV_SEQ` under `LockService` only.
   The root folder is tagged `appProperties.bimeyar = 'root'`. The company logo file is tagged `bimeyar = 'logo'`.
 - **AI**: Gemini is called only from the backend (`aiExtract`). The key is Script property `GEMINI_API_KEY`: never in the repo,
@@ -55,8 +64,12 @@ to a production system. Talk to the owner (Pejman) in Persian.
 5. **Do not change `CLIENT_ID`, the OAuth project, the Apps Script project or the deployment URL** unless the owner asks.
 6. Keep security checks in the backend: token verification, role checks per action, `assertCustomer` / `assertFile` / `ownerOf`
    (only items inside the Bimeyar folder can be touched). Never trust an email sent by the client.
-7. **Folder migration only creates.** `migrateFolders` / `ensureSubs` may create sub-folders or add a tag to an exact-name
-   folder. They must never move, rename or delete files. Files move only through `moveFile`, after the user confirms one file.
+7. **Folder migration only creates.** `migrateFolders` / `ensureSubs` / `vehicleSlots` / `monthFolder` may create folders
+   or add a tag to an exact-name folder. They must never move, rename or delete files. Files move only through `moveFile`,
+   after the user confirms one file, or through the owner-approved one-time **move tool** (`moveNew`, admin only, v4):
+   it only moves a file into a folder of ITS OWN customer's vehicle, writes the old folder in the description and
+   `mvf`/`mvt`/`mvb` tags, gives a pattern name only to names that do not follow the pattern, never touches an invoice's
+   name or description, and `moveUndo` can put the last batch back. Old empty folders are never deleted by the app.
 8. **Money and dates**: invoice totals are calculated in integer satang in `invoiceTotals` (backend). `calcTotals` in
    `js/invoice.js` is an exact copy for the preview; `node tests/invoice-totals.test.mjs` must pass after any change to either.
    Dates are stored as ISO `YYYY-MM-DD` in CE; Buddhist years (2400+) are converted with `beToCe`.
@@ -87,7 +100,7 @@ to a production system. Talk to the owner (Pejman) in Persian.
 - **Frontend**: `main` = release tag `v3.3.0` (device password: Google once per device, then password/PIN; My devices).
   Rollback tag of `main` before it: `v3.2-pre-device` (= `v3.2.0`). Before that: `v3.1-pre-naming` (= `v3.1.0`), `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
-- Tests: `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
+- Tests: `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
 
 ## Design (owner's decision)
 

@@ -12,12 +12,12 @@ import { latinDigits, beToCe } from './validate.js';
 /**
  * The folders inside every plate folder. Must match VSLOTS in backend/Code.gs.
  * th = folder name in Drive, doc = document name in file names (the folder name without its number; "/" is not
- * allowed in file names, so it becomes "-"), type = the v2/v3 file type kept for old screens and filters.
+ * allowed in file names, so it becomes "-"; the dot of พรบ. is dropped, so never "..pdf"), type = the v2/v3 file type kept for old screens and filters.
  */
 export const VSLOTS = [
   { id: '1', th: '1. กรมธรรม์รถยนต์', doc: 'กรมธรรม์รถยนต์', icon: 'shield', type: 'policy' },
   { id: '2', th: '2. กรมธรรม์ขนส่งสินค้า', doc: 'กรมธรรม์ขนส่งสินค้า', icon: 'shield', type: 'policy' },
-  { id: '3', th: '3. พรบ.', doc: 'พรบ.', icon: 'shield', type: 'policy' },
+  { id: '3', th: '3. พรบ.', doc: 'พรบ', icon: 'shield', type: 'policy' },
   { id: '4', th: '4. ใบวางบิล/ใบเสนอราคา', doc: 'ใบวางบิล-ใบเสนอราคา', icon: 'invoice', type: 'payment' },
   { id: '5', th: '5. เอกสารตัวรถยนต์', doc: '', icon: 'folder', type: 'car', group: true },
   { id: '5.1', th: '5.1 สำเนาทะเบียนรถ', doc: 'สำเนาทะเบียนรถ', icon: 'idcard', type: 'car', in: '5' },
@@ -198,11 +198,15 @@ export function findVehicle(v, slot, list) {
  */
 export function batchHint(rows) {
   const count = {};
-  for (const r of rows) if (r.cid && r.vkey && ['high', 'mid'].includes(r.conf)) { const k = r.cid + '\n' + r.vkey; count[k] = (count[k] || 0) + 1; }
+  for (const r of rows) if (r.cid && r.vkey && ['high', 'mid', 'new'].includes(r.conf)) { const k = r.cid + '\n' + r.vkey; count[k] = (count[k] || 0) + 1; }
   const best = Object.entries(count).sort((a, b) => b[1] - a[1])[0];
   if (!best) return rows;
   const [cid, vkey] = best[0].split('\n');
-  for (const r of rows) if (!r.cid && !r.touched) { r.cid = cid; r.vkey = vkey; r.conf = 'hint'; }
+  for (const r of rows) {
+    if (r.touched || r.ai === 'wait' || r.ai === 'busy') continue;   // the user chose, or the AI is still reading this one
+    if (!r.cid) { r.cid = cid; r.vkey = vkey; r.conf = 'hint'; }
+    else if (!r.vkey && r.cid === cid) { r.vkey = vkey; r.conf = 'hint'; }
+  }
   return rows;
 }
 

@@ -1,5 +1,41 @@
 # Changelog
 
+## v4.0.0 (2026-11-21)
+
+- **Many vehicles per customer** (1 to 100+): plate, province, brand/model, chassis no., engine no., year, body type,
+  insurer, policy no., contract date, start, expiry, premium (all optional except the plate). Add / edit / remove
+  (remove = Drive trash only). Each vehicle's data is JSON in the description of its plate folder, MERGED on save.
+  Customers from before v4: their single plate/policy in the customer details is shown as vehicle #1 and becomes a
+  real vehicle the first time a file is saved into it; the customer details are never changed or removed.
+- **Drive folders per customer / month / vehicle**: `{customer}/07 July 2026/70-5416/` with `1. กรมธรรม์รถยนต์`,
+  `2. กรมธรรม์ขนส่งสินค้า`, `3. พรบ.`, `4. ใบวางบิล/ใบเสนอราคา`, `5. เอกสารตัวรถยนต์` (5.1–5.5 inside). Month = contract
+  date, else policy start, else the day the vehicle is added (Buddhist years → CE). Created when first needed, found by
+  tags only (`bimeyar` = `month` / `vehicle` / `slot`). Files go only into 1–4 and 5.1–5.5. Invoices go into folder 4
+  of their vehicle (name `RI-YYYY-NNNN.pdf` unchanged).
+- **File names never use the nickname**: `{plate} - {customer name without บริษัท/จำกัด/…}({M}) - {folder name}.{ext}`,
+  e.g. `70-5416 - โชควิไล ทรานสปอร์ต(7) - กรมธรรม์รถยนต์.pdf` (`พรบ` without its dot, `/` becomes `-`).
+  Names that already follow the pattern are never changed (upload, rename tool, move tool).
+- **Case file**: month cards → vehicle cards → the 5 folders → 5.1–5.5, with file counts; tabs per month and
+  "Old folders" while v2/v3 files are still there. Same v2 design and classes.
+- **Search** by name, nickname, plate, chassis no. or month; one result per vehicle ("customer · 70-5416 · July 2026").
+  **Renewals**: one row per vehicle (latest month of each plate). The daily e-mail also lists vehicles.
+- **Smart upload** (home screen, drop anywhere): one or many files without choosing a customer. The AI (same
+  `aiExtract`, key and models; new `slot`, `insuredName`, `bodyType`) gives the folder; the app finds the customer by
+  chassis no., then plate, then insured name / nickname, the vehicle (a policy of the same plate in a new month =
+  renewal), and the month. Review list: file → customer → vehicle → month → folder → new name, with a confidence label,
+  everything editable. New customer / new vehicle are only created when ticked. Photos without plate get the vehicle of
+  the other files of the batch. AI failed or busy: choose by hand, the upload is never blocked. The normal upload in a
+  case file uses the same list with the customer fixed.
+- **Move to new folders** (Settings, admin): preview (file → from → plate / month / folder / name), editable rows, tick
+  boxes, Apply per customer in batches of 10. Only moves: nothing deleted, copied or changed; the old folder is written
+  in the description (`Moved from: …`) and tags `mvb` / `mvf` / `mvt` / `mvo`; **Undo last move**. Rows without a plate
+  are not moved. **Empty old folders** lists the v3 folders that are empty (the owner deletes them in Drive).
+- Backend (Version 7): new actions `saveVehicle`, `deleteVehicle`, `moveNew`, `moveUndo`, `oldFolders`; `list` returns
+  `vehicles`; `upload` / `moveFile` / `createInvoice` accept a vehicle; `ownerOf` / `assertFile` check the whole chain
+  (5.x → 5 → plate → month → customer → root). New customers no longer get the 4 v3 folders. No new permission
+  (`appsscript.json` unchanged), no `setup` run. The v3.3 frontend keeps working with this backend.
+- Tests: `node tests/vehicles.test.mjs` (133 checks incl. the security chain), headless-Chrome checks in demo mode.
+
 ## v3.3.0 (2026-11-21)
 
 - **Device password**: sign in with Google once per device, then open the app with a password (at least 6 characters)

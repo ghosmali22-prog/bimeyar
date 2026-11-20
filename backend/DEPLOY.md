@@ -90,6 +90,22 @@ device password). `ACL` and `ROOT_ID` are not touched. After deploying:
 Roll back: Deploy → Manage deployments → ✏️ → choose the previous version → Deploy. (With the old backend, devices
 with a password are sent to Google sign-in once; nothing else changes.)
 
+## v4.0 update (vehicles, folders per month / plate, Smart upload, move tool) = Version 7
+
+Only steps 1 (paste `Code.gs`; `appsscript.json` did not change) and 4 (✏️ → **New version**, description `v4.0.0`).
+No new permission, no `setup` run, no Script property to add (`MOVE_LAST` is created by itself). `ACL`, `ROOT_ID`,
+`CLIENT_ID`, `DEVICE_SESSIONS` and the `/exec` URL are not touched. The v3.3 app keeps working with this backend, so
+deploy the backend first, then merge the frontend. After deploying:
+
+1. Open a customer → **Add vehicle** (plate + contract date) → in Drive: `customer/MM Month YYYY/plate/` with the 5 folders.
+2. Upload a PDF into folder 1 of that vehicle: the name has the customer name (not the nickname).
+3. **Smart upload** with one policy PDF: check the review list, then Save.
+4. Settings → **Move to new folders**: check the preview of one customer, Apply, check Drive, then **Undo last move**.
+
+Roll back: Deploy → Manage deployments → ✏️ → choose **Version 6** → Deploy (files already in the new folders stay
+there and stay in Drive; the v3 app shows them only after v4 is back, so roll back the frontend first and keep
+Version 7 if any file was moved).
+
 ## AI usage log
 
 Every AI **attempt** is logged without any customer data (time, model, status such as `ok` / `http503` /

@@ -3,6 +3,7 @@
 import { API_URL, MAX_UPLOAD_MB } from './config.js';
 import { getToken, drop } from './auth.js';
 import * as device from './device.js';
+import { VFIELDS } from './vehicles.js';
 
 export class ApiError extends Error {
   constructor(code, message, extra = {}) { super(message); this.code = code; Object.assign(this, extra); if (code === 'auth') this.auth = true; }
@@ -85,7 +86,7 @@ export class ApiStore {
     const r = await call('list');
     this.quotaInfo = r.quota || null;
     for (const f of r.files) f.thumb = this.thumbCache.get(f.id) || '';
-    return { customers: r.customers, files: r.files, invoices: r.invoices || [] };
+    return { customers: r.customers, files: r.files, invoices: r.invoices || [], vehicles: r.vehicles || [] };
   }
   /** Only the keys present in `c` are sent, so fields the form does not show are never cleared. */
   saveCustomer(c) {
@@ -94,14 +95,26 @@ export class ApiStore {
     return call('saveCustomer', { customer: out });
   }
   deleteCustomer(id) { return call('deleteCustomer', { id }); }
+  // Vehicles (v4): data in the plate folder's description, MERGED by the backend (only the keys sent change)
+  saveVehicle(v) {
+    const out = {};
+    for (const k of ['id', 'customerId', 'ym', ...VFIELDS]) if (v[k] !== undefined) out[k] = v[k];
+    return call('saveVehicle', { vehicle: out });
+  }
+  deleteVehicle(id) { return call('deleteVehicle', { id }); }
 
   async addFile(blob, meta, onProgress) {
     if (blob.size > MAX_UPLOAD_MB * 1048576) throw new ApiError('too_big', 'too_big');
     const data = await b64(blob);
-    return call('upload', { data, meta: { name: meta.name, orig: meta.orig || '', customerId: meta.customerId, type: meta.type, expiry: meta.expiry, note: meta.note, folder: meta.folder || '', mime: blob.type || 'application/octet-stream' } }, onProgress);
+    return call('upload', { data, meta: { name: meta.name, orig: meta.orig || '', customerId: meta.customerId, type: meta.type, expiry: meta.expiry, note: meta.note, folder: meta.folder || '', vehicleId: meta.vehicleId || '', slot: meta.slot || '', mime: blob.type || 'application/octet-stream' } }, onProgress);
   }
   updateFile(f) { return call('updateFile', { file: { id: f.id, name: f.name, type: f.type, expiry: f.expiry, note: f.note } }); }
-  moveFile(id, folder) { return call('moveFile', { id, folder }); }
+  /** to = a v3 folder ('policy'…) or { vehicleId, slot } (v4) */
+  moveFile(id, to) { return call('moveFile', typeof to === 'string' ? { id, folder: to } : { id, vehicleId: to.vehicleId, slot: to.slot }); }
+  // Move tool (admin, v4): only moves; the old folder is kept for "Undo last move"
+  moveNew(batch, items) { return call('moveNew', { batch, items }); }
+  moveUndo() { return call('moveUndo'); }
+  oldFolders() { return call('oldFolders'); }
   // Share ONE file by link (v3.2): "anyone with the link" can view that file only
   shareFile(id) { return call('shareFile', { id }); }
   unshareFile(id) { return call('unshareFile', { id }); }

@@ -8,9 +8,10 @@ import * as device from './device.js';
 import { ask } from './assistant.js';
 import { seedDemo } from './demo.js';
 import { calcTotals, baht, lineAmount, invoiceHtml, INVOICE_CSS } from './invoice.js';
-import { prepare, normalize, suggestFolder, diff, fileNote, FIELD_GROUPS, ALL_FIELDS, DATE_FIELDS } from './ai.js';
+import { prepare, normalize, diff, fileNote, FIELD_GROUPS, DATE_FIELDS } from './ai.js';
 import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './validate.js';
-import { buildName, docNameFor, docNameFromOld, plateOnly, plateFromName, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
+import { buildName, docNameFromOld, plateOnly, plateFromName, followsPattern, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
+import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey } from './vehicles.js';
 
 /*
  * Layout = the v2 design (dashboard with stat cards, dark customer panel with the purple case file,
@@ -22,7 +23,8 @@ let savedMode = null;
 try { savedMode = localStorage.getItem('by_mode'); } catch { }
 
 const S = {
-  view: 'dash', customers: [], files: [], invoices: [], exp: {}, company: null, sel: null, store: null,
+  view: 'dash', customers: [], files: [], invoices: [], vehicles: [], exp: {}, vexp: {}, renew: [], company: null, sel: null, store: null,
+  openVeh: '', openSlot: '',   // v4: the open vehicle card and folder in the case file
   gate: null,            // null | 'loading' | 'signin' | 'expired' | 'deny' | 'config' | 'gis' | 'unlock' | 'setpin' (v3.3)
   pinLeft: null, pinMsg: '',   // unlock screen: wrong attempts left / message
   denied: '', role: 'admin', me: null,
@@ -31,6 +33,11 @@ const S = {
   folderTab: '', mobileDetail: false,
 };
 const cust = id => S.customers.find(c => c.id === id);
+/** v4: vehicles of a customer (records + the legacy "vehicle #1" from the customer details), newest month first */
+const vehOf = c => vehiclesOf(typeof c === 'string' ? cust(c) : c, S.vehicles);
+const vehById = id => !id ? null : S.vehicles.find(v => v.id === id) || (String(id).startsWith('L:') ? vehOf(String(id).slice(2)).find(v => v.id === id) || null : null);
+const vehLabel = v => v ? `${v.plate || t('vh.noPlate')} · ${ymText(v.ym)}` : '';
+const slotName = id => VSLOT[id] ? iso(VSLOT[id].th) : '';
 const narrow = () => matchMedia('(max-width: 820px)').matches;
 const sortCustomers = () => S.customers.sort((a, b) => a.name.localeCompare(b.name, lang));
 const canEdit = () => S.role === 'admin' || S.role === 'editor';
@@ -111,8 +118,9 @@ function showGate(g, email = '') {
 }
 
 async function reload(remount = false) {
-  const { customers, files, invoices } = await S.store.loadAll();
+  const { customers, files, invoices, vehicles } = await S.store.loadAll();
   S.customers = customers; sortCustomers();
+  S.vehicles = vehicles || [];
   S.files = files.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
   S.invoices = (invoices || []).sort((a, b) => String(b.no).localeCompare(String(a.no)));
   S.gate = null;
@@ -156,15 +164,29 @@ async function run(fn) {
 }
 
 /* ================= policy status ================= */
-/** Expiry = the customer's policyExpiry; for v2 customers without it, the latest expiry of a policy file. */
+/**
+ * v4: every vehicle has its own expiry (the latest month of each plate counts). The customer's status is the vehicle
+ * that needs attention first. Customers without any vehicle expiry: the latest expiry of a policy file (v2).
+ * S.renew = one row per vehicle (Renewals page, stat card).
+ */
+const stOf = d => d == null ? 'none' : d < 0 ? 'expired' : d <= 30 ? 'soon' : 'active';
 function computeStatus() {
   const legacy = {};
-  for (const f of S.files) if (f.expiry && f.type === 'policy' && f.folder !== 'prev' && !f.invoice && (!legacy[f.customerId] || f.expiry > legacy[f.customerId])) legacy[f.customerId] = f.expiry;
-  S.exp = {};
+  for (const f of S.files) if (f.expiry && f.type === 'policy' && f.folder !== 'prev' && f.vslot !== '5.2' && !f.invoice && (!legacy[f.customerId] || f.expiry > legacy[f.customerId])) legacy[f.customerId] = f.expiry;
+  S.exp = {}; S.vexp = {}; S.renew = [];
   for (const c of S.customers) {
-    const exp = c.policyExpiry || legacy[c.id] || '';
+    const all = vehOf(c), latest = latestOf(all);
+    for (const v of all) {
+      const d = v.policyExpiry ? daysLeft(v.policyExpiry) : null;
+      S.vexp[v.id] = { exp: v.policyExpiry || '', d, st: latest.includes(v) ? stOf(d) : 'old' };
+    }
+    let best = null;
+    for (const v of latest) if (v.policyExpiry) { const x = { c, v, exp: v.policyExpiry, d: daysLeft(v.policyExpiry) }; S.renew.push(x); if (!best || x.d < best.d) best = x; }
+    if (best) { S.exp[c.id] = { exp: best.exp, legacy: false, d: best.d, st: stOf(best.d), plate: best.v.plate }; continue; }
+    const exp = legacy[c.id] || '';
     const d = exp ? daysLeft(exp) : null;
-    S.exp[c.id] = { exp, legacy: !c.policyExpiry && !!exp, d, st: !exp ? 'none' : d < 0 ? 'expired' : d <= 30 ? 'soon' : 'active' };
+    if (exp) S.renew.push({ c, v: null, exp, d });
+    S.exp[c.id] = { exp, legacy: !!exp, d, st: stOf(d) };
   }
 }
 const ST_CLS = { expired: 'bad', soon: 'warn', active: 'ok', none: 'none' };
@@ -189,8 +211,10 @@ function matchFile(f, { skipCustomer = false, skipType = false } = {}) {
 function custMatch(c, q) {
   if (!q) return true;
   const qd = latinDigits(q).replace(/[\s-]/g, '');
-  const h = norm(`${c.name} ${c.nameEn || ''} ${c.plate || ''} ${c.province || ''} ${c.brand || ''} ${c.model || ''} ${c.car || ''} ${c.policyNo || ''} ${c.insurer || ''}`);
+  const vs = vehOf(c);
+  const h = norm(`${c.name} ${c.nick || ''} ${c.nameEn || ''} ${c.plate || ''} ${c.province || ''} ${c.brand || ''} ${c.model || ''} ${c.car || ''} ${c.policyNo || ''} ${c.insurer || ''} ${vs.map(v => `${v.plate} ${v.vin} ${v.brand} ${v.model} ${v.policyNo} ${ymText(v.ym)}`).join(' ')}`);
   if (h.includes(norm(q))) return true;
+  if (searchVehicles(q, [c], S.vehicles).length) return true;
   if (qd.length >= 3 && /^\+?\d+$/.test(qd)) {
     const p = (c.phone || '').replace(/\D/g, ''), id = (c.idNo || '').replace(/\D/g, '');
     if (p.includes(qd.replace(/^\+?66/, '0')) || id.includes(qd)) return true;
@@ -204,7 +228,7 @@ const noFilters = () => ({ customer: '', type: '', period: '', q: '', status: ''
 const titleRow = (k, actions = '', sub = '') => `<section class="title-row"><div><h1>${t(k + '.title')}</h1><p>${sub || t(k + '.sub')}</p></div>${actions ? `<div class="title-actions" data-need="edit">${actions}</div>` : ''}</section>`;
 const addBtn = () => `<button class="btn primary" data-act="upload">${icon('plus')}<span>${t('btn.addFile')}</span></button>`;
 const VIEWS = {
-  dash: () => `${titleRow('dash', `<button class="btn ghost" data-act="ai-new">${icon('wand')}<span>${t('add.ai')}</span></button><button class="btn ghost" data-act="new-customer">${icon('userplus')}<span>${t('btn.newCustomer')}</span></button>${addBtn()}`)}
+  dash: () => `${titleRow('dash', `<button class="btn ghost" data-act="smart">${icon('wand')}<span>${t('su.btn')}</span></button><button class="btn ghost" data-act="new-customer">${icon('userplus')}<span>${t('btn.newCustomer')}</span></button>${addBtn()}`)}
     <section class="stats" id="stats"></section>
     <section class="filters" id="filters"></section>
     <section class="panel" id="panel"></section>`,
@@ -320,9 +344,8 @@ function gateHtml() {
 /* ---------- stat cards ---------- */
 function drawStats(anim) {
   const el = $('#stats'); if (!el) return;
-  const withExp = S.customers.map(c => S.exp[c.id]).filter(m => m?.exp);
-  const soon = withExp.filter(m => m.d <= 30).length;
-  const expired = withExp.filter(m => m.d < 0).length;
+  const soon = S.renew.filter(m => m.d <= 30).length;   // v4: counted per vehicle
+  const expired = S.renew.filter(m => m.d < 0).length;
 
   const k0 = monthKey(new Date());
   const months = Array.from({ length: 6 }, (_, i) => ({ k: k0 - 5 + i, n: 0 }));
@@ -421,7 +444,7 @@ function ftBadge(f, size = 26, cls = '') {
 }
 const linkFlag = () => `<em class="link-flag" title="${t('sh.on')}">${icon('link', 12)}</em>`;
 const thumbImg = (src, ic) => `<img class="th" src="${esc(src)}" alt="" loading="lazy" decoding="async" data-ic="${ic}">`;
-const folderName = f => FOLDER[f.folder] ? t('fo.' + f.folder) : t('fo.other');
+const folderName = f => VSLOT[f.vslot] ? `${esc(vehById(f.vehicleId)?.plate || '')} · ${slotName(f.vslot)}` : FOLDER[f.folder] ? t('fo.' + f.folder) : t('fo.other');
 function fileTile(f, i, light = false) {
   const ty = TYPES[f.type] || TYPES.other, c = light ? cust(f.customerId) : null;
   const left = f.expiry && !f.invoice ? daysLeft(f.expiry) : null;
@@ -473,7 +496,7 @@ function drawPanel(anim) {
       <div class="gate-ico">${icon('users', 34)}</div><h3>${t('p.empty.title')}</h3>
       <p>${canEdit() ? t('p.empty.text') : ''}</p>
       <div class="gate-actions" data-need="edit"><button class="btn white" data-act="new-customer">${icon('userplus')}<span>${t('p.empty.first')}</span></button>
-      <button class="btn glassy" data-act="ai-new">${icon('wand')}<span>${t('add.ai')}</span></button>
+      <button class="btn glassy" data-act="smart">${icon('wand')}<span>${t('su.btn')}</span></button>
       ${S.store.kind === 'local' ? `<button class="btn glassy" data-act="seed">${t('p.empty.demo')}</button>` : ''}</div></div>`;
     return;
   }
@@ -483,10 +506,28 @@ function drawPanel(anim) {
   if (list.length && !list.some(c => c.id === S.sel)) S.sel = list[0].id;
   const c = list.length ? cust(S.sel) : null;
   const mine = c ? S.files.filter(f => f.customerId === c.id) : [];
-  const counts = { '': mine.length, other: mine.filter(f => !FOLDER[f.folder]).length };
-  for (const F2 of FOLDERS) counts[F2.slot] = mine.filter(f => f.folder === F2.slot).length;
-  if (S.folderTab === 'other' && !counts.other) S.folderTab = '';
-  const tabs = [['', t('p.all')], ...FOLDERS.map(F2 => [F2.slot, t('fo.' + F2.slot)]), ...(counts.other ? [['other', 'ไม่ระบุ']] : [])];
+  // tabs: all, one per month of this customer, and the old (v2/v3) folders when files are still there
+  const months = c ? [...byMonth(vehOf(c)).keys()] : [];
+  const old = mine.filter(f => !f.vslot);
+  const counts = { '': mine.length, old: old.length };
+  for (const ym of months) counts['m:' + ym] = mine.filter(f => f.vslot && vehById(f.vehicleId)?.ym === ym).length;
+  if (S.folderTab && !(S.folderTab in counts && (S.folderTab !== 'old' || old.length))) S.folderTab = '';
+  const tabs = [['', t('p.all')], ...months.map(ym => ['m:' + ym, ymText(ym)]), ...(old.length ? [['old', t('vh.oldFolders')]] : [])];
+  // v4 search: one row per vehicle ("customer · plate · July 2026")
+  const hits = q ? searchVehicles(q, list, S.vehicles) : [];
+  const hitIds = new Set(hits.map(h => h.c.id));
+  const rowsHtml = (q && hits.length ? [...hits.map(h => ({ x: h.c, v: h.v })), ...list.filter(x => !hitIds.has(x.id)).map(x => ({ x }))] : list.map(x => ({ x }))).map(({ x, v }, i) => {
+    const n = S.files.filter(f => f.customerId === x.id && (!v || f.vehicleId === v.id)).length;
+    const m = v ? S.vexp[v.id] || { st: 'none' } : S.exp[x.id] || { st: 'none' };
+    const pill = m.st === 'expired' ? `<em class="pill bad">${t('st.expired')}</em>` : m.st === 'soon' ? `<em class="pill warn">${t('p.renew')}</em>` : m.st === 'active' ? `<em class="pill ok">${t('st.active')}</em>` : '';
+    const nv = vehOf(x).length;
+    const sub = v ? `<bdi dir="ltr">${esc(v.plate || '—')}</bdi> · ${ymText(v.ym)}` : esc([x.nick, nv > 1 ? t('vh.count', { n: nv }) : vehOf(x)[0]?.plate || x.car || x.phone].filter(Boolean).join(' · ') || t('p.noinfo'));
+    const on = x.id === S.sel && (!v || v.id === S.openVeh);
+    return `<li><button class="citem ${on ? 'on' : ''}" data-act="select" data-id="${esc(x.id)}" ${v ? `data-veh="${esc(v.id)}"` : ''} style="--i:${Math.min(i, 12)}">
+        <span class="ava" style="--h:${hue(x.id)}">${esc(initial(x.name))}</span>
+        <span class="cmain"><b>${esc(x.name)}</b><small>${sub}</small></span>
+        ${pill}<em class="pill">${t('p.nfiles', { n })}</em></button></li>`;
+  }).join('');
 
   el.innerHTML = `
   <header class="panel-head">
@@ -495,66 +536,99 @@ function drawPanel(anim) {
     <button class="icon-btn onDark" data-act="new-customer" data-need="edit" title="${t('btn.newCustomer')}">${icon('userplus', 18)}</button>
   </header>
   <div class="panel-body ${S.mobileDetail ? 'show-detail' : ''}">
-    <ul class="clist">${list.map((x, i) => {
-      const n = S.files.filter(f => f.customerId === x.id).length, m = S.exp[x.id] || { st: 'none' };
-      const pill = m.st === 'expired' ? `<em class="pill bad">${t('st.expired')}</em>` : m.st === 'soon' ? `<em class="pill warn">${t('p.renew')}</em>` : m.st === 'active' ? `<em class="pill ok">${t('st.active')}</em>` : '';
-      return `<li><button class="citem ${x.id === S.sel ? 'on' : ''}" data-act="select" data-id="${esc(x.id)}" style="--i:${Math.min(i, 12)}">
-        <span class="ava" style="--h:${hue(x.id)}">${esc(initial(x.name))}</span>
-        <span class="cmain"><b>${esc(x.name)}</b><small>${esc(x.plate || x.car || [x.brand, x.model].filter(Boolean).join(' ') || x.phone || t('p.noinfo'))}</small></span>
-        ${pill}<em class="pill">${t('p.nfiles', { n })}</em></button></li>`;
-    }).join('') || `<li class="none">${t('p.nomatch')}</li>`}</ul>
+    <ul class="clist">${rowsHtml || `<li class="none">${t('p.nomatch')}</li>`}</ul>
     <div class="detail ${anim ? 'anim' : ''}" id="detail">${c ? caseFile(c, mine) : `<div class="empty dark"><p>${t(list.length ? 'p.pick' : 'p.nomatch')}</p></div>`}
     </div>
   </div>`;
+}
+
+/** One folder button of a vehicle card (1–4, 5, 5.1–5.5) with its file count */
+function slotBtn(v, s, files, open) {
+  const n = s.group ? files.filter(f => VSLOT[f.vslot]?.in === '5').length : files.filter(f => f.vslot === s.id).length;
+  return `<button class="vslot ${open ? 'on' : ''} ${s.in ? 'sub' : ''}" data-act="veh-slot" data-veh="${esc(v.id)}" data-slot="${s.id}" aria-expanded="${open}">
+    <span class="fico">${icon(s.icon, 15)}</span><b>${iso(s.th)}</b><em class="cnt">${num(n)}</em></button>`;
+}
+/** A vehicle (one plate in one month) inside the case file: details, the 5 folders, the open folder's files */
+function vehicleCard(c, v, mine, i) {
+  const files = mine.filter(f => f.vehicleId === v.id && f.vslot);
+  const open = S.openVeh === v.id;
+  const m = S.vexp[v.id] || { st: 'none' };
+  const pill = m.st === 'old' ? `<em class="pill">${t('vh.renewed')}</em>` : m.st === 'expired' ? `<em class="pill bad">${t('st.expired')}</em>` : m.st === 'soon' ? `<em class="pill warn">${t('p.renew')}</em>` : m.st === 'active' ? `<em class="pill ok">${t('st.active')}</em>` : '';
+  const what = [[v.brand, v.model].filter(Boolean).join(' '), v.insurer, v.policyExpiry ? `${t('e.expiry')} ${fmtDay(v.policyExpiry)}` : ''].filter(Boolean).join(' · ');
+  let body = '';
+  if (open) {
+    const slot = S.openSlot;
+    const tiles = slot && slot !== '5' ? files.filter(f => f.vslot === slot) : [];
+    body = `<div class="vbody">
+      <div class="vinfo">${infoRows(v, ['vin', 'engineNo', 'year', 'color', 'body', 'province', 'policyNo', 'policyType', 'premium', 'contractDate', 'policyStart', 'policyExpiry'])}</div>
+      ${v.legacy ? `<p class="dnote">${icon('info', 15)}<span>${t('vh.legacyNote')}</span></p>` : ''}
+      <div class="vslots">${VSLOTS.filter(s => !s.in).map(s => slotBtn(v, s, files, slot === s.id || (s.id === '5' && VSLOT[slot]?.in === '5'))).join('')}</div>
+      ${slot === '5' || VSLOT[slot]?.in === '5' ? `<div class="vslots sub">${VSLOTS.filter(s => s.in === '5').map(s => slotBtn(v, s, files, slot === s.id)).join('')}</div>` : ''}
+      ${slot && slot !== '5' ? `<div class="tiles" data-veh="${esc(v.id)}" data-slot="${slot}">${tiles.map((f, j) => fileTile(f, j)).join('')}
+        <button class="tile add" data-act="add-file" data-veh="${esc(v.id)}" data-slot="${slot}" data-need="edit">${icon('plus', 22)}<b>${t('btn.addFile')}</b><small>${t('p.drop')}</small></button></div>` : ''}
+      <div class="vactions" data-need="edit">
+        <button class="btn glassy sm" data-act="veh-edit" data-id="${esc(v.id)}">${icon('edit', 15)}<span>${t('vh.edit')}</span></button>
+        <button class="btn glassy sm" data-act="new-invoice" data-id="${esc(c.id)}" data-veh="${esc(v.id)}">${icon('invoice', 15)}<span>${t('q.invoice')}</span></button>
+        <button class="btn white sm" data-act="add-file" data-veh="${esc(v.id)}" data-slot="${FILE_SLOTS.includes(slot) ? slot : ''}">${icon('plus', 15)}<span>${t('btn.upload')}</span></button></div>
+    </div>`;
+  }
+  return `<article class="vcard ${open ? 'open' : ''}" data-veh="${esc(v.id)}" style="--i:${Math.min(i, 12)}">
+    <button class="vcard-h" data-act="veh-open" data-id="${esc(v.id)}" aria-expanded="${open}">
+      <span class="fico">${icon('car', 17)}</span>
+      <span class="cmain"><b dir="ltr">${esc(v.plate || t('vh.noPlate'))}</b><small>${esc(what) || t('g.notFilled')}</small></span>
+      ${pill}<em class="cnt">${num(files.length)}</em>${icon('chev', 16)}</button>${body}</article>`;
 }
 
 function caseFile(c, mine) {
   const m = S.exp[c.id] || { st: 'none' };
   const invs = S.invoices.filter(i => i.customerId === c.id);
   const tab = S.folderTab;
-  const veh = [...FIELD_GROUPS.vehicle, 'car'].some(k => c[k]);
   const custRows = infoRows(c, FIELD_GROUPS.customer.filter(k => k !== 'name' && k !== 'phone'));
-  const noFolders = S.store?.kind === 'cloud' && Object.keys(c.folders || {}).length < FOLDERS.length;
-  const other = mine.filter(f => !FOLDER[f.folder]);
-  const addTile = (slot, i) => `<button class="tile add" data-act="add-file" data-folder="${slot}" data-need="edit" style="--i:${Math.min(i, 14)}">${icon('plus', 22)}<b>${t('btn.addFile')}</b><small>${t('p.drop')}</small></button>`;
-  const section = F => {
-    const list = mine.filter(f => f.folder === F.slot);
-    return `<section class="dsec" data-folder="${F.slot}">
-      <header class="dsec-h"><span class="fico">${icon(F.icon, 16)}</span><div><b>${iso(F.th)}</b><small>${t('fo.' + F.slot)}</small></div><em class="cnt">${num(list.length)}</em>
-        <button class="icon-btn glassy sm" data-act="add-file" data-folder="${F.slot}" data-need="edit" title="${t('btn.addFile')}">${icon('plus', 16)}</button></header>
-      ${list.length ? `<div class="tiles">${list.map((f, i) => fileTile(f, i)).join('')}</div>` : ''}</section>`;
+  const all = vehOf(c), months = byMonth(all);
+  // v4 tree: month cards -> vehicle (plate) cards -> the 5 folders -> 5.1–5.5 inside folder 5
+  const monthHtml = [...months].filter(([ym]) => !tab || tab === 'm:' + ym).map(([ym, list]) => `
+    <section class="dsec vmonth">
+      <header class="dsec-h"><span class="fico">${icon('calendar', 16)}</span><div><b>${iso(ymFolder(ym))}</b><small>${t('vh.count', { n: list.length })}</small></div>
+        <em class="cnt">${num(mine.filter(f => f.vslot && list.some(v => v.id === f.vehicleId)).length)}</em></header>
+      <div class="vcards">${list.map((v, i) => vehicleCard(c, v, mine, i)).join('')}</div></section>`).join('');
+  // files that are still in the old v3 folders / directly in the customer folder (v2)
+  const oldSec = F => {
+    const list = mine.filter(f => !f.vslot && f.folder === F.slot);
+    return list.length ? `<section class="dsec" data-folder="${F.slot}">
+      <header class="dsec-h"><span class="fico">${icon(F.icon, 16)}</span><div><b>${iso(F.th)}</b><small>${t('fo.' + F.slot)}</small></div><em class="cnt">${num(list.length)}</em></header>
+      <div class="tiles">${list.map((f, i) => fileTile(f, i)).join('')}</div></section>` : '';
   };
-  const otherSec = () => other.length ? `<section class="dsec">
-      <header class="dsec-h"><span class="fico">${icon('folder', 16)}</span><div><b>ไม่ระบุ</b><small>${t('fo.other')}</small></div><em class="cnt">${num(other.length)}</em></header>
-      <p class="dsec-hint">${t('fo.otherHint')}</p><div class="tiles">${other.map((f, i) => fileTile(f, i)).join('')}</div></section>` : '';
-  let files;
-  if (!tab) files = FOLDERS.map(section).join('') + otherSec();
-  else if (tab === 'other') files = otherSec();
-  else { const list = mine.filter(f => f.folder === tab); files = `<div class="tiles">${list.map((f, i) => fileTile(f, i)).join('')}${addTile(tab, list.length)}</div>`; }
+  const loose = mine.filter(f => !f.vslot && !FOLDER[f.folder]);
+  const oldHtml = mine.some(f => !f.vslot) ? `<div class="vold"><p class="dsec-hint">${icon('info', 13)} ${t('vh.oldHint')}</p>${FOLDERS.map(oldSec).join('')}
+    ${loose.length ? `<section class="dsec"><header class="dsec-h"><span class="fico">${icon('folder', 16)}</span><div><b>ไม่ระบุ</b><small>${t('fo.other')}</small></div><em class="cnt">${num(loose.length)}</em></header>
+      <div class="tiles">${loose.map((f, i) => fileTile(f, i)).join('')}</div></section>` : ''}</div>` : '';
+  const files = tab === 'old' ? oldHtml : monthHtml + (tab ? '' : oldHtml);
 
   return `
       <div class="dcard" data-customer="${esc(c.id)}">
         <header>
           <button class="icon-btn glassy back" data-act="back" title="${t('btn.back')}">${icon('chev', 18)}</button>
           <div class="dname"><small>${t('p.file')}</small><h2>${esc(c.name)}</h2>${c.nameEn ? `<small>${esc(c.nameEn)}</small>` : ''}</div>
-          <div class="dmeta"><span class="st-chip"><i class="dot ${m.st === 'expired' ? 'bad' : m.st === 'soon' ? 'warn' : m.st === 'active' ? 'ok' : ''}"></i>${t('st.' + m.st)}${m.exp ? ` · ${fmtDay(m.exp)}` : ''}</span>
-            ${c.plate ? `<span>${icon('car', 15)}${esc(c.plate)}${c.province ? ' ' + esc(c.province) : ''}</span>` : ''}${c.car ? `<span>${esc(c.car)}</span>` : ''}${c.phone ? `<a href="tel:${esc(c.phone)}">${icon('phone', 15)}<bdi>${esc(digits(c.phone))}</bdi></a>` : ''}</div>
+          <div class="dmeta"><span class="st-chip"><i class="dot ${m.st === 'expired' ? 'bad' : m.st === 'soon' ? 'warn' : m.st === 'active' ? 'ok' : ''}"></i>${t('st.' + m.st)}${m.exp ? ` · ${fmtDay(m.exp)}` : ''}${m.plate ? ` · <bdi dir="ltr">${esc(m.plate)}</bdi>` : ''}</span>
+            ${c.nick ? `<span>${icon('users', 15)}${esc(c.nick)}</span>` : ''}${c.phone ? `<a href="tel:${esc(c.phone)}">${icon('phone', 15)}<bdi>${esc(digits(c.phone))}</bdi></a>` : ''}</div>
           <button class="icon-btn glassy" data-act="edit-customer" data-need="edit" title="${t('p.edit')}">${icon('edit', 17)}</button>
         </header>
-        <div class="dinfo">
+        <div class="dinfo two">
           <section><h4>${icon('users', 14)}${t('g.customer')}</h4>${custRows || `<p class="none">${t('g.notFilled')}</p>`}</section>
-          <section><h4>${icon('car', 14)}${t('g.vehicle')}</h4>${veh ? infoRows(c, [...FIELD_GROUPS.vehicle, 'car']) : `<p class="none">${t('g.notFilled')}</p>`}</section>
-          <section><h4>${icon('shield', 14)}${t('g.policy')}</h4>${infoRows(c, FIELD_GROUPS.policy.filter(k => k !== 'policyExpiry'))}
+          <section><h4>${icon('car', 14)}${t('vh.title')}</h4>
+            <div class="irow"><small>${t('vh.vehicles')}</small><span>${num(latestOf(all).length)}</span></div>
+            <div class="irow"><small>${t('vh.months')}</small><span>${num(months.size)}</span></div>
             <div class="irow"><small>${t('cf.policyExpiry')}</small><span>${m.exp ? `${fmtDay(m.exp)} · ${daysText(m.d)}` : t('st.notSet')}</span></div>
             ${m.legacy ? `<small class="src">${t('st.fromFile')}</small>` : ''}</section>
         </div>
-        ${noFolders ? `<p class="dnote">${icon('info', 15)}<span>${t('fo.missing')}</span></p>` : ''}
+        <div class="vadd" data-need="edit"><button class="btn glassy sm" data-act="veh-add" data-id="${esc(c.id)}">${icon('plus', 15)}<span>${t('vh.add')}</span></button></div>
+        ${all.length ? '' : `<p class="dnote">${icon('info', 15)}<span>${t('vh.none')}</span></p>`}
         ${files}
         <section class="dsec">
           <header class="dsec-h"><span class="fico">${icon('invoice', 16)}</span><div><b>${t('inv.title')}</b></div><em class="cnt">${num(invs.length)}</em>
             <button class="icon-btn glassy sm" data-act="new-invoice" data-id="${esc(c.id)}" data-need="edit" title="${t('inv.create')}">${icon('plus', 16)}</button></header>
           <div class="dinv">${invs.length ? invs.map(inv => `<button class="dinv-row" data-act="open-invoice" data-id="${esc(inv.id)}">
-            <span class="cmain"><b dir="ltr">${esc(inv.no)}</b><small>${fmtDay(inv.issue)}</small></span><b class="amt">${baht(inv.t?.total || 0)}</b>${invPillDark(inv.status)}</button>`).join('') : `<p class="none">${t('inv.noneHere')}</p>`}</div>
+            <span class="cmain"><b dir="ltr">${esc(inv.no)}</b><small>${fmtDay(inv.issue)}${inv.veh?.plate ? ` · <bdi dir="ltr">${esc(inv.veh.plate)}</bdi>` : ''}</small></span><b class="amt">${baht(inv.t?.total || 0)}</b>${invPillDark(inv.status)}</button>`).join('') : `<p class="none">${t('inv.noneHere')}</p>`}</div>
         </section>
         <footer>
           <div><small>${t('p.total')}</small><b>${num(mine.length)}</b></div>
@@ -577,24 +651,29 @@ function drawGrid() {
     : `<div class="empty"><div class="gate-ico">${icon('folder', 34)}</div><h3>${t(k)}</h3><p>${t(k + '.text')}</p></div>`;
 }
 
-/* ---------- renewals: by customer, grouped ---------- */
+/* ---------- renewals: one row per vehicle (v4), grouped ---------- */
 function drawExp() {
   const el = $('#explist'); if (!el) return;
   const F = S.filters, q = F.q.trim();
-  const rows = S.customers.filter(c => (!F.customer || c.id === F.customer) && custMatch(c, q))
-    .map(c => ({ c, m: S.exp[c.id] })).filter(x => x.m?.exp && x.m.d <= 60).sort((a, b) => a.m.d - b.m.d);
-  const groups = [['expired', x => x.m.d < 0], ['d7', x => x.m.d >= 0 && x.m.d <= 7], ['d30', x => x.m.d > 7 && x.m.d <= 30], ['d60', x => x.m.d > 30]];
+  // a search that names vehicles (plate, chassis, month) shows only those; a customer name shows all of their vehicles
+  const hit = x => {
+    if (!q) return true;
+    const vs = searchVehicles(q, [x.c], S.vehicles);
+    return x.v && vs.length ? vs.some(h => h.v.id === x.v.id) || vs.every(h => h.c.id === x.c.id) && vs.length === vehOf(x.c).length : custMatch(x.c, q);
+  };
+  const rows = S.renew.filter(x => (!F.customer || x.c.id === F.customer) && hit(x) && x.d <= 60).sort((a, b) => a.d - b.d);
+  const groups = [['expired', x => x.d < 0], ['d7', x => x.d >= 0 && x.d <= 7], ['d30', x => x.d > 7 && x.d <= 30], ['d60', x => x.d > 30]];
   let i = 0;
   el.innerHTML = rows.length ? groups.map(([k, fn]) => {
     const g = rows.filter(fn); if (!g.length) return '';
-    return `<h2 class="egroup g-${k}">${t('ex.' + k)}<span>${num(g.length)}</span></h2>${g.map(({ c, m }) => `
+    return `<h2 class="egroup g-${k}">${t('ex.' + k)}<span>${num(g.length)}</span></h2>${g.map(({ c, v, exp, d }) => `
       <div class="erow card" style="--i:${Math.min(i++, 14)}">
         <span class="ava" style="--h:${hue(c.id)}">${esc(initial(c.name))}</span>
-        <button class="emain" data-act="open-customer" data-id="${esc(c.id)}"><b>${esc(c.name)}</b><small>${esc([c.plate, c.insurer, c.policyNo].filter(Boolean).join(' · ') || c.phone || '')}</small></button>
-        <span class="edate"><small>${t('e.expiry')}</small><b>${fmtDay(m.exp)}</b></span>
-        <em class="pill st ${m.d < 0 || m.d === 0 ? 'bad' : m.d <= 30 ? 'warn' : 'ok'}">${daysText(m.d)}</em>
+        <button class="emain" data-act="open-customer" data-id="${esc(c.id)}" ${v ? `data-veh="${esc(v.id)}"` : ''}><b>${esc(c.name)}${v?.plate ? ` · <bdi dir="ltr">${esc(v.plate)}</bdi>` : ''}</b><small>${esc([v ? ymText(v.ym) : '', v?.insurer, v?.policyNo].filter(Boolean).join(' · ') || c.phone || '')}</small></button>
+        <span class="edate"><small>${t('e.expiry')}</small><b>${fmtDay(exp)}</b></span>
+        <em class="pill st ${d <= 0 ? 'bad' : d <= 30 ? 'warn' : 'ok'}">${daysText(d)}</em>
         ${c.phone ? `<a class="icon-btn" href="tel:${esc(c.phone)}" title="${esc(t('e.call', { x: c.name }))}">${icon('phone', 17)}</a>` : ''}
-        <button class="icon-btn" data-act="open-customer" data-id="${esc(c.id)}" title="${t('a.open')}">${icon('chev', 17)}</button>
+        <button class="icon-btn" data-act="open-customer" data-id="${esc(c.id)}" ${v ? `data-veh="${esc(v.id)}"` : ''} title="${t('a.open')}">${icon('chev', 17)}</button>
       </div>`).join('')}`;
   }).join('') : `<div class="empty"><div class="gate-ico">${icon('clock', 34)}</div><h3>${t('ex.empty')}</h3><p>${t('ex.emptyText')}</p></div>`;
 }
@@ -618,15 +697,16 @@ function drawInv() {
 }
 
 /** Shows a customer's case file on the dashboard */
-function openCustomer(id) {
+function openCustomer(id, vid = '') {
   closeSheet();
+  if (S.sel !== id || vid) { S.openVeh = vid || ''; S.openSlot = ''; S.folderTab = ''; }
   S.view = 'dash'; S.sel = id; S.mobileDetail = true;
   const st = S.exp[id]?.st;
   if (S.filters.status && S.filters.status !== st) S.filters.status = '';
   if (S.filters.customer && S.filters.customer !== id) S.filters.customer = '';
   if (S.filters.q && !custMatch(cust(id) || {}, S.filters.q.trim())) S.filters.q = '';
   mount();
-  requestAnimationFrame(() => $(narrow() ? '#panel' : '#detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  requestAnimationFrame(() => (vid && $(`.vcard[data-veh="${CSS.escape(vid)}"]`) || $(narrow() ? '#panel' : '#detail'))?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 
 /* ================= sheets ================= */
@@ -688,9 +768,9 @@ const DOC_ACCEPT = 'image/*,application/pdf';
 function addSheet() {
   const c = S.view === 'dash' ? cust(S.sel) : null;
   sheet({ title: t('add.title'), cls: 'small', body: `
-    <div class="set-card"><div class="set-h">${icon('wand', 22)}<div><b>${t('add.ai')}</b><small>${aiOn() ? t('add.aiSub') : S.mode === 'local' ? t('ai.localOnly') : t('ai.off')}</small></div></div>
-      <div class="two-btn"><button class="btn primary" data-act="ai-new" data-src="cam" ${aiOn() ? '' : 'disabled'}>${icon('camera', 18)}<span>${t('src.camera')}</span></button>
-      <button class="btn ghost" data-act="ai-new" data-src="files" ${aiOn() ? '' : 'disabled'}>${icon('gallery', 18)}<span>${t('src.files')}</span></button></div></div>
+    <div class="set-card"><div class="set-h">${icon('wand', 22)}<div><b>${t('su.btn')}</b><small>${aiOn() ? t('su.addSub') : (S.mode === 'local' ? t('ai.localOnly') : t('ai.off')) + ' ' + t('su.byHand')}</small></div></div>
+      <div class="two-btn"><button class="btn primary" data-act="smart" data-src="cam">${icon('camera', 18)}<span>${t('src.camera')}</span></button>
+      <button class="btn ghost" data-act="smart" data-src="files">${icon('gallery', 18)}<span>${t('src.files')}</span></button></div></div>
     <div class="alist">
       <button class="as-row" data-act="new-customer"><span class="aico">${icon('userplus', 19)}</span><span><b>${t('add.manual')}</b><small>${t('add.manualSub')}</small></span>${icon('chev', 16)}</button>
       <button class="as-row" data-act="${c ? 'add-file' : 'pick-customer'}" data-next="file"><span class="aico">${icon('folder', 19)}</span><span><b>${t('add.file')}</b><small>${c ? esc(c.name) : t('add.fileSub')}</small></span>${icon('chev', 16)}</button>
@@ -719,43 +799,41 @@ function sourceSheet(onPick, { title = t('q.file'), accept = '' } = {}) {
 }
 
 /* ---------- customer form (add / edit) ---------- */
-const fieldInput = (k, v, { err = '', warn = '', conf = null, note = '' } = {}) => {
+const fieldInput = (k, v, { err = '', warn = '', conf = null, note = '', req = false } = {}) => {
   const val = esc(v || '');
   const attrs = `name="${k}" data-r="${k}"`;
   let inp;
   if (DATE_FIELDS.has(k)) inp = `<input type="date" ${attrs} value="${val}">`;
   else if (k === 'address' || k === 'note') inp = `<textarea ${attrs} rows="2" maxlength="${k === 'note' ? 500 : 300}">${val}</textarea>`;
   else {
-    const extra = { phone: 'inputmode="tel" dir="ltr" autocomplete="tel"', idNo: 'inputmode="numeric" dir="ltr"', year: 'inputmode="numeric" maxlength="4"', coverage: 'inputmode="decimal"', premium: 'inputmode="decimal"', vin: 'dir="ltr" autocapitalize="characters"', engineNo: 'dir="ltr" autocapitalize="characters"', policyNo: 'dir="ltr"', province: 'list="dl-prov"', policyType: 'list="dl-ptype"', name: 'required maxlength="120"' }[k] || '';
+    const extra = { phone: 'inputmode="tel" dir="ltr" autocomplete="tel"', idNo: 'inputmode="numeric" dir="ltr"', year: 'inputmode="numeric" maxlength="4"', coverage: 'inputmode="decimal"', premium: 'inputmode="decimal"', vin: 'dir="ltr" autocapitalize="characters"', engineNo: 'dir="ltr" autocapitalize="characters"', policyNo: 'dir="ltr"', province: 'list="dl-prov"', policyType: 'list="dl-ptype"', name: 'required maxlength="120"', plate: 'maxlength="40"' }[k] || '';
     inp = `<input ${attrs} ${extra} value="${val}" autocomplete="off">`;
   }
   const level = conf == null ? '' : conf >= 0.85 ? 'hi' : conf >= 0.6 ? 'mid' : 'lo';
   const chip = level ? `<em class="conf c-${level}" title="${t('ai.conf')}">${t('conf.' + level)}</em>` : '';
-  return `<label class="fld ${err ? 'has-err' : ''} ${level ? 'ai-' + level : ''}"><span class="fl">${t('cf.' + k)}${k === 'name' ? ' *' : ''}${chip}</span>${inp}
+  return `<label class="fld ${err ? 'has-err' : ''} ${level ? 'ai-' + level : ''}"><span class="fl">${t('cf.' + k)}${k === 'name' || req ? ' *' : ''}${chip}</span>${inp}
     ${err ? `<small class="ferr">${t(err)}</small>` : warn ? `<small class="fwarn">${t(warn)}</small>` : note ? `<small class="fwarn">${t(note)}</small>` : ''}</label>`;
 };
 const datalists = () => `<datalist id="dl-prov">${PROVINCES.map(p => `<option value="${p}">`).join('')}</datalist><datalist id="dl-ptype">${POLICY_TYPES.map(p => `<option value="${p}">`).join('')}</datalist>`;
-function fieldGroups(v, opts = {}) {
-  const extra = opts.extraVehicle || [];
-  return Object.entries({ customer: FIELD_GROUPS.customer, vehicle: [...FIELD_GROUPS.vehicle, ...extra], policy: FIELD_GROUPS.policy }).map(([g, keys]) =>
-    `<fieldset class="fgroup"><legend>${t('g.' + g)}</legend><div class="fgrid">${keys.map(k => fieldInput(k, v[k], { err: opts.errors?.[k], warn: opts.warnings?.[k], conf: opts.conf?.[k] ?? null, note: opts.notes?.[k] })).join('')}</div></fieldset>`).join('');
-}
+const fieldset = (legend, keys, v, opts = {}) => `<fieldset class="fgroup"><legend>${legend}</legend><div class="fgrid">${keys.map(k => fieldInput(k, v[k], { err: opts.errors?.[k], warn: opts.warnings?.[k], conf: opts.conf?.[k] ?? null, note: opts.notes?.[k], req: k === 'plate' && opts.plateReq })).join('')}</div></fieldset>`;
 
 let CF = null;   // customer form state
 function customerSheet(c = {}) {
   CF = { id: c.id || '', v: { ...c } };
   drawCustomerSheet();
 }
+/** v4: the customer form has only the customer's own details; vehicles and policies are on the vehicles. */
 function drawCustomerSheet(errors = {}, warnings = {}) {
   const c = CF.v;
   sheet({ title: t(CF.id ? 'c.edit' : 'c.new'), sub: t('c.sub'), cls: 'wide',
-    body: `<form class="form" data-form="customer" id="cform" novalidate>${fieldGroups(c, { errors, warnings, extraVehicle: c.car ? ['car'] : [] })}
-      <fieldset class="fgroup">${fieldInput('note', c.note)}</fieldset>${datalists()}</form>`,
+    body: `<form class="form" data-form="customer" id="cform" novalidate>${fieldset(t('g.customer'), FIELD_GROUPS.customer, c, { errors, warnings })}
+      <fieldset class="fgroup">${fieldInput('note', c.note)}</fieldset>
+      ${CF.id ? '' : `<p class="note">${icon('car', 15)}<span>${t('vh.afterCustomer')}</span></p>`}</form>`,
     foot: `${CF.id ? `<button type="button" class="btn danger-ghost" data-act="del-customer" data-id="${esc(CF.id)}">${icon('trash', 17)}<span>${t('c.delete')}</span></button>` : ''}<span class="sp"></span>
       <button type="button" class="btn ghost" data-act="close-sheet">${t('btn.cancel')}</button><button class="btn primary" type="submit" form="cform">${t('btn.save')}</button>` });
   if (!CF.id) setTimeout(() => $('#cform input[name=name]')?.focus(), 350);
 }
-const CUSTOMER_FORM_KEYS = [...ALL_FIELDS, 'note', 'car'];
+const CUSTOMER_FORM_KEYS = [...FIELD_GROUPS.customer, 'note'];
 function readForm(form, keys) {
   const out = {};
   for (const k of keys) { const el = form.elements[k]; if (el) out[k] = el.value.trim(); }
@@ -782,7 +860,7 @@ async function saveCustomerForm(form) {
       if (!ok) { drawCustomerSheet(errors, warnings); return; }
     }
   }
-  // only the fields the form shows are sent; the backend merges them into the saved details
+  // only the fields the form shows are sent; the backend merges them into the saved details (old vehicle fields stay)
   const payload = { id: CF.id || undefined, name: v.name };
   for (const k of CUSTOMER_FORM_KEYS) if (k in v) payload[k] = v[k];
   const isNew = !CF.id;
@@ -790,71 +868,84 @@ async function saveCustomerForm(form) {
   CF = null; closeSheet(); await reload();
   toast(t(isNew ? 't.customerAdded' : 't.customerUpdated'));
   openCustomer(c.id);
+  if (isNew && canEdit()) vehicleSheet(c.id);   // the first vehicle right away
 }
 
-/* ---------- folder picker ---------- */
-function folderPicker(cur, aiSlot, name = 'folder', i = '') {
-  return `<div class="fpick" role="radiogroup" aria-label="${t('fo.choose')}">${FOLDERS.map(F => `
-    <button type="button" role="radio" aria-checked="${cur === F.slot}" class="${cur === F.slot ? 'on' : ''}" data-act="pick-folder" data-name="${name}" data-i="${i}" data-folder="${F.slot}">
-      <span class="fp-ico">${icon(F.icon, 18)}</span><b>${iso(F.th)}</b><small>${t('fo.' + F.slot)}</small>${aiSlot === F.slot ? `<em class="ai-tag">${icon('wand', 11)} AI</em>` : ''}</button>`).join('')}</div>`;
+/* ---------- vehicle form (v4): add / edit / remove ---------- */
+let VF = null;
+/** v = a vehicle record, a legacy vehicle ("L:…": saving makes a real record, the customer details stay) or nothing (new) */
+function vehicleSheet(cid, v = null) {
+  VF = { cid, id: v && !v.legacy ? v.id : '', legacy: !!v?.legacy, v: { ...(v || {}) } };
+  drawVehicleSheet();
 }
-const typeFor = (slot, docType) => slot === 'docs' ? (docType === 'id_card' ? 'id' : 'car') : FOLDER[slot]?.type || 'other';
+function drawVehicleSheet(errors = {}) {
+  const v = VF.v, c = cust(VF.cid);
+  const ym = VF.id ? v.ym : v.ym || ymForVehicle(v, todayIso());
+  sheet({ title: t(VF.id ? 'vh.edit' : 'vh.new'), sub: esc(c?.name || ''), cls: 'wide',
+    body: `<form class="form" data-form="vehicle" id="vform" novalidate>
+      ${VF.legacy ? `<p class="note">${icon('info', 15)}<span>${t('vh.legacyEdit')}</span></p>` : ''}
+      ${fieldset(t('g.vehicle'), VGROUPS.vehicle, v, { errors, plateReq: true })}
+      ${fieldset(t('g.policy'), VGROUPS.policy, v, { errors })}
+      <fieldset class="fgroup"><legend>${t('vh.month')}</legend>
+        ${VF.id ? `<p class="sh-text"><b>${iso(ymFolder(v.ym))}</b></p><p class="muted">${t('vh.monthFixed')}</p>`
+          : `<label class="fld"><span class="fl">${t('vh.monthFolder')}</span><input type="month" name="ym" value="${esc(ym)}" data-vf-ym></label><p class="muted">${t('vh.monthHint')}</p>`}</fieldset>
+      <fieldset class="fgroup">${fieldInput('note', v.note)}</fieldset>${datalists()}</form>`,
+    foot: `${VF.id ? `<button type="button" class="btn danger-ghost" data-act="del-vehicle" data-id="${esc(VF.id)}">${icon('trash', 17)}<span>${t('vh.remove')}</span></button>` : ''}<span class="sp"></span>
+      <button type="button" class="btn ghost" data-act="close-sheet">${t('btn.cancel')}</button><button class="btn primary" type="submit" form="vform">${t('btn.save')}</button>` });
+  sheetClose = () => { VF = null; };
+  if (!VF.id) setTimeout(() => $('#vform input[name=plate]')?.focus(), 350);
+}
+async function saveVehicleForm(form) {
+  const v = tidy({ ...VF.v, ...readForm(form, VFIELDS) });
+  v.plate = plateOnly(v.plate, v.province);
+  const errors = {};
+  if (!v.plate) errors.plate = 'vh.needPlate';
+  if (v.policyStart && v.policyExpiry && v.policyExpiry <= v.policyStart) errors.policyExpiry = 'v.order';
+  VF.v = v;
+  if (form.ym?.value) VF.v.ym = form.ym.value;
+  if (Object.keys(errors).length) { drawVehicleSheet(errors); return toast(t('v.fix'), 'err'); }
+  const payload = { id: VF.id || undefined, customerId: VF.cid };
+  for (const k of VFIELDS) payload[k] = v[k] || '';
+  if (!VF.id) payload.ym = form.ym?.value || ymForVehicle(v, todayIso());
+  const cid = VF.cid, x = await S.store.saveVehicle(payload);
+  sheetClose = null; VF = null; closeSheet();
+  await reload();
+  toast(t('vh.saved'));
+  openCustomer(cid, x.id);
+}
+async function deleteVehicle(id) {
+  const v = vehById(id); if (!v || v.legacy) return;
+  const n = S.files.filter(f => f.vehicleId === id).length;
+  if (!await confirmBox(t('vh.removeQ', { x: `<b dir="ltr">${esc(v.plate)}</b> · ${ymText(v.ym)}`, n }) + t(S.store.kind === 'cloud' ? 'del.drive' : 'del.local'))) return;
+  await S.store.deleteVehicle(id);
+  if (S.openVeh === id) S.openVeh = '';
+  await reload(); toast(t('vh.removed'));
+}
+/** A legacy vehicle becomes a real record (plate folder in its month) the first time something is saved into it */
+async function realVehicle(v, cid) {
+  if (!v.legacy) return v;
+  const data = { customerId: cid, ym: v.ym };
+  for (const k of VFIELDS) if (v[k]) data[k] = v[k];
+  if (!data.plate) throw Object.assign(new Error('vh.needPlate'), { key: 'vh.needPlate' });
+  return S.store.saveVehicle(data);
+}
 
-/* ---------- upload to a customer (folder required, AI suggestions) ---------- */
+/* ---------- upload: normal (inside a customer) and Smart upload (v4) ---------- */
+/*
+ * One review list for both. Every row: file -> customer -> vehicle (plate + month) -> folder -> new name.
+ * Smart upload: no customer chosen; the AI reads every file and the app finds customer, vehicle, month and folder.
+ * Nothing is saved before "Save". New customers and new vehicles are only made when their box is ticked.
+ */
 let U = null;
 const MAX = MAX_UPLOAD_MB * 1048576;
 const compressible = f => /^image\/(jpeg|png|webp|heic|heif)$/i.test(f.type);
 const readable = f => compressible(f) || f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
-const newItem = (file, folder = '') => {
-  const plates = platesOf(cust(U?.cid));
-  const it = { file, name: file.name, folder, picked: !!folder, aiFolder: null, type: typeFor(folder), expiry: '', ai: aiOn() && readable(file) ? 'wait' : 'skip', n: null, url: isImage({ mime: file.type }) ? objUrl(file) : '', done: false, p: 0, plates, plate: plates[0] || '' };
-  autoName(it);
-  return it;
-};
-
-/* ---------- automatic file names (v3.2): {plate} - {customer}({month}) - {document}.{ext} ---------- */
-/** The customer's plate, plus plates already used in their file names (a customer with several vehicles). */
-function platesOf(c) {
-  const out = [];
-  const add = p => { p = plateOnly(p); if (p && !out.includes(p)) out.push(p); };
-  if (c) { add(plateOnly(c.plate, c.province)); for (const f of S.files) if (f.customerId === c.id) add(plateFromName(f.name)); }
-  return out;
-}
-/** Suggested name of an upload row (kept as it is once the user typed in the name box). */
-function autoName(it) {
-  if (it.nameEdited || !U) return;
-  const c = cust(U.cid), v = it.n?.values || {};
-  const month = monthOf(v.contractDate, it.n?.docType === 'policy' ? v.policyStart : '', c?.contractDate, c?.policyStart, todayIso());
-  it.name = buildName({ plate: it.plate, customer: c, month, doc: docNameFor({ aiName: it.n?.docName, docType: it.n?.docType, folder: it.folder }), ext: extOf(it.file.name) });
-}
-/** After the AI: the plate it read becomes a choice (and the default when it is sure), then the name is made again. */
-function aiPlate(it) {
-  const p = plateOnly(it.n?.values.plate, it.n?.values.province);
-  if (!p) return;
-  if (!it.plates.includes(p)) it.plates.push(p);
-  if (!it.plateSet && (it.n.conf.plate ?? 0) >= 0.6) it.plate = p;
-}
-/** Names for the files of "Add customer with AI" (from the values on the review form) */
-function reviewNames(c) {
-  if (!R) return;
-  R.names ||= []; R.namesEdited ||= [];
-  R.files.forEach((f, i) => {
-    if (R.namesEdited[i]) return;
-    R.names[i] = buildName({ plate: plateOnly(c.plate, c.province), customer: c, month: monthOf(c.contractDate, c.policyStart, todayIso()), doc: docNameFor({ aiName: R.n?.docName, docType: R.n?.docType, folder: R.folder }), ext: extOf(f.name) });
-  });
-}
-function refreshReviewNames() {
-  if (!R) return;
-  reviewNames(R.v);
-  for (const el of $$('[data-rn]')) if (!R.namesEdited[+el.dataset.rn]) el.value = R.names[+el.dataset.rn] || '';
-}
 /** Name to save: cleaned, original extension kept (a compressed photo becomes .jpg as before) */
 function saveName(name, file, blob) {
   let n = withExt(safeName(name) || file.name, extOf(file.name));
   if (blob !== file && blob.type === 'image/jpeg') n = n.replace(/\.(png|webp|heic|heif|jpe?g)$/i, '') + '.jpg';
   return n;
 }
-
 function sizeFilter(files) {
   const ok = [];
   for (const f of files) {
@@ -863,256 +954,301 @@ function sizeFilter(files) {
   }
   return ok;
 }
-function startUpload(fileList, cid, folder = '') {
+const CONF_RANK = { none: 0, hint: 1, low: 1, new: 2, mid: 2, high: 3 };
+/** Customer of a row: an existing id or "C:<key>" (a new customer the user still has to confirm) */
+const rowCust = it => it.cid?.startsWith('C:') ? { id: it.cid, name: U.newCust[it.cid.slice(2)]?.data.name || '', nick: '', isNew: true } : cust(it.cid);
+/** Vehicle choices for a customer: records + legacy + new ones of this upload ("N:<key>") */
+function vehChoices(cid) {
+  if (!cid) return [];
+  const list = cid.startsWith('C:') ? [] : vehOf(cid).map(v => ({ ...v }));
+  for (const nv of Object.values(U.newVeh)) if (nv.cid === cid) list.push({ ...nv.data, id: 'N:' + nv.key, ym: nv.ym, isNew: true });
+  return list;
+}
+const rowVeh = it => it.vkey ? vehChoices(it.cid).find(v => v.id === it.vkey) || null : null;
+function newRow(file, { cid = '', vid = '', slot = '' } = {}) {
+  return { file, name: file.name, cid, vkey: vid, slot, touched: !!vid, picked: { cid: !!cid, veh: !!vid, slot: !!slot },
+    cconf: cid ? 'high' : 'none', vconf: vid ? 'high' : 'none', sconf: slot ? 'high' : 'none', conf: 'none',
+    ai: aiOn() && readable(file) ? 'wait' : 'skip', n: null, url: isImage({ mime: file.type }) ? objUrl(file) : '', done: false, p: 0 };
+}
+/** The suggested name (kept as it is once the user typed in the name box) */
+function autoName(it) {
+  if (it.nameEdited) return;
+  const c = rowCust(it), v = rowVeh(it);
+  it.name = c && v && it.slot ? vehicleFileName({ vehicle: v, customer: c, slot: it.slot, ext: extOf(it.file.name) }) : it.file.name;
+}
+function rowConf(it) {
+  if (it.conf === 'hint' && !it.picked.cid && !it.picked.veh) return 'hint';
+  const r = Math.min(CONF_RANK[it.picked.cid ? 'high' : it.cconf] ?? 0, CONF_RANK[it.picked.veh ? 'high' : it.vconf] ?? 0, CONF_RANK[it.picked.slot ? 'high' : it.sconf] ?? 0);
+  return ['none', 'low', 'mid', 'high'][r];
+}
+/** A new customer suggested from what the AI read (made only when the user ticks it) */
+function newCustFor(v) {
+  const name = v.name || v.insuredName || '';
+  const key = nameKey(name) || 'x' + Object.keys(U.newCust).length;
+  U.newCust[key] ||= { key, ok: false, data: { name, nameEn: v.nameEn || '', phone: v.phone || '', idNo: v.idNo || '', address: v.address || '' } };
+  return 'C:' + key;
+}
+/** A new vehicle (or a renewal in a new month) suggested from the document */
+function newVehFor(cid, v, ym) {
+  const plate = plateOnly(v.plate, v.province);
+  const key = cid + '|' + (plateKey(plate) || 'np' + Object.keys(U.newVeh).length) + '|' + ym;
+  if (!U.newVeh[key]) {
+    const data = {};
+    for (const k of VFIELDS) if (v[k]) data[k] = v[k];
+    data.plate = plate;
+    U.newVeh[key] = { key, cid, ym, ok: false, data };
+  }
+  return 'N:' + key;
+}
+/** Customer, vehicle and folder of a row from the AI answer (only what the user did not choose) */
+function placeRow(it) {
+  const v = it.n?.values || {};
+  if (!it.picked.slot) { const s = slotFromAi(it.n); if (s) { it.slot = s; it.sconf = FILE_SLOTS.includes(it.n?.slot) ? 'high' : 'mid'; } }
+  if (!it.picked.cid && !U.fixedCid) {
+    const m = findCustomer(v, S.customers, allVehicles(S.customers, S.vehicles));
+    if (m) { it.cid = m.cid; it.cconf = m.conf; it.how = m.how; }
+    else if (v.name || v.insuredName) { it.cid = newCustFor(v); it.cconf = 'new'; it.how = 'new'; }
+  }
+  if (!it.picked.veh && it.cid) {
+    const f = findVehicle(v, it.slot, vehChoices(it.cid));
+    if (f.vid) { it.vkey = f.vid; it.vconf = f.conf; }
+    else if (f.add) { it.vkey = newVehFor(it.cid, v, f.ym || ymForVehicle(v, todayIso())); it.vconf = 'new'; it.renew = f.renew || ''; }
+  }
+  it.conf = rowConf(it);
+  autoName(it);
+}
+/** Files dropped together usually belong to the same vehicle */
+function hintRows() {
+  if (!U) return;
+  batchHint(U.items.map(it => { it.conf = rowConf(it); return it; }));
+  for (const it of U.items) if (it.conf === 'hint') autoName(it);
+}
+
+function startUpload(fileList, { cid = '', vid = '', slot = '', smart = false } = {}) {
   if (!canEdit()) return toast(t('err.role'), 'err');
   if (S.gate || !S.store) return toast(t('u.connect'), 'err');
   const files = sizeFilter([...fileList]);
   if (!files.length) return;
-  const c = cust(cid); if (!c) return pickCustomerSheet('file');
-  U = { cid, toggles: {}, busy: false, items: [] };
-  U.items = files.map(f => newItem(f, folder));
-  sheet({ title: t('u.title'), sub: esc(c.name), cls: 'wide',
-    body: `<div class="up-list" id="upList"></div><div id="upDiff"></div>`,
+  if (!smart && !cust(cid)) return startUpload(fileList, { smart: true });
+  if (vid && !vehOf(cid).some(v => v.id === vid)) vid = '';
+  U = { smart, fixedCid: smart ? '' : cid, busy: false, items: [], newCust: {}, newVeh: {}, toggles: {} };
+  U.items = files.map(f => newRow(f, { cid: smart ? '' : cid, vid, slot }));
+  if (!smart) for (const it of U.items) { const list = vehOf(cid); if (!it.vkey && list.length === 1) { it.vkey = list[0].id; it.vconf = 'high'; } it.conf = rowConf(it); autoName(it); }
+  sheet({ title: smart ? t('su.title') : t('u.title'), sub: smart ? t('su.sub') : esc(cust(cid).name), cls: 'xwide',
+    body: `${smart && !aiOn() ? `<p class="note warn">${icon('alert', 15)}<span>${S.mode === 'local' ? t('ai.localOnly') : t('ai.off')} ${t('su.byHand')}</span></p>` : ''}
+      <div id="upNew"></div><div class="up-list" id="upList"></div><div id="upDiff"></div>`,
     foot: `<button class="btn ghost" data-act="up-more">${icon('plus', 17)}<span>${t('u.more')}</span></button><span class="sp"></span>
       <button class="btn ghost" data-act="close-sheet">${t('btn.cancel')}</button><button class="btn primary" data-act="do-upload" id="upGo"></button>` });
   sheetClose = () => { U = null; };
   drawUpload();
   aiQueue();
 }
+/** The AI reads the files, two at a time. A failed or busy AI never blocks: the row is filled in by hand. */
 async function aiQueue() {
   const u = U;
-  for (const it of u?.items || []) {
-    if (U !== u) return;
-    if (it.ai !== 'wait') continue;
-    it.ai = 'busy'; it.since = Date.now(); drawUpload();
-    try {
-      it.prepared ||= await prepare([it.file]);   // kept: "Try again" sends the same bytes, so a late result comes from the cache
-      const r = await S.store.aiExtract(it.prepared);
+  const worker = async () => {
+    for (;;) {
       if (U !== u) return;
-      it.n = normalize(r);
-      it.aiFolder = suggestFolder(it.n, cust(u.cid));
-      if (!it.picked && it.aiFolder) { it.folder = it.aiFolder; it.type = typeFor(it.folder, it.n.docType); }
-      if (it.n.values.policyExpiry && it.folder === 'policy' && !it.expiry) it.expiry = it.n.values.policyExpiry;
-      aiPlate(it); autoName(it);
-      it.ai = 'done';
-    } catch (e) { it.ai = 'err'; it.err = aiErr(e); }
-    drawUpload();
-  }
+      const it = u.items.find(x => x.ai === 'wait');
+      if (!it) return;
+      it.ai = 'busy'; it.since = Date.now(); drawUpload();
+      try {
+        it.prepared ||= await prepare([it.file]);   // kept: "Try again" sends the same bytes, so a late result comes from the cache
+        const r = await S.store.aiExtract(it.prepared);
+        if (U !== u) return;
+        it.n = normalize(r);
+        it.ai = 'done';
+        placeRow(it);
+      } catch (e) { it.ai = 'err'; it.err = aiErr(e); }
+      if (U !== u) return;
+      hintRows();
+      drawUpload();
+    }
+  };
+  await Promise.all([worker(), worker()]);
 }
 function aiErr(e) {
   if (e?.key) return t(e.key);
   return t({ offline: 'ai.offline', timeout: 'ai.stillWorking', network: 'ai.offline', ai_nokey: 'ai.nokey', ai_quota: 'ai.busy', ai_busy: 'ai.busy', too_big: 'ai.tooBig', role: 'err.role' }[e?.code] || 'ai.failed');
 }
+/** "old -> new" for existing vehicles and customers, from what the AI read (each change can be unticked) */
 function uploadDiff() {
-  const c = cust(U.cid), best = {};
+  const best = {};
   for (const it of U.items) {
-    if (!it.n || !it.folder) continue;
-    for (const d of diff(c, it.n, it.folder)) if (!best[d.key] || d.conf > best[d.key].conf) best[d.key] = d;
+    if (!it.n || !it.slot || it.done) continue;
+    const folder = it.slot === '5.2' ? 'prev' : it.slot === '5.4' ? 'pay' : 'policy';
+    const v = rowVeh(it);
+    if (v && !v.isNew) for (const d of diff(v, it.n, folder)) if (VFIELDS.includes(d.key) && d.key !== 'plate') {
+      const k = 'V|' + v.id + '|' + d.key;
+      if (!best[k] || d.conf > best[k].conf) best[k] = { ...d, k, label: `${v.plate} · ${ymText(v.ym)}` };
+    }
+    const c = rowCust(it);
+    if (c && !c.isNew) for (const d of diff(c, it.n, folder)) if (FIELD_GROUPS.customer.includes(d.key) && d.key !== 'name') {
+      const k = 'C|' + c.id + '|' + d.key;
+      if (!best[k] || d.conf > best[k].conf) best[k] = { ...d, k, label: c.name };
+    }
   }
-  return Object.values(best).map(d => ({ ...d, on: U.toggles[d.key] ?? d.on }));
+  return Object.values(best).map(d => ({ ...d, on: U.toggles[d.k] ?? d.on }));
 }
 function aiLine(it) {
   if (it.ai === 'skip') return '';
   if (it.ai === 'wait' || it.ai === 'busy') return `<p class="ai-line busy"><span class="spin sm"></span>${t('ai.reading')} <span class="elapsed" data-since="${it.since || ''}"></span><span class="slow-hint">${t('ai.slowHint')}</span></p>`;
-  // the file stays in the list: try the AI again, or just pick the folder by hand
-  if (it.ai === 'err') return `<p class="ai-line err">${icon('alert', 14)}${esc(it.err)} · ${t('ai.manual')} <button type="button" class="link" data-act="up-ai-retry">${t('ai.retry')}</button></p>`;
-  const dt = it.n?.docType || 'other';
-  return `<p class="hint">${icon('sparkle', 13)} ${t('ai.found', { x: t('dt.' + dt) })}${it.aiFolder ? ` · ${t('ai.suggests', { x: iso(FOLDER[it.aiFolder].th) })}` : ''}</p>`;
+  if (it.ai === 'err') return `<p class="ai-line err">${icon('alert', 14)}${esc(it.err)} · ${t('su.manual')} <button type="button" class="link" data-act="up-ai-retry">${t('ai.retry')}</button></p>`;
+  const why = it.how ? ` · ${t('su.by.' + it.how)}` : '';
+  return `<p class="hint">${icon('sparkle', 13)} ${t('ai.found', { x: t('dt.' + (it.n?.docType || 'other')) })}${why}</p>`;
 }
+const confChip = c => `<em class="conf ${{ high: 'c-hi', mid: 'c-mid', low: 'c-lo', hint: 'c-mid', none: 'c-lo' }[c] || 'c-lo'}">${t('su.conf.' + c)}</em>`;
 const fmtVal = (k, v) => !v ? '' : DATE_FIELDS.has(k) ? fmtDay(v) : v;
 function diffRows(list, attr) {
-  return list.map(x => `<label class="drow ${x.conf < 0.6 ? 'lo' : x.conf < 0.85 ? 'mid' : ''}"><input type="checkbox" ${attr}="${x.key}" ${x.on ? 'checked' : ''}>
-    <span class="d-k">${t('cf.' + x.key)}${x.note ? ` <em class="conf c-lo">${t(x.note)}</em>` : x.conf < 0.85 ? ` <em class="conf c-${x.conf < 0.6 ? 'lo' : 'mid'}">${t(x.conf < 0.6 ? 'conf.lo' : 'conf.mid')}</em>` : ''}</span>
+  return list.map(x => `<label class="drow ${x.conf < 0.6 ? 'lo' : x.conf < 0.85 ? 'mid' : ''}"><input type="checkbox" ${attr}="${esc(x.k || x.key)}" ${x.on ? 'checked' : ''}>
+    <span class="d-k">${x.label ? `<bdi>${esc(x.label)}</bdi> · ` : ''}${t('cf.' + x.key)}${x.note ? ` <em class="conf c-lo">${t(x.note)}</em>` : x.conf < 0.85 ? ` <em class="conf c-${x.conf < 0.6 ? 'lo' : 'mid'}">${t(x.conf < 0.6 ? 'conf.lo' : 'conf.mid')}</em>` : ''}</span>
     <span class="d-v"><s>${esc(fmtVal(x.key, x.old)) || '—'}</s>${icon('chev', 14)}<b>${esc(fmtVal(x.key, x.new))}</b></span></label>`).join('');
+}
+const opt = (v, l, cur, extra = '') => `<option value="${esc(v)}" ${String(cur) === String(v) ? 'selected' : ''} ${extra}>${esc(l)}</option>`;
+/** New customers / vehicles this upload would make: shown on top, each with its own "make it" box */
+function drawPending() {
+  const el = $('#upNew'); if (!el) return;
+  const used = new Set(U.items.filter(x => !x.done).flatMap(x => [x.cid, x.vkey]));
+  const cs = Object.values(U.newCust).filter(n => used.has('C:' + n.key));
+  const vs = Object.values(U.newVeh).filter(n => used.has('N:' + n.key));
+  el.innerHTML = cs.length || vs.length ? `<section class="su-new">
+    ${cs.map(n => `<div class="su-card ${n.ok ? 'ok' : ''}" data-nc="${esc(n.key)}">
+      <label class="su-ok"><input type="checkbox" data-nc-ok ${n.ok ? 'checked' : ''}><b>${icon('userplus', 15)} ${t('su.newCust')}</b></label>
+      <div class="su-f"><label>${t('cf.name')} *<input data-nc-f="name" value="${esc(n.data.name)}" maxlength="120"></label>
+        <label>${t('cf.phone')}<input data-nc-f="phone" value="${esc(n.data.phone)}" inputmode="tel" dir="ltr"></label>
+        <label>${t('cf.idNo')}<input data-nc-f="idNo" value="${esc(n.data.idNo)}" dir="ltr"></label></div></div>`).join('')}
+    ${vs.map(n => { const c = n.cid.startsWith('C:') ? U.newCust[n.cid.slice(2)]?.data.name : cust(n.cid)?.name; return `<div class="su-card ${n.ok ? 'ok' : ''}" data-nv="${esc(n.key)}">
+      <label class="su-ok"><input type="checkbox" data-nv-ok ${n.ok ? 'checked' : ''}><b>${icon('car', 15)} ${t(vehOf(n.cid).some(v => plateKey(v.plate) === plateKey(n.data.plate)) ? 'su.renew' : 'su.newVeh')}</b><small>${esc(c || '')}</small></label>
+      <div class="su-f"><label>${t('cf.plate')} *<input data-nv-f="plate" value="${esc(n.data.plate || '')}" maxlength="40"></label>
+        <label>${t('vh.monthFolder')}<input type="month" data-nv-f="ym" value="${esc(n.ym)}"></label>
+        <label>${t('cf.brand')} / ${t('cf.model')}<input data-nv-f="model" value="${esc([n.data.brand, n.data.model].filter(Boolean).join(' '))}"></label>
+        <label>${t('cf.vin')}<input data-nv-f="vin" value="${esc(n.data.vin || '')}" dir="ltr"></label></div></div>`; }).join('')}</section>` : '';
 }
 function drawUpload() {
   const el = $('#upList'); if (!el || !U) return;
-  el.innerHTML = U.items.map((it, i) => `
-    <div class="up-row ${it.done ? 'done' : ''}" data-i="${i}" style="--i:${Math.min(i, 8)}">
-      <span class="up-th">${it.url ? `<img src="${it.url}" alt="">` : ftBadge({ mime: it.file.type, name: it.name, type: it.type }, 22)}</span>
+  drawPending();
+  el.innerHTML = U.items.map((it, i) => {
+    const c = rowCust(it), v = rowVeh(it), list = vehChoices(it.cid);
+    const missing = !it.cid || !it.vkey || !it.slot;
+    return `
+    <div class="up-row su-row ${it.done ? 'done' : ''} ${missing && !it.done ? 'need' : ''}" data-i="${i}" style="--i:${Math.min(i, 8)}">
+      <span class="up-th">${it.url ? `<img src="${it.url}" alt="">` : ftBadge({ mime: it.file.type, name: it.file.name }, 22)}</span>
       <div class="up-main">
-        <div class="up-top"><input data-u="name" maxlength="200" value="${esc(it.name)}" aria-label="${t('u.fileName')}"><small>${fmtSize(it.file.size)}</small>
+        <div class="up-top"><small class="su-file" title="${esc(it.file.name)}">${esc(it.file.name)} · ${fmtSize(it.file.size)}</small>${it.ai === 'done' || it.ai === 'err' || it.ai === 'skip' ? confChip(missing ? 'none' : it.conf) : ''}
           <button class="icon-btn sm" data-act="up-remove" aria-label="${t('u.remove')}">${icon('x', 15)}</button></div>
-        ${it.done || it.nameEdited ? '' : `<p class="hint">${icon('edit', 13)} ${t('nm.auto')}</p>`}
         ${aiLine(it)}
-        ${it.plates.length > 1 && !it.done ? `<div class="up-extra"><label>${t('nm.vehicle')}<select data-u="plate">${it.plates.map(p => `<option ${p === it.plate ? 'selected' : ''}>${esc(p)}</option>`).join('')}<option value="" ${it.plate ? '' : 'selected'}>${t('nm.noPlate')}</option></select></label></div>` : ''}
-        <p class="fpick-label">${t('fo.choose')}${it.folder ? '' : ` <em class="req">${t('fo.required')}</em>`}</p>
-        ${folderPicker(it.folder, it.aiFolder, 'up', i)}
-        ${it.folder === 'docs' || it.folder === 'policy' ? `<div class="up-extra">
-          ${it.folder === 'docs' ? `<label>${t('fl.type')}<select data-u="type">${['car', 'id', 'other'].map(k => `<option value="${k}" ${it.type === k ? 'selected' : ''}>${typeLabel(k)}</option>`).join('')}</select></label>` : ''}
-          ${it.folder === 'policy' ? `<label>${t('fl.expiry')}<input type="date" data-u="expiry" value="${esc(it.expiry)}"></label>` : ''}</div>` : ''}
-        ${it.done ? `<p class="ai-line ok">${icon('check', 14)}${t('u.saved')}</p>` : ''}
+        <div class="su-grid">
+          ${U.fixedCid ? '' : `<label>${t('u.customer')}<select data-u="cid">${opt('', t('su.choose'), it.cid)}${S.customers.map(x => opt(x.id, x.name + (x.nick ? ` (${x.nick})` : ''), it.cid)).join('')}
+            ${Object.values(U.newCust).map(n => opt('C:' + n.key, `${t('su.newCust')}: ${n.data.name}`, it.cid)).join('')}${opt('__new', '+ ' + t('su.newCust') + '…', '')}</select></label>`}
+          <label>${t('vh.vehicle')}<select data-u="vkey" ${it.cid ? '' : 'disabled'}>${opt('', t('su.choose'), it.vkey)}${list.map(x => opt(x.id, (x.isNew ? t('su.newVeh') + ': ' : '') + vehLabel(x), it.vkey)).join('')}${it.cid ? opt('__new', '+ ' + t('vh.add') + '…', '') : ''}</select></label>
+          <label>${t('vh.month')}<input value="${v ? esc(ymText(v.ym)) : '—'}" readonly tabindex="-1"></label>
+          <label>${t('fo.choose')}<select data-u="slot">${opt('', t('su.choose'), it.slot)}${FILE_SLOTS.map(s => opt(s, VSLOT[s].th, it.slot)).join('')}</select></label>
+        </div>
+        <label class="su-name">${t('u.fileName')}<input data-u="name" maxlength="200" value="${esc(it.name)}" aria-label="${t('u.fileName')}"></label>
+        ${it.done ? `<p class="ai-line ok">${icon('check', 14)}${t('u.saved')}</p>` : missing ? `<p class="ai-line err">${icon('alert', 14)}${t('su.pick')}</p>` : ''}
         <div class="prog"><i style="width:${it.done ? 100 : it.p * 100}%"></i></div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   const d = uploadDiff(), de = $('#upDiff');
-  de.innerHTML = d.length ? `<section class="diff"><h3>${icon('wand', 16)}${t('diff.title')}</h3><p class="muted">${t('diff.sub')}</p>${diffRows(d, 'data-diff')}</section>` : '';
+  de.innerHTML = d.length ? `<section class="diff"><h3>${icon('wand', 16)}${t('diff.title')}</h3><p class="muted">${t('su.diffSub')}</p>${diffRows(d, 'data-diff')}</section>` : '';
   const go = $('#upGo');
   if (go) { const n = U.items.filter(x => !x.done).length; go.textContent = d.some(x => x.on) ? t('u.saveApply', { n }) : t('u.save', { n }); go.disabled = U.busy; }
+}
+/** A choice in a row changed (customer, vehicle, folder) */
+function rowPick(it, k, val) {
+  if (k === 'cid') {
+    if (val === '__new') { it.cid = newCustFor({ name: '' }); }
+    else it.cid = val;
+    it.picked.cid = true; it.touched = true; it.cconf = 'high';
+    it.vkey = ''; it.picked.veh = false; it.vconf = 'none';
+    const list = vehChoices(it.cid);
+    if (it.n) { const f = findVehicle(it.n.values, it.slot, list); if (f.vid) { it.vkey = f.vid; it.vconf = f.conf; } else if (f.add) { it.vkey = newVehFor(it.cid, it.n.values, f.ym || ymForVehicle(it.n.values, todayIso())); it.vconf = 'new'; } }
+    if (!it.vkey && list.length === 1) { it.vkey = list[0].id; it.vconf = 'high'; }
+  } else if (k === 'vkey') {
+    if (val === '__new') it.vkey = newVehFor(it.cid, it.n?.values?.plate ? it.n.values : {}, ymForVehicle(it.n?.values || {}, todayIso()));
+    else it.vkey = val;
+    it.picked.veh = true; it.touched = true; it.vconf = 'high';
+  } else if (k === 'slot') { it.slot = val; it.picked.slot = true; it.sconf = 'high'; }
+  it.conf = rowConf(it);
+  for (const x of U.items) autoName(x);
+  drawUpload();
 }
 
 async function doUpload(btn) {
   if (!U || U.busy) return;
-  const missing = U.items.find(it => !it.done && !it.folder);
-  if (missing) { toast(t('fo.pickAll'), 'err'); $(`.up-row[data-i="${U.items.indexOf(missing)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
-  const u = U, c = cust(u.cid);
+  const todo = U.items.filter(it => !it.done);
+  const missing = todo.find(it => !it.cid || !it.vkey || !it.slot);
+  if (missing) { toast(t('su.pickAll'), 'err'); $(`.up-row[data-i="${U.items.indexOf(missing)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+  const nc = [...new Set(todo.map(it => it.cid).filter(x => x.startsWith('C:')))].map(k => U.newCust[k.slice(2)]);
+  const nv = [...new Set(todo.map(it => it.vkey).filter(x => x.startsWith('N:')))].map(k => U.newVeh[k.slice(2)]);
+  const notOk = [...nc, ...nv].find(n => !n.ok);
+  if (notOk) { toast(t('su.confirmNew'), 'err'); $('#upNew')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  if (nc.some(n => !n.data.name.trim())) return toast(t('su.needName'), 'err');
+  if (nv.some(n => !plateOnly(n.data.plate))) return toast(t('vh.needPlate'), 'err');
+  const u = U;
   for (const it of u.items) if (it.ai === 'wait') it.ai = 'skip';   // save now; files not read yet are saved without AI
   u.busy = true; drawUpload();
-  let done = 0, failed = null;
+  u.made ||= {};   // key -> real id, so "Save" again after an error never makes anything twice
+  let done = 0, failed = null, firstCid = '', firstVid = '';
   try {
+    for (const n of nc) if (!u.made['C:' + n.key]) {
+      btn.textContent = t('su.making');
+      const c = await S.store.saveCustomer({ ...tidy({ ...n.data }) });
+      u.made['C:' + n.key] = c.id;
+      S.customers.push({ ...c });
+    }
+    const realCid = id => u.made[id] || id;
+    const vehOfRow = async it => {
+      if (u.made[it.vkey]) return u.made[it.vkey];
+      const cid = realCid(it.cid);
+      let v;
+      if (it.vkey.startsWith('N:')) {
+        const n = u.newVeh[it.vkey.slice(2)];
+        v = await S.store.saveVehicle({ customerId: cid, ym: n.ym, ...n.data, plate: plateOnly(n.data.plate) });
+      } else if (it.vkey.startsWith('L:')) v = await realVehicle(vehById(it.vkey), cid);
+      else v = vehById(it.vkey);
+      u.made[it.vkey] = v.id;
+      if (!S.vehicles.some(x => x.id === v.id)) S.vehicles.push(v);
+      return v.id;
+    };
     for (const [i, it] of u.items.entries()) {
       if (it.done) continue;
+      btn.textContent = t('su.making');
+      const vid = await vehOfRow(it), cid = realCid(it.cid);
       let blob = it.file;
       if (compressible(blob)) { btn.textContent = t('u.compressing'); blob = await compressImage(blob); }
-      if (blob.size > MAX) { toast(t('u.tooBig', { x: it.name, n: MAX_UPLOAD_MB }), 'err'); continue; }
+      if (blob.size > MAX) { toast(t('u.tooBig', { x: it.file.name, n: MAX_UPLOAD_MB }), 'err'); continue; }
       btn.textContent = t('u.saving');
-      const name = saveName(it.name, it.file, blob);
-      const meta = { name, orig: it.file.name, customerId: u.cid, folder: it.folder, type: it.type || typeFor(it.folder), expiry: it.folder === 'policy' ? it.expiry || '' : '', note: it.n ? fileNote(it.n, it.folder) : '' };
+      const vals = it.n?.values || {};
+      const meta = { name: saveName(it.name, it.file, blob), orig: it.file.name, customerId: cid, vehicleId: vid, slot: it.slot, type: VSLOT[it.slot].type,
+        expiry: ['1', '2', '3'].includes(it.slot) ? vals.policyExpiry || '' : '', note: it.n ? fileNote(it.n, it.slot === '5.4' ? 'pay' : it.slot === '5.2' ? 'prev' : 'policy') : '' };
       const thumb = await makeThumb(blob);
       if (S.store.kind === 'local') meta.thumb = thumb;
       const bar = $(`.up-row[data-i="${i}"] .prog i`);
       const f = await S.store.addFile(blob, meta, p => { if (bar) bar.style.width = p * 100 + '%'; });
       if (thumb && S.store.thumbCache) S.store.thumbCache.set(f.id, thumb);
       it.done = true; done++;
+      firstCid ||= cid; firstVid ||= vid;
       if (U === u) drawUpload();
     }
-    const ch = uploadDiff().filter(x => x.on);
-    if (ch.length) {
-      const upd = { id: c.id, name: c.name };
-      for (const x of ch) upd[x.key] = x.new;
-      const chk = checkCustomer({ ...c, ...upd });
-      if (Object.keys(chk.errors).length) toast(t('diff.invalid'), 'err');
-      else await S.store.saveCustomer(upd);   // merged into the saved details by the backend
+    // the ticked "old -> new" changes: merged into the vehicle / customer by the backend
+    const ch = uploadDiff().filter(x => x.on), upd = {};
+    for (const x of ch) { const [kind, id, key] = x.k.split('|'); (upd[kind + '|' + id] ||= { kind, id, v: {} }).v[key] = x.new; }
+    for (const g of Object.values(upd)) {
+      if (g.kind === 'V') { const id = u.made[g.id] || g.id; if (!id.startsWith('L:')) await S.store.saveVehicle({ id, ...g.v }); }
+      else { const c = cust(g.id); const chk = checkCustomer({ ...c, ...g.v }); if (!Object.keys(chk.errors).length) await S.store.saveCustomer({ id: c.id, name: c.name, ...g.v }); else toast(t('diff.invalid'), 'err'); }
     }
   } catch (e) { failed = e; }
   finally {
     u.busy = false;
-    if (done || !failed) { S.sel = u.cid; await reload().catch(() => { }); }
+    if (done || !failed) await reload().catch(() => { });
     if (U === u) drawUpload();
   }
   if (failed) throw failed;
   closeSheet();
   toast(t('u.done', { n: done }));
-  if (S.view === 'dash' && narrow()) { S.mobileDetail = true; drawPanel(true); loadThumbs(); }
-}
-
-/* ---------- "Add customer with AI" ---------- */
-let R = null;   // review state
-async function aiNew(src) {
-  if (!aiOn()) return toast(S.mode === 'local' ? t('ai.localOnly') : t('ai.off'), 'err');
-  const files = await pickFiles({ capture: src === 'cam', accept: src === 'cam' ? 'image/*' : DOC_ACCEPT, multiple: src !== 'cam' });
-  if (files.length) aiNewFiles(files);
-}
-function aiNewFiles(files, prepared = null) {
-  if (!aiOn()) return toast(S.mode === 'local' ? t('ai.localOnly') : t('ai.off'), 'err');
-  const ok = sizeFilter(files).filter(readable);
-  if (!ok.length) { if (files.length) toast(t('ai.noReadable'), 'err'); return; }
-  R = { files: ok, prepared, previews: ok.map(f => isImage({ mime: f.type }) ? objUrl(f) : ''), n: null, v: {}, folder: '', aiFolder: null, errors: {}, warnings: {} };
-  readingSheet();
-  const r0 = R;
-  run(async () => {
-    try {
-      R.prepared ||= await prepare(ok);   // kept for "Try again" (same bytes -> cached result if it arrived late)
-      const r = await S.store.aiExtract(R.prepared);
-      if (R !== r0) return;
-      R.n = normalize(r); R.v = { ...R.n.values }; R.aiFolder = suggestFolder(R.n, null); R.folder = R.aiFolder || ''; R.model = r.model || '';
-      reviewSheet();
-    } catch (e) {
-      if (R !== r0) return;
-      sheet({ title: t('ai.failTitle'), cls: 'small', body: `<p class="sh-text">${esc(aiErr(e))}</p>`,
-        foot: `<span class="sp"></span><button class="btn ghost" data-act="ai-retry">${t('ai.retry')}</button><button class="btn primary" data-act="ai-manual">${t('ai.manualBtn')}</button>` });
-      sheetClose = () => { R = null; };
-    }
-  });
-}
-const pvFile = (f, i, act) => `<button class="pv-file" data-act="${act}" data-i="${i}">${ftBadge({ mime: f.type, name: f.name }, 24, 'sm')}<small>${esc(f.name)}</small></button>`;
-function readingSheet() {
-  sheet({ title: t('ai.readingTitle'), cls: 'wide', body: `<div class="reading">
-    <div class="pv-strip">${R.files.map((f, i) => R.previews[i] ? `<img src="${R.previews[i]}" alt="">` : pvFile(f, i, 'pv-open')).join('')}</div>
-    <div class="scan"><span class="spin"></span><b>${t('ai.reading')} <span class="elapsed" data-since="${Date.now()}"></span></b><small>${t('ai.readingSub')}</small><small class="slow-hint">${t('ai.slowHint')}</small></div></div>` });
-  sheetClose = () => { R = null; };
-}
-function reviewSheet() {
-  reviewNames(R.v);
-  const lowCount = Object.values(R.n?.conf || {}).filter(c => c < 0.85).length;
-  sheet({ title: t('rv.title'), sub: R.n ? t('rv.sub', { x: t('dt.' + R.n.docType) }) : t('rv.subManual'), cls: 'xwide',
-    body: `<div class="rv">
-      <aside class="rv-pv">${R.files.map((f, i) => R.previews[i] ? `<button data-act="pv-zoom" data-i="${i}"><img src="${R.previews[i]}" alt=""></button>` : pvFile(f, i, 'pv-open')).join('')}</aside>
-      <form class="form" data-form="review" id="rvform" novalidate>
-        ${R.n ? `<p class="note ${lowCount ? 'warn' : ''}">${icon(lowCount ? 'alert' : 'check', 15)}<span>${lowCount ? t('rv.check', { n: lowCount }) : t('rv.allGood')} ${t('rv.never')}${R.model ? ` <small class="muted" dir="ltr">(${esc(R.model)})</small>` : ''}</span></p>` : ''}
-        ${fieldGroups(R.v, { errors: R.errors, warnings: R.warnings, conf: R.n?.conf, notes: R.n?.notes })}
-        <fieldset class="fgroup"><legend>${t('rv.saveTo')}</legend>${folderPicker(R.folder, R.aiFolder, 'rv')}</fieldset>
-        <fieldset class="fgroup"><legend>${t('nm.files')}</legend>${R.files.map((f, i) => `<label class="fld"><span class="fl">${esc(f.name)}</span><input data-rn="${i}" value="${esc(R.names[i] || '')}" maxlength="200" autocomplete="off"></label>`).join('')}<p class="hint">${icon('edit', 13)} ${t('nm.auto')}</p></fieldset>${datalists()}
-      </form></div>`,
-    foot: `<span class="sp"></span><button type="button" class="btn ghost" data-act="close-sheet">${t('btn.cancel')}</button><button class="btn primary" type="submit" form="rvform">${icon('check', 18)}<span>${t('rv.confirm')}</span></button>` });
-  sheetClose = () => { R = null; };
-}
-async function confirmReview(form) {
-  R.v = tidy({ ...R.v, ...readForm(form, ALL_FIELDS) });
-  const { errors, warnings } = checkCustomer(R.v);
-  R.errors = errors; R.warnings = warnings;
-  if (Object.keys(errors).length) { reviewSheet(); return toast(t('v.fix'), 'err'); }
-  if (!R.folder) { reviewSheet(); return toast(t('fo.pickAll'), 'err'); }
-  const d = findDuplicates(R.v, S.customers);
-  if (d.length) return dupSheet(d);
-  await createFromReview();
-}
-function dupSheet(d) {
-  sheet({ title: t('dup.title'), cls: 'small', body: `<p class="sh-text">${t('dup.sub')}</p>${d.map(x => `
-    <div class="dup"><span class="ava" style="--h:${hue(x.customer.id)}">${esc(initial(x.customer.name))}</span><span><b>${esc(x.customer.name)}</b><small>${t('dup.same')}: ${x.why.map(w => t('cf.' + w)).join(', ')}</small></span>
-    <button class="btn primary sm" data-act="dup-update" data-id="${esc(x.customer.id)}">${t('dup.update')}</button></div>`).join('')}`,
-    foot: `<button class="btn ghost" data-act="dup-back">${t('btn.back')}</button><span class="sp"></span><button class="btn ghost" data-act="dup-create">${t('dup.createAnyway')}</button>` });
-  sheetClose = () => { R = null; };
-}
-async function createFromReview() {
-  const v = R.v, r = R;
-  reviewNames(v);
-  if (!v.car && (v.brand || v.model)) v.car = [v.brand, v.model, v.color].filter(Boolean).join(' ');
-  for (const b of $$('.sh-actions .btn')) b.disabled = true;
-  const c = await S.store.saveCustomer({ ...v });
-  await uploadSources(r, c.id);
-  sheetClose = null; R = null; closeSheet();
-  await reload();
-  toast(t('t.customerAdded'));
-  openCustomer(c.id);
-}
-async function uploadSources(r, cid) {
-  for (const [i, f] of r.files.entries()) {
-    const blob = compressible(f) ? await compressImage(f) : f;
-    if (blob.size > MAX) { toast(t('u.tooBig', { x: f.name, n: MAX_UPLOAD_MB }), 'err'); continue; }
-    const name = saveName(r.names?.[i] || f.name, f, blob);
-    const meta = { name, orig: f.name, customerId: cid, folder: r.folder, type: typeFor(r.folder, r.n?.docType), expiry: r.folder === 'policy' ? r.v.policyExpiry || '' : '', note: r.n ? fileNote({ ...r.n, values: r.v }, r.folder) : '' };
-    const thumb = await makeThumb(blob);
-    if (S.store.kind === 'local') meta.thumb = thumb;
-    const x = await S.store.addFile(blob, meta);
-    if (thumb && S.store.thumbCache) S.store.thumbCache.set(x.id, thumb);
-  }
-}
-/** Duplicate found: show "old -> new" for that customer, then update it and add the files there */
-function dupUpdate(id) {
-  const c = cust(id), r = R;
-  const n = { docType: 'policy', values: r.v, conf: r.n?.conf || {}, notes: r.n?.notes || {} };
-  const list = diff(c, n, r.folder === 'prev' ? 'prev' : 'policy');
-  sheet({ title: t('dup.updTitle', { x: esc(c.name) }), sub: t('diff.sub'), cls: 'wide',
-    body: list.length ? `<section class="diff">${diffRows(list, 'data-dupdiff')}</section>` : `<p class="sh-text">${t('diff.none')}</p>`,
-    foot: `<button class="btn ghost" data-act="dup-back">${t('btn.back')}</button><span class="sp"></span><button class="btn primary" data-act="dup-apply" data-id="${esc(id)}">${t('dup.apply')}</button>` });
-  r.dupDiff = list;
-  sheetClose = () => { R = null; };
-}
-async function dupApply(id, btn) {
-  const c = cust(id), r = R;
-  btn.disabled = true;
-  const upd = { id: c.id, name: c.name };
-  for (const el of $$('[data-dupdiff]')) if (el.checked) upd[el.dataset.dupdiff] = r.v[el.dataset.dupdiff];
-  const chk = checkCustomer({ ...c, ...upd });
-  if (Object.keys(chk.errors).length) { btn.disabled = false; return toast(t('diff.invalid'), 'err'); }
-  if (Object.keys(upd).length > 2) await S.store.saveCustomer(upd);
-  // file names for the existing customer (nickname), with the plate and dates of this document
-  reviewNames({ ...c, ...upd, plate: r.v.plate || c.plate, province: r.v.plate ? r.v.province : c.province, contractDate: r.v.contractDate || c.contractDate, policyStart: r.v.policyStart || c.policyStart });
-  await uploadSources(r, c.id);
-  sheetClose = null; R = null; closeSheet();
-  await reload(); toast(t('t.customerUpdated'));
-  openCustomer(c.id);
+  if (firstCid) openCustomer(firstCid, firstVid);
 }
 
 /* ---------- file preview, edit & move ---------- */
@@ -1124,10 +1260,14 @@ async function openFile(id) {
   cur = { f, blob: null, url: '' };
   const by = f.by ? ` · ${t('up.by', { x: esc(f.by) })}` : '';
   const inv = f.invoice ? S.invoices.find(i => i.id === f.id) : null;
+  const vs = vehOf(f.customerId);
+  const where = f.vslot ? `${esc(vehLabel(vehById(f.vehicleId)))} · ${slotName(f.vslot)}` : FOLDER[f.folder] ? iso(FOLDER[f.folder].th) : 'ไม่ระบุ · ' + t('fo.other');
   sheet({ title: esc(f.name), sub: `${esc(c.name)} · ${fmtSize(f.size)} · ${fmtDay(f.createdAt)}${by}`, cls: 'wide',
     body: `<div class="preview" id="preview"><div class="spin"></div></div>
-    <p class="in-folder">${t('fo.in')}: <b>${FOLDER[f.folder] ? iso(FOLDER[f.folder].th) : 'ไม่ระบุ · ' + t('fo.other')}</b><span id="shState" ${f.shared ? '' : 'style="display:none"'}> · ${icon('link', 13)} ${t('sh.on')}</span></p>
-    ${canEdit() && !inv ? `<details class="move" ${FOLDER[f.folder] ? '' : 'open'}><summary>${icon('move', 16)}${t('fo.move')}</summary>${folderPicker(f.folder, null, 'move')}<p class="muted">${t('fo.moveNote')}</p></details>` : ''}
+    <p class="in-folder">${t('fo.in')}: <b>${where}</b><span id="shState" ${f.shared ? '' : 'style="display:none"'}> · ${icon('link', 13)} ${t('sh.on')}</span></p>
+    ${canEdit() && !inv && vs.length ? `<details class="move" ${f.vslot ? '' : 'open'}><summary>${icon('move', 16)}${t('fo.move')}</summary>
+      <label class="fld mv-veh"><span class="fl">${t('vh.vehicle')}</span><select id="mvVeh">${vs.map(v => opt(v.id, vehLabel(v), f.vehicleId || vs[0].id)).join('')}</select></label>
+      ${slotPicker(f.vslot)}<p class="muted">${t('fo.moveNote')}</p></details>` : ''}
     ${inv ? `<button class="btn ghost block" data-act="open-invoice" data-id="${esc(inv.id)}">${icon('invoice', 18)}<span>${t('inv.open')}</span></button>` : `
     <form class="form" data-form="file" id="fform" data-id="${esc(f.id)}">
       <label>${t('u.fileName')}<input name="name" value="${esc(f.name)}" maxlength="200" required ${dis}></label>
@@ -1154,11 +1294,21 @@ async function openFile(id) {
     : isPdf(f) ? `<iframe src="${cur.url}#toolbar=0" title="${esc(f.name)}"></iframe><button class="btn dark open-full" data-act="open-link" data-url="${cur.url}">${icon('external', 16)}<span>${t('fl.full')}</span></button>`
       : `<div class="nopv">${ftBadge(f, 30)}<p>${t('fl.noPreview')}</p></div>`;
 }
+/** v4: the 9 folders a file can go into */
+function slotPicker(cur) {
+  return `<div class="fpick">${FILE_SLOTS.map(s => `<button type="button" role="radio" aria-checked="${cur === s}" class="${cur === s ? 'on' : ''}" data-act="mv-slot" data-slot="${s}">
+    <span class="fp-ico">${icon(VSLOT[s].icon, 18)}</span><b>${iso(VSLOT[s].th)}</b><small>${t('vs.' + s)}</small></button>`).join('')}</div>`;
+}
+/** Moves the open file (the user confirms) into a folder of one of its customer's vehicles */
 async function moveCur(slot) {
-  const f = cur?.f; if (!f || f.folder === slot) return;
-  if (!await confirmBox(t('fo.moveQ', { x: esc(f.name), y: iso(FOLDER[slot].th) }), t('fo.move'), false)) return;
-  await S.store.moveFile(f.id, slot);
-  await reload(); toast(t('fo.moved', { x: iso(FOLDER[slot].th) }));
+  const f = cur?.f; if (!f) return;
+  let v = vehById($('#mvVeh')?.value || f.vehicleId);
+  if (!v) return toast(t('su.pick'), 'err');
+  if (f.vehicleId === v.id && f.vslot === slot) return;
+  if (!await confirmBox(t('fo.moveQ', { x: esc(f.name), y: `${esc(vehLabel(v))} · ${slotName(slot)}` }), t('fo.move'), false)) return;
+  v = await realVehicle(v, f.customerId);
+  await S.store.moveFile(f.id, { vehicleId: v.id, slot });
+  await reload(); toast(t('fo.moved', { x: slotName(slot) }));
 }
 function download(blob, name) {
   const a = document.createElement('a'); a.href = objUrl(blob); a.download = name; document.body.append(a); a.click(); a.remove();
@@ -1216,17 +1366,29 @@ async function shareBlob(blob, name) {
 /* ---------- invoices ---------- */
 let I = null;   // invoice editor state
 const invItemDefault = l => l === 'th' ? 'เบี้ยประกันภัยรถยนต์' : l === 'en' ? 'Car insurance premium' : 'เบี้ยประกันภัยรถยนต์ / Car insurance premium';
-function newInvoice(cid) {
+/** Vehicle and policy lines of an invoice, from a vehicle (v4) or the old customer details */
+const invVeh = (v, c) => ({ brand: v?.brand || c.brand || '', model: v?.model || c.model || (!c.brand ? c.car || '' : ''), plate: v?.plate || plateOnly(c.plate, c.province) || '', province: v?.province || c.province || '' });
+const invPol = (v, c) => v ? { type: v.policyType || '', insurer: v.insurer || '', no: v.policyNo || '', start: v.policyStart || '', end: v.policyExpiry || '' }
+  : { type: c.policyType || '', insurer: c.insurer || '', no: c.policyNo || '', start: c.policyStart || '', end: c.policyExpiry || S.exp[c.id]?.exp || '' };
+function newInvoice(cid, vid = '') {
   const c = cust(cid); if (!c) return pickCustomerSheet('invoice');
-  const m = S.exp[c.id] || {};
+  const vs = vehOf(c);
+  const v = vehById(vid) || (S.sel === cid ? vehById(S.openVeh) : null) || latestOf(vs)[0] || null;
   let l = 'both'; try { l = localStorage.getItem('by_invlang') || 'both'; } catch { }
   I = { id: '', tab: 'edit', d: {
-    customerId: c.id, issue: todayIso(), due: addDays(todayIso(), 7), lang: l,
+    customerId: c.id, vehicleId: v?.id || '', issue: todayIso(), due: addDays(todayIso(), 7), lang: l,
     cust: { name: c.name, phone: c.phone || '', address: c.address || '' },
-    veh: { brand: c.brand || '', model: c.model || (!c.brand ? c.car || '' : ''), plate: c.plate || '', province: c.province || '' },
-    pol: { type: c.policyType || '', insurer: c.insurer || '', no: c.policyNo || '', start: c.policyStart || '', end: c.policyExpiry || m.exp || '' },
-    items: [{ d: invItemDefault(l), q: 1, p: c.premium || '' }], discount: '', vat: false, paid: '', notes: '',
+    veh: invVeh(v, c), pol: invPol(v, c),
+    items: [{ d: invItemDefault(l), q: 1, p: v?.premium || c.premium || '' }], discount: '', vat: false, paid: '', notes: '',
   } };
+  invoiceEditor();
+}
+/** v4: the vehicle of a new invoice (its PDF is saved in folder 4 of that vehicle) */
+function invPickVehicle(vid) {
+  const c = cust(I.d.customerId), v = vehById(vid);
+  I.d.vehicleId = v?.id || '';
+  I.d.veh = invVeh(v, c); I.d.pol = invPol(v, c);
+  if (v?.premium && I.d.items.length === 1 && !String(I.d.items[0].p).trim()) I.d.items[0].p = v.premium;
   invoiceEditor();
 }
 function editInvoice(id) {
@@ -1250,7 +1412,9 @@ function invoiceEditor() {
         <div class="fgrid">${f(t('inv.issue'), 'issue', d.issue, 'type="date"')}${f(t('inv.due'), 'due', d.due, 'type="date"')}</div></fieldset>
       <fieldset class="fgroup"><legend>${t('g.customer')}</legend><div class="fgrid">${f(t('cf.name') + ' *', 'cust.name', d.cust.name, 'required')}${f(t('cf.phone'), 'cust.phone', d.cust.phone, 'inputmode="tel" dir="ltr"')}</div>
         <label class="fld"><span class="fl">${t('cf.address')}</span><textarea data-i="cust.address" rows="2">${esc(d.cust.address)}</textarea></label></fieldset>
-      <fieldset class="fgroup"><legend>${t('g.vehicle')}</legend><div class="fgrid">${f(t('cf.brand'), 'veh.brand', d.veh.brand)}${f(t('cf.model'), 'veh.model', d.veh.model)}${f(t('cf.plate'), 'veh.plate', d.veh.plate)}${f(t('cf.province'), 'veh.province', d.veh.province, 'list="dl-prov"')}</div></fieldset>
+      <fieldset class="fgroup"><legend>${t('g.vehicle')}</legend>
+        ${!I.id && vehOf(d.customerId).length ? `<label class="fld"><span class="fl">${t('vh.invVehicle')}</span><select data-inv-veh>${opt('', '—', d.vehicleId)}${vehOf(d.customerId).map(v => opt(v.id, vehLabel(v), d.vehicleId)).join('')}</select></label>` : ''}
+        <div class="fgrid">${f(t('cf.brand'), 'veh.brand', d.veh.brand)}${f(t('cf.model'), 'veh.model', d.veh.model)}${f(t('cf.plate'), 'veh.plate', d.veh.plate)}${f(t('cf.province'), 'veh.province', d.veh.province, 'list="dl-prov"')}</div></fieldset>
       <fieldset class="fgroup"><legend>${t('g.policy')}</legend><div class="fgrid">${f(t('cf.policyType'), 'pol.type', d.pol.type, 'list="dl-ptype"')}${f(t('cf.insurer'), 'pol.insurer', d.pol.insurer)}${f(t('cf.policyNo'), 'pol.no', d.pol.no, 'dir="ltr"')}${f(t('cf.policyStart'), 'pol.start', d.pol.start, 'type="date"')}${f(t('cf.policyExpiry'), 'pol.end', d.pol.end, 'type="date"')}</div></fieldset>
       <fieldset class="fgroup"><legend>${t('inv.items')}</legend><div id="invItems">${invItemsHtml()}</div>
         <button type="button" class="btn ghost block" data-act="inv-add-line">${icon('plus', 17)}<span>${t('inv.addLine')}</span></button></fieldset>
@@ -1310,8 +1474,9 @@ async function invSave(btn) {
   if (e) { if (I.tab === 'edit' && $('#invItems')) $('#invItems').innerHTML = invItemsHtml(); $('#invTot').innerHTML = invTotalsHtml(); return toast(t(e), 'err'); }
   btn.disabled = true; btn.innerHTML = `<span class="spin sm"></span><span>${t('inv.making')}</span>`;
   try { localStorage.setItem('by_invlang', I.d.lang); } catch { }
-  const data = { ...I.d, discount: money(I.d.discount) || 0, paid: money(I.d.paid) || 0 };
   try {
+    if (!I.id && I.d.vehicleId?.startsWith('L:')) I.d.vehicleId = (await realVehicle(vehById(I.d.vehicleId), I.d.customerId)).id;   // the PDF goes into that vehicle's folder 4
+    const data = { ...I.d, discount: money(I.d.discount) || 0, paid: money(I.d.paid) || 0 };
     const inv = I.id ? await S.store.updateInvoice(I.id, data, dfmt()) : await S.store.createInvoice(data, dfmt());
     sheetClose = null; I = null;
     await reload();
@@ -1330,7 +1495,7 @@ function invoiceSheet(id) {
       <div><small>${t('inv.total')}</small><b class="amt">${baht(inv.t?.total || 0)}</b></div>
       <div class="r">${invPill(inv.status)}${inv.status !== 'paid' ? `<small>${t('inv.bal')} ${baht(inv.t?.bal || 0)}</small>` : ''}</div></section>
       <div class="inv-pv-wrap"><div class="inv-pv">${invoiceHtml(inv, S.company || {}, dfmt())}</div></div>
-      ${local ? `<p class="note">${icon('info', 15)}<span>${t('inv.localNote')}</span></p>` : `<p class="muted">${t('inv.savedIn', { x: iso(FOLDER.pay.th) })}</p>`}`,
+      ${local ? `<p class="note">${icon('info', 15)}<span>${t('inv.localNote')}</span></p>` : `<p class="muted">${t('inv.savedIn', { x: inv.vehicleId ? `${esc(vehById(inv.vehicleId)?.plate || '')} · ${slotName('4')}` : iso(FOLDER.pay.th) })}</p>`}`,
     foot: `${c ? `<button class="icon-btn" data-act="open-customer" data-id="${esc(c.id)}" title="${t('inv.openCustomer')}">${icon('users', 17)}</button>` : ''}
       <button class="icon-btn" data-act="inv-edit" data-need="edit" data-id="${esc(id)}" title="${t('inv.editBtn')}">${icon('edit', 17)}</button>
       ${inv.status !== 'paid' ? `<button class="btn ghost" data-act="inv-paid" data-need="edit" data-id="${esc(id)}">${icon('check', 17)}<span>${t('inv.markPaid')}</span></button>` : ''}
@@ -1412,15 +1577,16 @@ async function migRun(dry, btn) {
 /* ---------- rename existing files (admin, v3.2): list first, then Apply; Undo puts the old names back ---------- */
 let RN = null;
 function renamePlan() {
-  const key = f => f.customerId + '|' + (f.folder || '');
+  const key = f => f.customerId + '|' + (f.folder || '') + '|' + (f.vehicleId || '') + '|' + (f.vslot || '');
   const taken = {};
   for (const f of S.files) (taken[key(f)] ||= new Set()).add(f.name);
   const rows = [];
   // oldest first: the first file keeps the plain name, later ones get " (2)", " (3)"…
   for (const f of [...S.files].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))) {
     if (f.invoice) continue;   // invoices keep their number as name
+    if (followsPattern(f.name)) continue;   // v4: names that already follow the pattern are never changed
     const c = cust(f.customerId); if (!c) continue;
-    const want = buildName({ plate: plateFromName(f.name) || plateOnly(c.plate, c.province), customer: c,
+    const want = f.vslot ? vehicleFileName({ vehicle: vehById(f.vehicleId), customer: c, slot: f.vslot, ext: extOf(f.name) }) : buildName({ plate: plateFromName(f.name) || plateOnly(c.plate, c.province), customer: c,
       month: monthOf(c.contractDate, c.policyStart, String(f.at || f.createdAt || '').slice(0, 10)), doc: docNameFromOld(f.name, f.folder, f.type), ext: extOf(f.name) });
     const set = taken[key(f)];
     set.delete(f.name);
@@ -1490,6 +1656,123 @@ async function renameUndo() {
   }
 }
 
+/* ---------- move existing files into the new folders (admin, one-time tool, v4) ---------- */
+/*
+ * Preview first: file -> from -> to plate / month / folder, editable, with tick boxes. "Apply" per customer, in small
+ * batches. Only MOVES (never deletes or changes a file). Names that follow the pattern stay; others get a pattern name.
+ * A row without a plate is NOT moved until a plate is chosen. "Undo last move" puts the last batch back.
+ */
+let MV = null;
+const fromLabel = r => r.from ? iso(FOLDER[r.from].th) : 'ไม่ระบุ';
+function movePlanAll() {
+  return S.customers.map(c => ({ cid: c.id, rows: movePlan(c, S.files, S.vehicles, S.invoices) })).filter(g => g.rows.length);
+}
+function mvRowName(r) { if (!r.nameEdited) r.name = r.plate && r.slot ? moveName(r, cust(r.cid)) : r.old; return r.name; }
+function moveSheet() {
+  MV ||= { groups: movePlanAll() };
+  const total = MV.groups.reduce((a, g) => a + g.rows.length, 0);
+  sheet({ title: t('mv.title'), sub: t('mv.sub'), cls: 'xwide', body: `<p class="note">${icon('info', 15)}<span>${t('mv.explain')}</span></p>
+    ${total ? `<div class="rn-bar"><b>${t('mv.count', { n: total })}</b></div>
+    <div class="rn-list mv-list">${MV.groups.map((g, gi) => {
+      const c = cust(g.cid), plates = [...new Set(vehOf(c).map(v => v.plate).filter(Boolean))];
+      const ok = g.rows.filter(r => r.on && !r.done && r.plate && r.slot && r.ym).length;
+      return `<details ${MV.groups.length <= 8 ? 'open' : ''} data-g="${gi}"><summary>${esc(c?.name || '—')} <em class="cnt">${num(g.rows.length)}</em></summary>
+        <datalist id="mvp${gi}">${plates.map(p => `<option value="${esc(p)}">`).join('')}</datalist>
+        ${g.rows.map((r, ri) => `<div class="rn-row mv-row ${r.done ? 'done' : ''} ${!r.plate || !r.slot ? 'need' : ''}" data-g="${gi}" data-r="${ri}">
+          <input type="checkbox" data-mv-on ${r.on ? 'checked' : ''} ${r.done ? 'disabled' : ''} aria-label="${esc(r.old)}">
+          <div class="rn-main">
+            <s>${esc(r.old)}</s><small class="mv-from">${t('mv.from')}: ${fromLabel(r)}</small>
+            <div class="mv-to">
+              <label>${t('cf.plate')}<input data-mv="plate" list="mvp${gi}" value="${esc(r.plate)}" placeholder="${esc(t('su.choose'))}" maxlength="40"></label>
+              <label>${t('vh.month')}<input type="month" data-mv="ym" value="${esc(r.ym)}"></label>
+              <label>${t('fo.choose')}<select data-mv="slot">${opt('', t('su.choose'), r.slot)}${FILE_SLOTS.map(s => opt(s, VSLOT[s].th, r.slot)).join('')}</select></label>
+            </div>
+            <input data-mv="name" value="${esc(mvRowName(r))}" maxlength="200" ${r.keep ? 'readonly' : ''} aria-label="${t('u.fileName')}">
+            ${r.done ? `<p class="ai-line ok">${icon('check', 14)}${t('mv.moved')}</p>` : !r.plate || !r.slot ? `<p class="ai-line err">${icon('alert', 14)}${t('mv.choose')}</p>` : r.keep ? `<small class="muted">${t('mv.keepName')}</small>` : ''}
+          </div></div>`).join('')}
+        <div class="sh-actions"><span class="sp"></span><button type="button" class="btn primary sm" data-act="mv-apply" data-g="${gi}" ${ok ? '' : 'disabled'}>${t('mv.apply', { n: ok })}</button></div>
+      </details>`;
+    }).join('')}</div>` : `<p class="sh-text">${t('mv.nothing')}</p>`}`,
+    foot: `<button type="button" class="btn danger-ghost" data-act="mv-undo">${icon('history', 17)}<span>${t('mv.undo')}</span></button>
+      <button type="button" class="btn ghost" data-act="mv-old">${icon('folder', 17)}<span>${t('mv.old')}</span></button><span class="sp"></span>
+      <button type="button" class="btn ghost" data-act="close-sheet">${t('btn.close')}</button>` });
+  sheetClose = () => { MV = null; };
+}
+async function moveApply(gi) {
+  const g = MV?.groups[gi]; if (!g) return;
+  const c = cust(g.cid);
+  const rows = g.rows.filter(r => r.on && !r.done && r.plate && r.slot && r.ym);
+  if (!rows.length) return toast(t('mv.choose'), 'err');
+  const skipped = g.rows.filter(r => r.on && !r.done).length - rows.length;
+  if (!await confirmBox(t('mv.confirm', { n: rows.length, x: esc(c.name) }) + (skipped ? ' ' + t('mv.skipped', { n: skipped }) : ''), t('mv.apply', { n: rows.length }), false)) return moveSheet();
+  const keep = MV;
+  sheet({ title: t('mv.title'), cls: 'small', body: `<p class="as-tip" id="mvProg"><span class="spin sm"></span>${t('mv.working', { a: 0, b: rows.length })}</p>` });
+  sheetClose = () => { MV = null; };
+  MV = keep;
+  let ok = 0, bad = 0, failed = null;
+  try {
+    // 1) the vehicles (plate + month): an existing one, else made now (the old single plate brings its data along)
+    const vid = {};
+    for (const r of rows) {
+      const k = plateKey(r.plate) + '|' + r.ym;
+      if (vid[k]) continue;
+      const have = vehOf(c).find(v => !v.legacy && plateKey(v.plate) === plateKey(r.plate) && v.ym === r.ym);
+      if (have) { vid[k] = have.id; continue; }
+      const L = vehOf(c).find(v => v.legacy && plateKey(v.plate) === plateKey(r.plate));
+      const data = { customerId: c.id, ym: r.ym, plate: plateOnly(r.plate) };
+      if (L && L.ym === r.ym) for (const f of VFIELDS) if (L[f] && f !== 'plate') data[f] = L[f];
+      const v = await S.store.saveVehicle(data);
+      S.vehicles.push(v);
+      vid[k] = v.id;
+    }
+    // 2) move, a few files per request (the backend has a 6-minute limit)
+    const batch = 'mv' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    const queue = rows.map(r => ({ r, item: { id: r.id, vehicleId: vid[plateKey(r.plate) + '|' + r.ym], slot: r.slot, name: r.keep ? '' : (r.name || '').trim() } }));
+    let tries = 0;
+    while (queue.length && tries++ < rows.length + 20) {
+      const chunk = queue.splice(0, 10);
+      const res = await S.store.moveNew(batch, chunk.map(x => x.item));
+      for (const x of res.rows) {
+        const q = chunk.find(y => y.item.id === x.id);
+        if (x.status === 'later') { queue.push(q); continue; }
+        if (x.status === 'ok' || x.status === 'same') { ok++; q.r.done = true; } else bad++;
+      }
+      const pg = $('#mvProg'); if (pg) pg.innerHTML = `<span class="spin sm"></span>${t('mv.working', { a: ok + bad, b: rows.length })}`;
+    }
+  } catch (e) { failed = e; }
+  await reload().catch(() => { });
+  MV = { groups: movePlanAll() };
+  sheet({ title: t('mv.title'), sub: t('rn.report'), cls: 'small', body: `<p class="sh-text">${t('mv.done', { n: ok })}</p>${bad ? `<p class="sh-text">${t('mv.err', { n: bad })}</p>` : ''}<p class="muted">${t('mv.safe')}</p>`,
+    foot: `<button type="button" class="btn danger-ghost" data-act="mv-undo">${icon('history', 17)}<span>${t('mv.undo')}</span></button><span class="sp"></span><button class="btn primary" data-act="move-tool">${t('mv.back')}</button>` });
+  if (failed) throw failed;
+}
+async function moveUndo() {
+  if (!await confirmBox(t('mv.undoQ'), t('mv.undo'), false)) return moveSheet();
+  MV = null;
+  sheet({ title: t('mv.undo'), cls: 'small', body: `<p class="as-tip"><span class="spin sm"></span>${t('mv.undoing')}</p>` });
+  let done = 0, skipped = 0, r, guard = 0;
+  try {
+    do { r = await S.store.moveUndo(); done += r.done; skipped += r.skipped; } while (r.more && (r.done || r.skipped) && guard++ < 50);
+  } finally {
+    await reload().catch(() => { });
+    sheet({ title: t('mv.undo'), sub: t('rn.report'), cls: 'small', body: `<p class="sh-text">${done || skipped ? t('mv.undone', { n: done }) : t('rn.undoNone')}</p>${skipped ? `<p class="sh-text">${t('mv.undoSkip', { n: skipped })}</p>` : ''}`,
+      foot: `<span class="sp"></span><button class="btn primary" data-act="move-tool">${t('mv.back')}</button>` });
+  }
+}
+/** The old 01_… 04_ folders: the empty ones can be deleted by the owner in Drive (the app never deletes them) */
+async function oldFoldersSheet() {
+  sheet({ title: t('mv.old'), cls: 'wide', body: `<p class="as-tip"><span class="spin sm"></span>${t('team.loading')}</p>` });
+  const list = await S.store.oldFolders();
+  const empty = list.filter(x => !x.items), full = list.length - empty.length;
+  const cloud = S.store.kind === 'cloud';
+  sheet({ title: t('mv.old'), sub: t('mv.oldSub', { n: empty.length }), cls: 'wide', body: `<p class="note">${icon('info', 15)}<span>${t('mv.oldExplain')}</span></p>
+    ${empty.length ? `<div class="team-list">${empty.map((x, i) => `<div class="team-row" style="--i:${Math.min(i, 10)}"><span class="ava dv-ava">${icon('folder', 17)}</span>
+      <span class="tmain"><b>${iso(x.name)}</b><small>${esc(x.customer || '')}</small></span>
+      ${cloud ? `<a class="icon-btn sm" href="https://drive.google.com/drive/folders/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="${t('set.folder')}">${icon('external', 15)}</a>` : ''}</div>`).join('')}</div>` : `<p class="sh-text">${t('mv.oldNone')}</p>`}
+    ${full ? `<p class="muted">${t('mv.oldFull', { n: full })}</p>` : ''}`,
+    foot: `<span class="sp"></span><button class="btn primary" data-act="move-tool">${t('mv.back')}</button>` });
+}
+
 /* ---------- assistant ---------- */
 function assistantSheet() {
   const first = S.customers[0]?.name;
@@ -1528,7 +1811,7 @@ function settingsSheet() {
       </div>` : ''}
       ${signedIn ? card('lock', t('dv.title'), device.unlocked() ? t('dv.subOn') : t('dv.subOff'), `<span class="sp"></span>${!device.has() ? `<button class="btn primary" data-act="dv-set">${icon('lock', 17)}<span>${t('dv.setBtn')}</span></button>` : ''}<button class="btn ghost" data-act="devices">${icon('phone', 17)}<span>${t('dv.open')}</span></button>`) : ''}
       ${S.store ? card('invoice', t('co.title'), isAdmin() ? t('co.sub') : t('co.subRo'), `<span class="sp"></span><button class="btn ghost" data-act="company">${icon('edit', 17)}<span>${t('co.title')}</span></button>`) : ''}
-      ${signedIn && isAdmin() ? card('folder', t('mig.title'), t('mig.sub'), `<span class="sp"></span><button class="btn ghost" data-act="migrate">${icon('folder', 17)}<span>${t('mig.dry')}</span></button>`) : ''}
+      ${S.store && isAdmin() && (signedIn || !cloud) ? card('move', t('mv.title'), t('mv.sub'), `<span class="sp"></span><button class="btn ghost" data-act="move-tool">${icon('move', 17)}<span>${t('mv.open')}</span></button>`) : ''}
       ${S.store && isAdmin() && (signedIn || !cloud) ? card('edit', t('rn.title'), t('rn.sub'), `<span class="sp"></span><button class="btn ghost" data-act="rename">${icon('edit', 17)}<span>${t('rn.open')}</span></button>`) : ''}
       ${cloud ? `<div class="set-card"><div class="set-h">${icon('wand', 22)}<div><b>${t('ai.status')}</b><small>${S.store?.aiReady ? t('ai.on') : t('ai.off')}</small></div><span class="sp"></span><em class="st-badge ${S.store?.aiReady ? 'ok' : 'off'}">${S.store?.aiReady ? t('ai.ready') : t('ai.notSet')}</em></div></div>` : ''}
       <div class="set-card ${!cloud ? 'on' : ''}">
@@ -1591,9 +1874,14 @@ function changeLang(l) {
 
 /** Upload target: the open case file on the dashboard, else the customer filter; otherwise ask */
 const uploadTarget = () => S.view === 'dash' ? S.sel : S.filters.customer || '';
+/** Upload into the open vehicle / folder of the case file, if one is open */
+const uploadSpot = cid => {
+  const v = S.view === 'dash' && S.sel === cid ? vehById(S.openVeh) : null;
+  return { cid, vid: v ? v.id : '', slot: v && FILE_SLOTS.includes(S.openSlot) ? S.openSlot : '' };
+};
 
 /* ================= actions ================= */
-const EDIT_ACTS = new Set(['share-link', 'share-stop', 'upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
+const EDIT_ACTS = new Set(['smart', 'veh-add', 'veh-edit', 'del-vehicle', 'mv-slot', 'share-link', 'share-stop', 'upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
 const ACT = {
   go(el) { S.view = el.dataset.view; S.mobileDetail = false; closeSheet(); mount(); scrollTo({ top: 0, behavior: 'smooth' }); },
   'close-sheet': closeSheet,
@@ -1604,6 +1892,28 @@ const ACT = {
   team: teamSheet,
   company: companySheet,
   migrate: migrateSheet,
+  'move-tool'() { if (!isAdmin()) return toast(t('err.role'), 'err'); MV = null; moveSheet(); },
+  'mv-apply'(el) { if (!isAdmin()) return toast(t('err.role'), 'err'); return moveApply(+el.dataset.g); },
+  'mv-undo'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return moveUndo(); },
+  'mv-old'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return oldFoldersSheet(); },
+  'mv-slot'(el) { return moveCur(el.dataset.slot); },
+  /* v4: vehicles */
+  'veh-open'(el) { const id = el.dataset.id; S.openVeh = S.openVeh === id ? '' : id; S.openSlot = ''; drawPanel(false); loadThumbs(); },
+  'veh-slot'(el) {
+    const s = el.dataset.slot, open = S.openSlot;
+    S.openVeh = el.dataset.veh;
+    S.openSlot = open === s ? (VSLOT[s]?.in || '') : s;   // a second tap closes it (5.x goes back to 5)
+    drawPanel(false); loadThumbs();
+  },
+  'veh-add'(el) { vehicleSheet(el.dataset.id || S.sel); },
+  'veh-edit'(el) { const v = vehById(el.dataset.id); if (v) vehicleSheet(v.customerId, v); },
+  'del-vehicle'(el) { const id = el.dataset.id; closeSheet(); return deleteVehicle(id); },
+  /* v4: Smart upload: no customer chosen, the AI finds customer, vehicle, month and folder */
+  smart(el) {
+    const go = files => files.length && run(() => startUpload(files, { smart: true }));
+    if (el?.dataset.src) return pickFiles({ capture: el.dataset.src === 'cam', accept: el.dataset.src === 'cam' ? 'image/*' : '', multiple: el.dataset.src !== 'cam' }).then(go);
+    return pickFiles().then(go);
+  },
   rename() { if (!isAdmin()) return toast(t('err.role'), 'err'); RN = null; renameSheet(); },
   'rn-all'(el) { if (!RN) return; for (const r of RN.rows) r.on = !!el.dataset.on; for (const c of $$('[data-rn-on]')) c.checked = !!el.dataset.on; rnCount(); },
   'rn-apply'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return renameApply(); },
@@ -1624,19 +1934,18 @@ const ACT = {
   upload() {
     const cid = uploadTarget();
     if (!cust(cid)) return pickCustomerSheet('file');
-    const folder = S.view === 'dash' && FOLDER[S.folderTab] ? S.folderTab : '';
-    pickFiles().then(files => files.length && run(() => startUpload(files, cid, folder)));
+    pickFiles().then(files => files.length && run(() => startUpload(files, uploadSpot(cid))));
   },
   camera() {
     const cid = uploadTarget();
     if (!cust(cid)) return pickCustomerSheet('file');
-    const folder = S.view === 'dash' && FOLDER[S.folderTab] ? S.folderTab : '';
-    pickFiles({ capture: true, accept: 'image/*', multiple: false }).then(files => files.length && run(() => startUpload(files, cid, folder)));
+    pickFiles({ capture: true, accept: 'image/*', multiple: false }).then(files => files.length && run(() => startUpload(files, uploadSpot(cid))));
   },
   'add-file'(el) {
-    const cid = S.sel, folder = el.dataset.folder || '';
+    const cid = S.sel;
     if (!cust(cid)) return pickCustomerSheet('file');
-    sourceSheet(files => startUpload(files, cid, folder));
+    const vid = el.dataset.veh || '', slot = FILE_SLOTS.includes(el.dataset.slot) ? el.dataset.slot : '';
+    sourceSheet(files => startUpload(files, { cid, vid, slot }));
   },
   'new-customer'() { customerSheet(); },
   'edit-customer'() { customerSheet(cust(S.sel)); },
@@ -1645,7 +1954,7 @@ const ACT = {
     const id = el.dataset.id;
     if (el.dataset.next === 'invoice') return newInvoice(id);
     S.sel = id;
-    sourceSheet(files => startUpload(files, id));
+    sourceSheet(files => startUpload(files, { cid: id }));
   },
   async src(el) {
     const cb = srcCb; if (!cb) return;
@@ -1653,41 +1962,32 @@ const ACT = {
     const files = await pickFiles({ capture: cam, accept: cam ? 'image/*' : cb.accept, multiple: !cam });
     if (files.length) { srcCb = null; cb.onPick(files); }
   },
-  select(el) { S.sel = el.dataset.id; S.mobileDetail = true; drawPanel(true); loadThumbs(); if (narrow()) $('#panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); },
+  select(el) {
+    if (S.sel !== el.dataset.id || el.dataset.veh) { S.openVeh = el.dataset.veh || ''; S.openSlot = ''; S.folderTab = ''; }
+    S.sel = el.dataset.id; S.mobileDetail = true; drawPanel(true); loadThumbs(); if (narrow()) $('#panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); },
   back() { S.mobileDetail = false; drawPanel(false); },
   tab(el) { S.folderTab = el.dataset.folder; drawPanel(true); loadThumbs(); },
   'clear-filters'() { S.filters = noFilters(); drawFilters(true); drawResults(true); },
-  'open-customer'(el) { openCustomer(el.dataset.id); },
+  'open-customer'(el) { openCustomer(el.dataset.id, el.dataset.veh || ''); },
   'open-file'(el) { return openFile(el.dataset.id); },
   'open-link'(el) { window.open(el.dataset.url, '_blank', 'noopener'); },
   'open-root'() { if (S.me?.root) window.open('https://drive.google.com/drive/folders/' + encodeURIComponent(S.me.root), '_blank', 'noopener'); },
   async 'up-more'() {
     const files = sizeFilter(await pickFiles());
     if (!U) return;
-    for (const file of files) U.items.push(newItem(file));
+    for (const file of files) {
+      const it = newRow(file, { cid: U.fixedCid });
+      const list = U.fixedCid ? vehOf(U.fixedCid) : [];
+      if (list.length === 1) { it.vkey = list[0].id; it.vconf = 'high'; }
+      it.conf = rowConf(it); autoName(it);
+      U.items.push(it);
+    }
     drawUpload(); aiQueue();
   },
   'up-remove'(el) { if (!U) return; U.items.splice(+el.closest('.up-row').dataset.i, 1); U.items.length ? drawUpload() : closeSheet(); },
   'do-upload': doUpload,
-  'pick-folder'(el) {
-    const slot = el.dataset.folder, name = el.dataset.name;
-    if (name === 'up' && U) { const it = U.items[+el.dataset.i]; it.folder = slot; it.picked = true; it.type = typeFor(slot, it.n?.docType); if (slot === 'policy' && !it.expiry && it.n?.values.policyExpiry) it.expiry = it.n.values.policyExpiry; autoName(it); drawUpload(); }
-    else if (name === 'rv' && R) { R.v = { ...R.v, ...readForm($('#rvform'), ALL_FIELDS) }; R.folder = slot; for (const b of $$('[data-name="rv"]')) { b.classList.toggle('on', b.dataset.folder === slot); b.setAttribute('aria-checked', b.dataset.folder === slot); } refreshReviewNames(); }
-    else if (name === 'move') return moveCur(slot);
-  },
-  'ai-new'(el) {
-    if (!el.dataset.src) { if (!aiOn()) return toast(S.mode === 'local' ? t('ai.localOnly') : t('ai.off'), 'err'); return sourceSheet(files => aiNewFiles(files), { title: t('add.ai'), accept: DOC_ACCEPT }); }
-    return aiNew(el.dataset.src);
-  },
-  'ai-retry'() { if (R) aiNewFiles(R.files, R.prepared); },   // same photos (and bytes): nothing to pick again, a late result comes from the cache
+  'ai-new'(el) { return ACT.smart(el); },   // v3 "Add customer with AI" is now Smart upload
   'up-ai-retry'(el) { const it = U?.items[+el.closest('.up-row').dataset.i]; if (!it) return; it.ai = 'wait'; it.err = ''; drawUpload(); aiQueue(); },
-  'ai-manual'() { if (!R) return; R.n = null; R.v = {}; reviewSheet(); },
-  'pv-zoom'(el) { if (R) window.open(R.previews[+el.dataset.i], '_blank', 'noopener'); },
-  'pv-open'(el) { if (R) window.open(objUrl(R.files[+el.dataset.i]), '_blank', 'noopener'); },
-  'dup-back'() { if (R) reviewSheet(); },
-  'dup-create'() { if (R) return createFromReview(); },
-  'dup-update'(el) { if (R) dupUpdate(el.dataset.id); },
-  'dup-apply'(el) { if (R) return dupApply(el.dataset.id, el); },
   'dl-file'() { if (cur?.blob) download(cur.blob, cur.f.name); },
   'share-file'() { if (cur?.blob) return shareBlob(cur.blob, cur.f.name); },
   async 'del-file'(el) {
@@ -1700,7 +2000,7 @@ const ACT = {
     if (!await confirmBox((n ? t('del.customerN', { x: esc(c.name), n }) : t('del.customer', { x: esc(c.name) })) + t(S.store.kind === 'cloud' ? 'del.drive' : 'del.local'))) return;
     await S.store.deleteCustomer(c.id); S.mobileDetail = false; await reload(); toast(t('t.customerDeleted'));
   },
-  'new-invoice'(el) { const id = el.dataset.id || (S.view === 'dash' ? S.sel : S.filters.customer); if (!cust(id)) return pickCustomerSheet('invoice'); newInvoice(id); },
+  'new-invoice'(el) { const id = el.dataset.id || (S.view === 'dash' ? S.sel : S.filters.customer); if (!cust(id)) return pickCustomerSheet('invoice'); newInvoice(id, el.dataset.veh || ''); },
   'inv-tab'(el) { I.tab = el.dataset.v; invoiceEditor(); },
   'inv-lang'(el) {
     const old = I.d.lang, l = el.dataset.v; I.d.lang = l;
@@ -1836,7 +2136,7 @@ document.addEventListener('submit', e => {
     if (btn) btn.disabled = true;
     try {
       if (kind === 'customer') await saveCustomerForm(form);
-      else if (kind === 'review') await confirmReview(form);
+      else if (kind === 'vehicle') await saveVehicleForm(form);
       else if (kind === 'file') {
         const d = Object.fromEntries(new FormData(form));
         const f = S.files.find(x => x.id === form.dataset.id);
@@ -1859,14 +2159,28 @@ document.addEventListener('input', e => {
     else { drawFilters(true); drawResults(true); }
   }
   else if (el.dataset.u && U) {
-    const it = U.items[+el.closest('.up-row').dataset.i]; it[el.dataset.u] = el.value;
-    if (el.dataset.u === 'name') it.nameEdited = true;
-    if (el.dataset.u === 'plate') { it.plateSet = true; autoName(it); drawUpload(); }
+    const it = U.items[+el.closest('.up-row').dataset.i];
+    if (el.dataset.u === 'name') { it.name = el.value; it.nameEdited = true; }
+    else rowPick(it, el.dataset.u, el.value);
   }
-  else if (el.dataset.rn && R) { R.names[+el.dataset.rn] = el.value; R.namesEdited[+el.dataset.rn] = true; }
+  else if ((el.dataset.ncF || el.dataset.nvF) && U) {
+    const card = el.closest('[data-nc],[data-nv]');
+    if (el.dataset.ncF) U.newCust[card.dataset.nc].data[el.dataset.ncF] = el.value;
+    else { const n = U.newVeh[card.dataset.nv], k = el.dataset.nvF; if (k === 'ym') n.ym = el.value; else if (k === 'model') { n.data.model = el.value; delete n.data.brand; } else n.data[k] = el.value; }
+    for (const x of U.items) autoName(x);
+    for (const x of $$('.up-row')) { const it = U.items[+x.dataset.i], inp = x.querySelector('[data-u="name"]'); if (it && inp && document.activeElement !== inp) inp.value = it.name; }
+  }
+  else if (el.dataset.mv && MV) {
+    const row = el.closest('.mv-row'), r = MV.groups[+row.dataset.g].rows[+row.dataset.r], k = el.dataset.mv;
+    if (k === 'name') { r.name = el.value; r.nameEdited = true; }
+    else { r[k] = k === 'plate' ? el.value.trim() : el.value; const n = row.querySelector('[data-mv="name"]'); if (n && !r.nameEdited) n.value = mvRowName(r); }
+    row.classList.toggle('need', !r.plate || !r.slot);
+    const g = MV.groups[+row.dataset.g], b = $(`[data-act="mv-apply"][data-g="${row.dataset.g}"]`), ok = g.rows.filter(x => x.on && !x.done && x.plate && x.slot && x.ym).length;
+    if (b) { b.disabled = !ok; b.textContent = t('mv.apply', { n: ok }); }
+  }
+  else if (el.dataset.invVeh !== undefined && I) invPickVehicle(el.value);
   else if (el.dataset.rnName && RN) { RN.rows[+el.dataset.rnName].name = el.value; }
   else if (el.dataset.diff && U) { U.toggles[el.dataset.diff] = el.checked; drawUpload(); }
-  else if (el.dataset.r && R && el.closest('#rvform')) { R.v[el.dataset.r] = el.value; el.closest('.fld')?.classList.remove('ai-lo', 'ai-mid', 'has-err'); refreshReviewNames(); }
   else if (el.dataset.i && I) {
     const p = el.dataset.i;
     setPath(I.d, p, el.type === 'checkbox' ? el.checked : el.value);
@@ -1879,9 +2193,20 @@ document.addEventListener('input', e => {
 // checkboxes fire "change" (not always "input") in older Safari
 document.addEventListener('change', e => {
   const el = e.target;
+  if (el.dataset.nvF && U) { drawUpload(); return; }   // a new vehicle's plate or month: month column and names
   if (el.type !== 'checkbox') return;
   if (el.dataset.diff && U) { U.toggles[el.dataset.diff] = el.checked; drawUpload(); }
   if (el.dataset.rnOn && RN) { RN.rows[+el.dataset.rnOn].on = el.checked; rnCount(); }
+  if (el.dataset.mvOn !== undefined && MV) {
+    const row = el.closest('.mv-row'), g = MV.groups[+row.dataset.g]; g.rows[+row.dataset.r].on = el.checked;
+    const b = $(`[data-act="mv-apply"][data-g="${row.dataset.g}"]`), ok = g.rows.filter(x => x.on && !x.done && x.plate && x.slot && x.ym).length;
+    if (b) { b.disabled = !ok; b.textContent = t('mv.apply', { n: ok }); }
+  }
+  if ((el.dataset.ncOk !== undefined || el.dataset.nvOk !== undefined) && U) {
+    const card = el.closest('[data-nc],[data-nv]');
+    (card.dataset.nc ? U.newCust[card.dataset.nc] : U.newVeh[card.dataset.nv]).ok = el.checked;
+    card.classList.toggle('ok', el.checked);
+  }
   if (el.dataset.i === 'vat' && I) { I.d.vat = el.checked; $('#invTot').innerHTML = invTotalsHtml(); }
 });
 
@@ -1894,17 +2219,19 @@ addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
 addEventListener('drop', e => {
   if (!hasFiles(e)) return;
   e.preventDefault(); dragN = 0; $('#drop').classList.remove('on');
-  const dc = e.target.closest?.('[data-customer]'); if (dc) S.sel = dc.dataset.customer;
-  const sec = e.target.closest?.('[data-folder]');
-  const cid = dc ? S.sel : uploadTarget();
-  if (!cust(cid)) return toast(t('add.fileSub'), 'err');
-  run(() => startUpload(e.dataTransfer.files, cid, FOLDER[sec?.dataset.folder] ? sec.dataset.folder : ''));
+  if (U || $('#sheet-root .overlay')) return;
+  const dc = e.target.closest?.('[data-customer]');
+  // dropped on a case file: that customer (and the vehicle / folder it was dropped on); anywhere else: Smart upload
+  if (!dc) return run(() => startUpload(e.dataTransfer.files, { smart: true }));
+  S.sel = dc.dataset.customer;
+  const vc = e.target.closest?.('[data-veh]'), sl = e.target.closest?.('[data-slot]');
+  run(() => startUpload(e.dataTransfer.files, { cid: S.sel, vid: vc?.dataset.veh || '', slot: FILE_SLOTS.includes(sl?.dataset.slot) ? sl.dataset.slot : '' }));
 });
 addEventListener('paste', e => {
   const f = e.clipboardData?.files;
   if (!f?.length || !canEdit() || S.gate || e.target.closest('input,textarea') || $('#sheet-root .overlay')) return;
-  const cid = uploadTarget(); if (!cust(cid)) return;
-  e.preventDefault(); run(() => startUpload(f, cid));
+  const cid = uploadTarget();
+  e.preventDefault(); run(() => startUpload(f, cust(cid) ? uploadSpot(cid) : { smart: true }));
 });
 
 addEventListener('keydown', e => {
