@@ -4,8 +4,12 @@
  * Deploy as:  Execute as = Me,  Who has access = Anyone.
  * Every request is a POST with Content-Type text/plain and a JSON body:
  *   { "token": "<Google ID token>", "action": "<name>", ...params }
+ *   or (v3.3, device password) { "dev": { "sid": "<session id>", "key": "<session secret>" }, "action": ..., ... }
  * The ID token is verified on the server (tokeninfo endpoint): audience, verified email, expiry.
- * The caller's email comes only from the verified token, never from the request body.
+ * A device session is checked on every request (not cached): it must exist, not be expired, and the secret's
+ * SHA-256 must match. 5 wrong secrets in a row (= 5 wrong device passwords) delete the session.
+ * With either one, the role is read from the ACL on every request.
+ * The caller's email comes only from the verified token or the stored session, never from the request body.
  *
  * All files live in the "Bimeyar" folder in the owner's My Drive and are owned by the owner.
  * Access list (Script Properties, key ACL): { "email": "admin" | "editor" | "viewer" }.
@@ -19,6 +23,8 @@
  *   INV_SEQ         last invoice number per year (set automatically, under a lock)
  *   AI_LOG          last 200 AI calls: time, ms, size, tokens, result. No customer data.
  *   RENAME_LAST     id of the last batch of the "Rename files" tool, for "Undo last rename" (admin)
+ *   DEVICE_SESSIONS device sign-ins (v3.3): { sid: { h: SHA-256 of the secret, e: email, n: device name,
+ *                   c: created, u: last used, x: expires (ms), f: wrong attempts } }. The secret itself is never stored.
  */
 
 // Web OAuth Client ID used by the frontend's "Sign in with Google" (public, not a secret).
@@ -29,6 +35,13 @@ const FIELDS = 'id,name,mimeType,size,createdTime,parents,appProperties,descript
 const MAX_BYTES = 25 * 1024 * 1024;
 const ROLES = ['admin', 'editor', 'viewer'];
 const RANK = { viewer: 1, editor: 2, admin: 3 };
+/** Device sessions (v3.3): 30 days, 5 devices per person, 5 wrong passwords, "last used" written at most every 10 min. */
+const DS_KEY = 'DEVICE_SESSIONS';
+const DS_DAYS = 30;
+const DS_PER_USER = 5;
+const DS_MAX_FAILS = 5;
+const DS_TOUCH_MS = 10 * 60 * 1000;
+const DS_MAX_BYTES = 8600;   // one Script Property holds at most 9 kB
 
 /**
  * The 4 sub-folders inside every customer folder. Folders are found by their `slot`
@@ -96,11 +109,14 @@ function doPost(e) {
   catch (err) { return fail('bad_request', 'Invalid JSON'); }
 
   let user;
-  try { user = verify(req.token); }
-  catch (err) { return fail('auth', String(err.message || err)); }
+  try { user = req.dev ? sessionAuth(req.dev) : verify(req.token); }
+  catch (err) { return fail(err.code || (req.dev ? 'server' : 'auth'), String(err.message || err), err.extra); }   // e.g. a lock timeout is not a sign-out
 
   const role = roleOf(user.email);
-  if (!role) return fail('forbidden', 'No access', { email: user.email });
+  if (!role) {
+    if (user.sid) dsEdit(a => { delete a[user.sid]; });   // removed from the access list: this device session ends now
+    return fail('forbidden', 'No access', { email: user.email });
+  }
 
   const fn = ACTIONS[req.action];
   if (!fn) return fail('bad_request', 'Unknown action');
@@ -110,14 +126,57 @@ function doPost(e) {
     return json({ ok: true, data: fn.run(req, user, role) });
   } catch (err) {
     console.error(req.action, err && err.stack || err);
-    return fail(err.code || 'server', String(err.message || err));
+    return fail(err.code || 'server', String(err.message || err), err.extra);
   }
 }
 
 /* ============================ actions ============================ */
 
 const ACTIONS = {
-  me: { need: 'viewer', run: (req, user, role) => ({ email: user.email, name: user.name, role, owner: ownerEmail() === user.email, root: role === 'admin' ? rootId() : '', ai: !!aiKey(), v: 3 }) },
+  me: { need: 'viewer', run: (req, user, role) => ({ email: user.email, name: user.name, role, owner: ownerEmail() === user.email, root: role === 'admin' ? rootId() : '', ai: !!aiKey(), v: 3, dev: !!user.sid }) },
+
+  /* ---------- device sign-in (v3.3) ---------- */
+  // Only with a Google ID token. Returns the secret once; only its SHA-256 is stored.
+  // `replace` = this device's old session ("Forgot password"): removed if it belongs to the same person.
+  createDeviceSession: {
+    need: 'viewer',
+    run: (req, user) => {
+      if (user.sid) throw err('role', 'Sign in with Google to add a device');
+      const name = clean(req.name, 40) || 'Device';
+      const sid = dsRandom(16), key = dsRandom(32), now = Date.now(), x = now + DS_DAYS * 86400000;
+      dsEdit(a => {
+        const old = String(req.replace || '');
+        if (old && a[old] && a[old].e === user.email) delete a[old];
+        const mine = Object.keys(a).filter(k => a[k].e === user.email).sort((p, q) => (a[p].u || a[p].c) - (a[q].u || a[q].c));
+        while (mine.length >= DS_PER_USER) delete a[mine.shift()];   // the device not used for the longest time
+        a[sid] = { h: dsHash(key), e: user.email, n: name, c: now, u: now, x: x, f: 0 };
+        if (Utilities.newBlob(JSON.stringify(a)).getBytes().length > DS_MAX_BYTES) throw err('sessions_full', 'Too many devices');
+      });
+      return { sid: sid, key: key, expires: new Date(x).toISOString() };
+    },
+  },
+  listMySessions: { need: 'viewer', run: (req, user) => dsList(user, false) },
+  revokeSession: {
+    need: 'viewer',
+    run: (req, user) => {
+      const sid = String(req.sid || '');
+      let found = false;
+      dsEdit(a => { if (a[sid] && a[sid].e === user.email) { delete a[sid]; found = true; } });
+      if (!found) throw err('not_found', 'Device not found');
+      return dsList(user, false);
+    },
+  },
+  listAllSessions: { need: 'admin', run: (req, user) => dsList(user, true) },
+  revokeAny: {
+    need: 'admin',
+    run: (req, user) => {
+      const sid = String(req.sid || '');
+      let found = false;
+      dsEdit(a => { if (a[sid]) { delete a[sid]; found = true; } });
+      if (!found) throw err('not_found', 'Device not found');
+      return dsList(user, true);
+    },
+  },
 
   list: {
     need: 'viewer',
@@ -524,6 +583,55 @@ function verify(token) {
   const ttl = Math.min(exp - now, 3600);
   if (ttl > 30) cache.put(key, JSON.stringify(u), ttl);
   return u;
+}
+
+/* ---------- device sessions (v3.3) ---------- */
+
+/** Checks { sid, key } against DEVICE_SESSIONS. Wrong key: counts the attempt; the 5th deletes the session. */
+function sessionAuth(dev) {
+  const sid = String((dev && dev.sid) || ''), key = String((dev && dev.key) || '');
+  if (!/^[\w-]{16,64}$/.test(sid) || !/^[\w-]{32,128}$/.test(key)) throw sessionGone();
+  const now = Date.now(), s = dsGet()[sid];
+  if (!s) throw sessionGone();
+  if (!(s.x > now)) { dsEdit(a => { delete a[sid]; }); throw sessionGone(); }
+  if (dsHash(key) !== s.h) {
+    let left = 0;
+    dsEdit(a => {
+      const t = a[sid]; if (!t) return;
+      t.f = (t.f || 0) + 1;
+      if (t.f >= DS_MAX_FAILS) delete a[sid]; else left = DS_MAX_FAILS - t.f;
+    });
+    if (!left) throw sessionGone();
+    const e = new Error('Wrong password'); e.code = 'bad_pin'; e.extra = { left: left }; throw e;
+  }
+  if (s.f || now - (s.u || 0) > DS_TOUCH_MS) dsEdit(a => { const t = a[sid]; if (t) { t.u = now; t.f = 0; } });
+  return { email: s.e, name: '', picture: '', sid: sid };
+}
+function sessionGone() { const e = new Error('Device session ended'); e.code = 'auth'; e.extra = { session: 'gone' }; return e; }
+function dsGet() { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty(DS_KEY) || '{}') || {}; } catch (e) { return {}; } }
+/** Changes DEVICE_SESSIONS under the script lock. Also removes expired sessions and sessions of people no longer in the ACL. */
+function dsEdit(fn) {
+  return withLock(() => {
+    const a = dsGet();
+    fn(a);
+    const now = Date.now(), acl = aclGet(), owner = ownerEmail();
+    Object.keys(a).forEach(k => { const t = a[k]; if (!t || !(t.x > now) || (t.e !== owner && !acl[t.e])) delete a[k]; });
+    PropertiesService.getScriptProperties().setProperty(DS_KEY, JSON.stringify(a));
+  });
+}
+function dsHash(key) { return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, 'bimeyar-device:' + key)).replace(/=+$/, ''); }
+/** n random bytes (n <= 32), base64url: SHA-256 of 4 random UUIDs (4 x 122 random bits). */
+function dsRandom(n) {
+  let s = '';
+  for (let i = 0; i < 4; i++) s += Utilities.getUuid();
+  return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s).slice(0, n)).replace(/=+$/, '');
+}
+/** Sessions as the app shows them (never the hash). all = every person's (admin). */
+function dsList(user, all) {
+  const a = dsGet(), now = Date.now(), iso = ms => new Date(ms).toISOString();
+  return Object.keys(a).filter(k => a[k] && a[k].x > now && (all || a[k].e === user.email))
+    .map(k => ({ sid: k, email: a[k].e, name: a[k].n || '', created: iso(a[k].c), lastUsed: iso(a[k].u || a[k].c), expires: iso(a[k].x), current: k === user.sid }))
+    .sort((p, q) => p.email.localeCompare(q.email) || q.lastUsed.localeCompare(p.lastUsed));
 }
 
 function ownerEmail() {
