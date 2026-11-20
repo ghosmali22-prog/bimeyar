@@ -67,7 +67,7 @@ Owner's Google Drive → "Bimeyar" folder          Gemini API (key only in Scrip
 
 The key is stored **only** in Apps Script → Project Settings → Script properties, as `GEMINI_API_KEY`.
 It is never in this repo and never reaches the browser: the app sends the document to the backend, the backend
-calls Gemini. Get a key at https://aistudio.google.com/apikey. The model name is `GEMINI_MODEL` in `backend/Code.gs`.
+calls Gemini. Get a key at https://aistudio.google.com/apikey. The models are `AI_MODELS` in `backend/Code.gs` (tried in order when Google is busy).
 
 ## Data fields
 

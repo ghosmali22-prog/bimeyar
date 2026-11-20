@@ -53,7 +53,7 @@ const unb64 = (data, mime) => {
 
 /** Every customer field the backend knows (all optional except name) */
 export const CUSTOMER_KEYS = ['name', 'phone', 'plate', 'car', 'nameEn', 'idNo', 'address', 'dob', 'brand', 'model', 'year', 'color', 'province', 'vin', 'engineNo',
-  'insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'policyStart', 'policyExpiry', 'note'];
+  'insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'policyStart', 'policyExpiry', 'note', 'nick', 'contractDate'];
 
 export class ApiStore {
   kind = 'cloud';
@@ -80,10 +80,16 @@ export class ApiStore {
   async addFile(blob, meta, onProgress) {
     if (blob.size > MAX_UPLOAD_MB * 1048576) throw new ApiError('too_big', 'too_big');
     const data = await b64(blob);
-    return call('upload', { data, meta: { name: meta.name, customerId: meta.customerId, type: meta.type, expiry: meta.expiry, note: meta.note, folder: meta.folder || '', mime: blob.type || 'application/octet-stream' } }, onProgress);
+    return call('upload', { data, meta: { name: meta.name, orig: meta.orig || '', customerId: meta.customerId, type: meta.type, expiry: meta.expiry, note: meta.note, folder: meta.folder || '', mime: blob.type || 'application/octet-stream' } }, onProgress);
   }
   updateFile(f) { return call('updateFile', { file: { id: f.id, name: f.name, type: f.type, expiry: f.expiry, note: f.note } }); }
   moveFile(id, folder) { return call('moveFile', { id, folder }); }
+  // Share ONE file by link (v3.2): "anyone with the link" can view that file only
+  shareFile(id) { return call('shareFile', { id }); }
+  unshareFile(id) { return call('unshareFile', { id }); }
+  // Rename tool (admin, v3.2): only names change; the backend keeps the old name for "Undo last rename"
+  renameFiles(batch, items) { return call('renameFiles', { batch, items }); }
+  renameUndo() { return call('renameUndo'); }
   async deleteFile(id) { await call('deleteFile', { id }); this.blobCache.delete(id); this.thumbCache.delete(id); }
 
   async getBlob(id, fresh = false) {
@@ -115,8 +121,9 @@ export class ApiStore {
   // Sub-folder migration (admin)
   migrate(dryRun, from) { return call('migrateFolders', { dryRun, from, limit: 40 }); }
 
-  // AI (editor+). Long timeout: reading a multi-page PDF can take a while.
-  aiExtract(files) { return call('aiExtract', { files }, null, 150000); }
+  // AI (editor+). The backend starts its last Gemini attempt within 45 s and is normally done by ~225 s; 240 s leaves
+  // room for the upload. A result that comes later is cached in the backend for 10 min ("Try again" gets it at once).
+  aiExtract(files) { return call('aiExtract', { files }, null, 240000); }
 
   // Team / access (admin only)
   aclList() { return call('aclList'); }

@@ -176,6 +176,8 @@ const I = {
   trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
   download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
   share: '<path d="M12 15V4M8 8l4-4 4 4M5 13v6h14v-6"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  unlink: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/><path d="M4 4l16 16"/>',
   phone: '<path d="M6 3h4l1.5 5-2.5 1.5a12 12 0 0 0 5.5 5.5L16 12.5l5 1.5v4a2 2 0 0 1-2 2A16 16 0 0 1 4 5a2 2 0 0 1 2-2z"/>',
   external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5H5V6h5"/>',
   grid: '<rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/>',
@@ -217,12 +219,12 @@ export async function makeThumb(blob, max = 360) {
  * Shrinks big photos before upload: longest side at most 2560 px, JPEG quality 0.82.
  * Returns the original file when it is not a photo, can't be decoded, or would not get smaller.
  */
-export async function compressImage(file, maxSide = 2560, quality = 0.82) {
+export async function compressImage(file, maxSide = 2560, quality = 0.82, keepBelow = 1.2 * 1048576) {
   if (!/^image\/(jpeg|png|webp|heic|heif)$/i.test(file.type)) return file;
   let bmp;
   try { bmp = await createImageBitmap(file); } catch { return file; }
   const k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
-  if (k === 1 && file.size < 1.2 * 1048576) return file;
+  if (k === 1 && file.size < keepBelow) return file;
   const c = document.createElement('canvas');
   c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
   const g = c.getContext('2d');
