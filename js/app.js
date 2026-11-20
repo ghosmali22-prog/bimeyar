@@ -9,6 +9,7 @@ import { seedDemo } from './demo.js';
 import { calcTotals, baht, lineAmount, invoiceHtml, INVOICE_CSS } from './invoice.js';
 import { prepare, normalize, suggestFolder, diff, fileNote, FIELD_GROUPS, ALL_FIELDS, DATE_FIELDS } from './ai.js';
 import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './validate.js';
+import { buildName, docNameFor, docNameFromOld, plateOnly, plateFromName, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
 
 /*
  * Layout = the v2 design (dashboard with stat cards, dark customer panel with the purple case file,
@@ -351,6 +352,7 @@ function ftBadge(f, size = 26, cls = '') {
   if (f.invoice) return `<span class="ft inv ${cls}">${icon('invoice', size)}</span>`;
   return `<span class="ft ${cls} ${isPdf(f) ? 'pdf' : ''}">${isPdf(f) ? 'PDF' : icon(isImage(f) ? 'image' : (TYPES[f.type] || TYPES.other).icon, size)}</span>`;
 }
+const linkFlag = () => `<em class="link-flag" title="${t('sh.on')}">${icon('link', 12)}</em>`;
 const thumbImg = (src, ic) => `<img class="th" src="${esc(src)}" alt="" loading="lazy" decoding="async" data-ic="${ic}">`;
 const folderName = f => FOLDER[f.folder] ? t('fo.' + f.folder) : t('fo.other');
 function fileTile(f, i, light = false) {
@@ -358,7 +360,7 @@ function fileTile(f, i, light = false) {
   const left = f.expiry && !f.invoice ? daysLeft(f.expiry) : null;
   return `<button class="tile" data-act="open-file" data-id="${esc(f.id)}" style="--i:${Math.min(i, 14)}">
     <span class="thumb">${f.thumb ? thumbImg(f.thumb, ty.icon) : ftBadge(f)}
-      ${left !== null && left <= 30 ? `<em class="flag ${left < 0 ? 'bad' : 'warn'}">${left < 0 ? t('flag.expired') : t('flag.days', { n: left })}</em>` : ''}${f.invoice ? `<em class="inv-flag">${t('q.invoice')}</em>` : ''}</span>
+      ${left !== null && left <= 30 ? `<em class="flag ${left < 0 ? 'bad' : 'warn'}">${left < 0 ? t('flag.expired') : t('flag.days', { n: left })}</em>` : ''}${f.invoice ? `<em class="inv-flag">${t('q.invoice')}</em>` : ''}${f.shared ? linkFlag() : ''}</span>
     <b>${esc(f.name)}</b>
     <small>${c ? esc(c.name) + ' · ' : ''}${light ? folderName(f) : typeLabel(f.type)} · ${fmtDay(f.createdAt)}</small>
   </button>`;
@@ -736,7 +738,55 @@ let U = null;
 const MAX = MAX_UPLOAD_MB * 1048576;
 const compressible = f => /^image\/(jpeg|png|webp|heic|heif)$/i.test(f.type);
 const readable = f => compressible(f) || f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
-const newItem = (file, folder = '') => ({ file, name: file.name, folder, picked: !!folder, aiFolder: null, type: typeFor(folder), expiry: '', ai: aiOn() && readable(file) ? 'wait' : 'skip', n: null, url: isImage({ mime: file.type }) ? objUrl(file) : '', done: false, p: 0 });
+const newItem = (file, folder = '') => {
+  const plates = platesOf(cust(U?.cid));
+  const it = { file, name: file.name, folder, picked: !!folder, aiFolder: null, type: typeFor(folder), expiry: '', ai: aiOn() && readable(file) ? 'wait' : 'skip', n: null, url: isImage({ mime: file.type }) ? objUrl(file) : '', done: false, p: 0, plates, plate: plates[0] || '' };
+  autoName(it);
+  return it;
+};
+
+/* ---------- automatic file names (v3.2): {plate} - {customer}({month}) - {document}.{ext} ---------- */
+/** The customer's plate, plus plates already used in their file names (a customer with several vehicles). */
+function platesOf(c) {
+  const out = [];
+  const add = p => { p = plateOnly(p); if (p && !out.includes(p)) out.push(p); };
+  if (c) { add(plateOnly(c.plate, c.province)); for (const f of S.files) if (f.customerId === c.id) add(plateFromName(f.name)); }
+  return out;
+}
+/** Suggested name of an upload row (kept as it is once the user typed in the name box). */
+function autoName(it) {
+  if (it.nameEdited || !U) return;
+  const c = cust(U.cid), v = it.n?.values || {};
+  const month = monthOf(v.contractDate, it.n?.docType === 'policy' ? v.policyStart : '', c?.contractDate, c?.policyStart, todayIso());
+  it.name = buildName({ plate: it.plate, customer: c, month, doc: docNameFor({ aiName: it.n?.docName, docType: it.n?.docType, folder: it.folder }), ext: extOf(it.file.name) });
+}
+/** After the AI: the plate it read becomes a choice (and the default when it is sure), then the name is made again. */
+function aiPlate(it) {
+  const p = plateOnly(it.n?.values.plate, it.n?.values.province);
+  if (!p) return;
+  if (!it.plates.includes(p)) it.plates.push(p);
+  if (!it.plateSet && (it.n.conf.plate ?? 0) >= 0.6) it.plate = p;
+}
+/** Names for the files of "Add customer with AI" (from the values on the review form) */
+function reviewNames(c) {
+  if (!R) return;
+  R.names ||= []; R.namesEdited ||= [];
+  R.files.forEach((f, i) => {
+    if (R.namesEdited[i]) return;
+    R.names[i] = buildName({ plate: plateOnly(c.plate, c.province), customer: c, month: monthOf(c.contractDate, c.policyStart, todayIso()), doc: docNameFor({ aiName: R.n?.docName, docType: R.n?.docType, folder: R.folder }), ext: extOf(f.name) });
+  });
+}
+function refreshReviewNames() {
+  if (!R) return;
+  reviewNames(R.v);
+  for (const el of $$('[data-rn]')) if (!R.namesEdited[+el.dataset.rn]) el.value = R.names[+el.dataset.rn] || '';
+}
+/** Name to save: cleaned, original extension kept (a compressed photo becomes .jpg as before) */
+function saveName(name, file, blob) {
+  let n = withExt(safeName(name) || file.name, extOf(file.name));
+  if (blob !== file && blob.type === 'image/jpeg') n = n.replace(/\.(png|webp|heic|heif|jpe?g)$/i, '') + '.jpg';
+  return n;
+}
 
 function sizeFilter(files) {
   const ok = [];
@@ -776,6 +826,7 @@ async function aiQueue() {
       it.aiFolder = suggestFolder(it.n, cust(u.cid));
       if (!it.picked && it.aiFolder) { it.folder = it.aiFolder; it.type = typeFor(it.folder, it.n.docType); }
       if (it.n.values.policyExpiry && it.folder === 'policy' && !it.expiry) it.expiry = it.n.values.policyExpiry;
+      aiPlate(it); autoName(it);
       it.ai = 'done';
     } catch (e) { it.ai = 'err'; it.err = aiErr(e); }
     drawUpload();
@@ -815,7 +866,9 @@ function drawUpload() {
       <div class="up-main">
         <div class="up-top"><input data-u="name" maxlength="200" value="${esc(it.name)}" aria-label="${t('u.fileName')}"><small>${fmtSize(it.file.size)}</small>
           <button class="icon-btn sm" data-act="up-remove" aria-label="${t('u.remove')}">${icon('x', 15)}</button></div>
+        ${it.done || it.nameEdited ? '' : `<p class="hint">${icon('edit', 13)} ${t('nm.auto')}</p>`}
         ${aiLine(it)}
+        ${it.plates.length > 1 && !it.done ? `<div class="up-extra"><label>${t('nm.vehicle')}<select data-u="plate">${it.plates.map(p => `<option ${p === it.plate ? 'selected' : ''}>${esc(p)}</option>`).join('')}<option value="" ${it.plate ? '' : 'selected'}>${t('nm.noPlate')}</option></select></label></div>` : ''}
         <p class="fpick-label">${t('fo.choose')}${it.folder ? '' : ` <em class="req">${t('fo.required')}</em>`}</p>
         ${folderPicker(it.folder, it.aiFolder, 'up', i)}
         ${it.folder === 'docs' || it.folder === 'policy' ? `<div class="up-extra">
@@ -846,9 +899,8 @@ async function doUpload(btn) {
       if (compressible(blob)) { btn.textContent = t('u.compressing'); blob = await compressImage(blob); }
       if (blob.size > MAX) { toast(t('u.tooBig', { x: it.name, n: MAX_UPLOAD_MB }), 'err'); continue; }
       btn.textContent = t('u.saving');
-      let name = it.name.trim() || it.file.name;
-      if (blob !== it.file && blob.type === 'image/jpeg') name = name.replace(/\.(png|webp|heic|heif|jpe?g)$/i, '') + '.jpg';
-      const meta = { name, customerId: u.cid, folder: it.folder, type: it.type || typeFor(it.folder), expiry: it.folder === 'policy' ? it.expiry || '' : '', note: it.n ? fileNote(it.n, it.folder) : '' };
+      const name = saveName(it.name, it.file, blob);
+      const meta = { name, orig: it.file.name, customerId: u.cid, folder: it.folder, type: it.type || typeFor(it.folder), expiry: it.folder === 'policy' ? it.expiry || '' : '', note: it.n ? fileNote(it.n, it.folder) : '' };
       const thumb = await makeThumb(blob);
       if (S.store.kind === 'local') meta.thumb = thumb;
       const bar = $(`.up-row[data-i="${i}"] .prog i`);
@@ -914,6 +966,7 @@ function readingSheet() {
   sheetClose = () => { R = null; };
 }
 function reviewSheet() {
+  reviewNames(R.v);
   const lowCount = Object.values(R.n?.conf || {}).filter(c => c < 0.85).length;
   sheet({ title: t('rv.title'), sub: R.n ? t('rv.sub', { x: t('dt.' + R.n.docType) }) : t('rv.subManual'), cls: 'xwide',
     body: `<div class="rv">
@@ -921,7 +974,8 @@ function reviewSheet() {
       <form class="form" data-form="review" id="rvform" novalidate>
         ${R.n ? `<p class="note ${lowCount ? 'warn' : ''}">${icon(lowCount ? 'alert' : 'check', 15)}<span>${lowCount ? t('rv.check', { n: lowCount }) : t('rv.allGood')} ${t('rv.never')}${R.model ? ` <small class="muted" dir="ltr">(${esc(R.model)})</small>` : ''}</span></p>` : ''}
         ${fieldGroups(R.v, { errors: R.errors, warnings: R.warnings, conf: R.n?.conf, notes: R.n?.notes })}
-        <fieldset class="fgroup"><legend>${t('rv.saveTo')}</legend>${folderPicker(R.folder, R.aiFolder, 'rv')}</fieldset>${datalists()}
+        <fieldset class="fgroup"><legend>${t('rv.saveTo')}</legend>${folderPicker(R.folder, R.aiFolder, 'rv')}</fieldset>
+        <fieldset class="fgroup"><legend>${t('nm.files')}</legend>${R.files.map((f, i) => `<label class="fld"><span class="fl">${esc(f.name)}</span><input data-rn="${i}" value="${esc(R.names[i] || '')}" maxlength="200" autocomplete="off"></label>`).join('')}<p class="hint">${icon('edit', 13)} ${t('nm.auto')}</p></fieldset>${datalists()}
       </form></div>`,
     foot: `<span class="sp"></span><button type="button" class="btn ghost" data-act="close-sheet">${t('btn.cancel')}</button><button class="btn primary" type="submit" form="rvform">${icon('check', 18)}<span>${t('rv.confirm')}</span></button>` });
   sheetClose = () => { R = null; };
@@ -945,6 +999,7 @@ function dupSheet(d) {
 }
 async function createFromReview() {
   const v = R.v, r = R;
+  reviewNames(v);
   if (!v.car && (v.brand || v.model)) v.car = [v.brand, v.model, v.color].filter(Boolean).join(' ');
   for (const b of $$('.sh-actions .btn')) b.disabled = true;
   const c = await S.store.saveCustomer({ ...v });
@@ -955,12 +1010,11 @@ async function createFromReview() {
   openCustomer(c.id);
 }
 async function uploadSources(r, cid) {
-  for (const f of r.files) {
+  for (const [i, f] of r.files.entries()) {
     const blob = compressible(f) ? await compressImage(f) : f;
     if (blob.size > MAX) { toast(t('u.tooBig', { x: f.name, n: MAX_UPLOAD_MB }), 'err'); continue; }
-    let name = f.name;
-    if (blob !== f && blob.type === 'image/jpeg') name = name.replace(/\.(png|webp|heic|heif|jpe?g)$/i, '') + '.jpg';
-    const meta = { name, customerId: cid, folder: r.folder, type: typeFor(r.folder, r.n?.docType), expiry: r.folder === 'policy' ? r.v.policyExpiry || '' : '', note: r.n ? fileNote({ ...r.n, values: r.v }, r.folder) : '' };
+    const name = saveName(r.names?.[i] || f.name, f, blob);
+    const meta = { name, orig: f.name, customerId: cid, folder: r.folder, type: typeFor(r.folder, r.n?.docType), expiry: r.folder === 'policy' ? r.v.policyExpiry || '' : '', note: r.n ? fileNote({ ...r.n, values: r.v }, r.folder) : '' };
     const thumb = await makeThumb(blob);
     if (S.store.kind === 'local') meta.thumb = thumb;
     const x = await S.store.addFile(blob, meta);
@@ -986,6 +1040,8 @@ async function dupApply(id, btn) {
   const chk = checkCustomer({ ...c, ...upd });
   if (Object.keys(chk.errors).length) { btn.disabled = false; return toast(t('diff.invalid'), 'err'); }
   if (Object.keys(upd).length > 2) await S.store.saveCustomer(upd);
+  // file names for the existing customer (nickname), with the plate and dates of this document
+  reviewNames({ ...c, ...upd, plate: r.v.plate || c.plate, province: r.v.plate ? r.v.province : c.province, contractDate: r.v.contractDate || c.contractDate, policyStart: r.v.policyStart || c.policyStart });
   await uploadSources(r, c.id);
   sheetClose = null; R = null; closeSheet();
   await reload(); toast(t('t.customerUpdated'));
@@ -1003,7 +1059,7 @@ async function openFile(id) {
   const inv = f.invoice ? S.invoices.find(i => i.id === f.id) : null;
   sheet({ title: esc(f.name), sub: `${esc(c.name)} · ${fmtSize(f.size)} · ${fmtDay(f.createdAt)}${by}`, cls: 'wide',
     body: `<div class="preview" id="preview"><div class="spin"></div></div>
-    <p class="in-folder">${t('fo.in')}: <b>${FOLDER[f.folder] ? iso(FOLDER[f.folder].th) : 'ไม่ระบุ · ' + t('fo.other')}</b></p>
+    <p class="in-folder">${t('fo.in')}: <b>${FOLDER[f.folder] ? iso(FOLDER[f.folder].th) : 'ไม่ระบุ · ' + t('fo.other')}</b><span id="shState" ${f.shared ? '' : 'style="display:none"'}> · ${icon('link', 13)} ${t('sh.on')}</span></p>
     ${canEdit() && !inv ? `<details class="move" ${FOLDER[f.folder] ? '' : 'open'}><summary>${icon('move', 16)}${t('fo.move')}</summary>${folderPicker(f.folder, null, 'move')}<p class="muted">${t('fo.moveNote')}</p></details>` : ''}
     ${inv ? `<button class="btn ghost block" data-act="open-invoice" data-id="${esc(inv.id)}">${icon('invoice', 18)}<span>${t('inv.open')}</span></button>` : `
     <form class="form" data-form="file" id="fform" data-id="${esc(f.id)}">
@@ -1016,6 +1072,8 @@ async function openFile(id) {
     </form>`}`,
     foot: `<button type="button" class="icon-btn danger" data-act="del-file" data-need="edit" data-id="${esc(f.id)}" title="${t('btn.delete')}">${icon('trash', 17)}</button>
       <button type="button" class="icon-btn" data-act="dl-file" title="${t('fl.download')}">${icon('download', 17)}</button>
+      ${S.store.kind === 'cloud' && canEdit() ? `<button type="button" class="btn ghost sm sh-btn" data-act="share-link" title="${t('sh.copy')}" aria-label="${t('sh.copy')}">${icon('link', 16)}<span>${t('sh.copy')}</span></button>
+      <button type="button" class="btn ghost sm sh-btn" data-act="share-stop" id="shStop" title="${t('sh.stop')}" aria-label="${t('sh.stop')}" ${f.shared ? '' : 'style="display:none"'}>${icon('unlink', 16)}<span>${t('sh.stop')}</span></button>` : ''}
       ${navigator.share ? `<button type="button" class="icon-btn" data-act="share-file" title="${t('fl.share')}">${icon('share', 17)}</button>` : ''}
       <span class="sp"></span>${inv ? '' : `<button class="btn primary" type="submit" form="fform" data-need="edit">${t('fl.saveChanges')}</button>`}` });
   let blob;
@@ -1038,6 +1096,48 @@ async function moveCur(slot) {
 function download(blob, name) {
   const a = document.createElement('a'); a.href = objUrl(blob); a.download = name; document.body.append(a); a.click(); a.remove();
 }
+/* ---------- share ONE file by link (v3.2) ---------- */
+/**
+ * The backend makes only this file "anyone with the link: viewer". The copy is started inside the tap
+ * (ClipboardItem with a promise), so it also works on iPhone; the link is only copied once sharing worked.
+ */
+async function shareLink(f) {
+  const p = S.store.shareFile(f.id).then(r => r.link);
+  let copied = false;
+  if (window.ClipboardItem && navigator.clipboard?.write) {
+    try { await navigator.clipboard.write([new ClipboardItem({ 'text/plain': p.then(l => new Blob([l], { type: 'text/plain' })) })]); copied = true; } catch { }
+  }
+  const link = await p;   // a failed share throws here (the error is shown); nothing that does not work was copied
+  if (!copied) try { await navigator.clipboard.writeText(link); copied = true; } catch { }
+  markShared(f.id, true);
+  if (copied) toast(t('sh.copied'));
+  else linkSheet(link);
+}
+function linkSheet(link) {
+  sheet({ title: t('sh.title'), cls: 'small', body: `<p class="sh-text">${t('sh.manual')}</p><div class="form"><label class="fld"><input id="shLink" value="${esc(link)}" readonly dir="ltr"></label></div><p class="muted">${t('sh.note')}</p>`,
+    foot: `<span class="sp"></span><button class="btn ghost" data-act="close-sheet">${t('btn.close')}</button><button class="btn primary" data-act="copy-link">${icon('link', 17)}<span>${t('sh.copyBtn')}</span></button>` });
+}
+async function copyLink() {
+  const el = $('#shLink'); if (!el) return;
+  try { await navigator.clipboard.writeText(el.value); }
+  catch { el.select(); document.execCommand?.('copy'); }
+  toast(t('sh.copied'));
+}
+async function stopShare(f) {
+  const x = await S.store.unshareFile(f.id);
+  markShared(f.id, !!x?.shared);
+  toast(t('sh.stopped'));
+}
+/** Updates the file window and the tiles without loading everything again */
+function markShared(id, on) {
+  const f = S.files.find(x => x.id === id); if (f) f.shared = on;
+  if (cur?.f.id === id) { const a = $('#shStop'), b = $('#shState'); if (a) a.style.display = on ? '' : 'none'; if (b) b.style.display = on ? '' : 'none'; }
+  for (const tb of $$(`.tile[data-id="${CSS.escape(id)}"] .thumb`)) {
+    tb.querySelector('.link-flag')?.remove();
+    if (on) tb.insertAdjacentHTML('beforeend', linkFlag());
+  }
+}
+
 async function shareBlob(blob, name) {
   const file = new File([blob], name, { type: blob.type });
   try {
@@ -1242,6 +1342,87 @@ async function migRun(dry, btn) {
   if (!dry) reload().catch(() => { });
 }
 
+/* ---------- rename existing files (admin, v3.2): list first, then Apply; Undo puts the old names back ---------- */
+let RN = null;
+function renamePlan() {
+  const key = f => f.customerId + '|' + (f.folder || '');
+  const taken = {};
+  for (const f of S.files) (taken[key(f)] ||= new Set()).add(f.name);
+  const rows = [];
+  // oldest first: the first file keeps the plain name, later ones get " (2)", " (3)"…
+  for (const f of [...S.files].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))) {
+    if (f.invoice) continue;   // invoices keep their number as name
+    const c = cust(f.customerId); if (!c) continue;
+    const want = buildName({ plate: plateFromName(f.name) || plateOnly(c.plate, c.province), customer: c,
+      month: monthOf(c.contractDate, c.policyStart, String(f.at || f.createdAt || '').slice(0, 10)), doc: docNameFromOld(f.name, f.folder, f.type), ext: extOf(f.name) });
+    const set = taken[key(f)];
+    set.delete(f.name);
+    const name = uniqueIn(want, set);   // preview only; the backend checks again
+    set.add(name);
+    if (name !== f.name) rows.push({ id: f.id, cid: c.id, old: f.name, name, on: true });
+  }
+  return rows;
+}
+function renameSheet() {
+  RN ||= { rows: renamePlan() };
+  const rows = RN.rows, n = rows.filter(r => r.on).length;
+  const groups = [];
+  for (const [i, r] of rows.entries()) { let g = groups.find(x => x.cid === r.cid); if (!g) groups.push(g = { cid: r.cid, items: [] }); g.items.push(i); }
+  sheet({ title: t('rn.title'), sub: t('rn.sub'), cls: 'wide', body: `<p class="note">${icon('info', 15)}<span>${t('rn.explain')}</span></p>
+    ${rows.length ? `<div class="rn-bar"><b>${t('rn.count', { n: rows.length })}</b><span class="sp"></span><button type="button" class="link" data-act="rn-all" data-on="1">${t('rn.all')}</button><button type="button" class="link" data-act="rn-all" data-on="">${t('rn.none')}</button></div>
+    <div class="rn-list">${groups.map(g => `<details ${groups.length <= 15 ? 'open' : ''}><summary>${esc(cust(g.cid)?.name || '—')} <em class="cnt">${num(g.items.length)}</em></summary>
+      ${g.items.map(i => `<div class="rn-row"><input type="checkbox" data-rn-on="${i}" ${rows[i].on ? 'checked' : ''} aria-label="${esc(rows[i].old)}">
+        <div class="rn-main"><s>${esc(rows[i].old)}</s><input data-rn-name="${i}" value="${esc(rows[i].name)}" maxlength="200" autocomplete="off" aria-label="${t('u.fileName')}"></div></div>`).join('')}</details>`).join('')}</div>`
+    : `<p class="sh-text">${t('rn.nothing')}</p>`}`,
+    foot: `<button type="button" class="btn danger-ghost" data-act="rn-undo">${icon('history', 17)}<span>${t('rn.undo')}</span></button><span class="sp"></span>
+      <button type="button" class="btn ghost" data-act="close-sheet">${t('btn.cancel')}</button>${rows.length ? `<button type="button" class="btn primary" data-act="rn-apply" id="rnGo">${t('rn.apply', { n })}</button>` : ''}` });
+  sheetClose = () => { RN = null; };
+}
+const rnCount = () => { const b = $('#rnGo'); if (b && RN) b.textContent = t('rn.apply', { n: RN.rows.filter(r => r.on).length }); };
+function rnReport(lines) {
+  sheet({ title: t('rn.title'), sub: t('rn.report'), cls: 'small', body: lines.filter(Boolean).map(l => `<p class="sh-text">${l}</p>`).join('') + `<p class="muted">${t('rn.safe')}</p>`,
+    foot: `<button type="button" class="btn danger-ghost" data-act="rn-undo">${icon('history', 17)}<span>${t('rn.undo')}</span></button><span class="sp"></span><button class="btn primary" data-act="close-sheet">${t('btn.close')}</button>` });
+}
+async function renameApply() {
+  const rows = RN?.rows.filter(r => r.on && r.name.trim() && r.name !== r.old) || [];
+  if (!rows.length) return toast(t('rn.pick'), 'err');
+  const keep = RN;
+  if (!await confirmBox(t('rn.confirm', { n: rows.length }), t('rn.apply', { n: rows.length }), false)) { RN = keep; return renameSheet(); }
+  RN = null;
+  const batch = 'rn' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const queue = rows.map(r => ({ id: r.id, name: r.name.trim() }));
+  let ok = 0, same = 0, bad = 0, sent = 0, tries = 0, failed = null;
+  sheet({ title: t('rn.title'), cls: 'small', body: `<p class="as-tip" id="rnProg"><span class="spin sm"></span>${t('rn.working', { a: 0, b: rows.length })}</p>` });
+  try {
+    while (queue.length && tries++ < rows.length + 20) {
+      const chunk = queue.splice(0, 40);
+      const r = await S.store.renameFiles(batch, chunk);
+      for (const x of r.rows) {
+        if (x.status === 'later') { queue.push(chunk.find(c => c.id === x.id)); continue; }
+        sent++;
+        if (x.status === 'ok') ok++; else if (x.status === 'same') same++; else bad++;
+      }
+      const pg = $('#rnProg'); if (pg) pg.innerHTML = `<span class="spin sm"></span>${t('rn.working', { a: sent, b: rows.length })}`;
+    }
+  } catch (e) { failed = e; }
+  await reload().catch(() => { });
+  rnReport([t('rn.done', { n: ok }), same ? t('rn.same', { n: same }) : '', bad + queue.length ? t('rn.err', { n: bad + queue.length }) : '']);
+  if (failed) throw failed;
+}
+async function renameUndo() {
+  if (!await confirmBox(t('rn.undoQ'), t('rn.undo'), false)) return;
+  RN = null;
+  sheet({ title: t('rn.undo'), cls: 'small', body: `<p class="as-tip"><span class="spin sm"></span>${t('rn.undoing')}</p>` });
+  let done = 0, skipped = 0, r, guard = 0;
+  try {
+    do { r = await S.store.renameUndo(); done += r.done; skipped += r.skipped; } while (r.more && (r.done || r.skipped) && guard++ < 50);
+  } finally {
+    await reload().catch(() => { });
+    sheet({ title: t('rn.undo'), sub: t('rn.report'), cls: 'small', body: `<p class="sh-text">${done || skipped ? t('rn.undone', { n: done }) : t('rn.undoNone')}</p>${skipped ? `<p class="sh-text">${t('rn.undoSkip', { n: skipped })}</p>` : ''}`,
+      foot: `<span class="sp"></span><button class="btn primary" data-act="close-sheet">${t('btn.close')}</button>` });
+  }
+}
+
 /* ---------- assistant ---------- */
 function assistantSheet() {
   const first = S.customers[0]?.name;
@@ -1280,6 +1461,7 @@ function settingsSheet() {
       </div>` : ''}
       ${S.store ? card('invoice', t('co.title'), isAdmin() ? t('co.sub') : t('co.subRo'), `<span class="sp"></span><button class="btn ghost" data-act="company">${icon('edit', 17)}<span>${t('co.title')}</span></button>`) : ''}
       ${signedIn && isAdmin() ? card('folder', t('mig.title'), t('mig.sub'), `<span class="sp"></span><button class="btn ghost" data-act="migrate">${icon('folder', 17)}<span>${t('mig.dry')}</span></button>`) : ''}
+      ${S.store && isAdmin() && (signedIn || !cloud) ? card('edit', t('rn.title'), t('rn.sub'), `<span class="sp"></span><button class="btn ghost" data-act="rename">${icon('edit', 17)}<span>${t('rn.open')}</span></button>`) : ''}
       ${cloud ? `<div class="set-card"><div class="set-h">${icon('wand', 22)}<div><b>${t('ai.status')}</b><small>${S.store?.aiReady ? t('ai.on') : t('ai.off')}</small></div><span class="sp"></span><em class="st-badge ${S.store?.aiReady ? 'ok' : 'off'}">${S.store?.aiReady ? t('ai.ready') : t('ai.notSet')}</em></div></div>` : ''}
       <div class="set-card ${!cloud ? 'on' : ''}">
         <div class="set-h">${icon('folder', 22)}<div><b>${t('set.demo')}</b><small>${t('set.local.text')}</small></div></div>
@@ -1322,7 +1504,7 @@ function changeLang(l) {
 const uploadTarget = () => S.view === 'dash' ? S.sel : S.filters.customer || '';
 
 /* ================= actions ================= */
-const EDIT_ACTS = new Set(['upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
+const EDIT_ACTS = new Set(['share-link', 'share-stop', 'upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
 const ACT = {
   go(el) { S.view = el.dataset.view; S.mobileDetail = false; closeSheet(); mount(); scrollTo({ top: 0, behavior: 'smooth' }); },
   'close-sheet': closeSheet,
@@ -1333,6 +1515,13 @@ const ACT = {
   team: teamSheet,
   company: companySheet,
   migrate: migrateSheet,
+  rename() { if (!isAdmin()) return toast(t('err.role'), 'err'); RN = null; renameSheet(); },
+  'rn-all'(el) { if (!RN) return; for (const r of RN.rows) r.on = !!el.dataset.on; for (const c of $$('[data-rn-on]')) c.checked = !!el.dataset.on; rnCount(); },
+  'rn-apply'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return renameApply(); },
+  'rn-undo'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return renameUndo(); },
+  'share-link'() { if (cur?.f && S.store.kind === 'cloud') return shareLink(cur.f); },
+  'share-stop'() { if (cur?.f && S.store.kind === 'cloud') return stopShare(cur.f); },
+  'copy-link': copyLink,
   async 'mig-run'(el) {
     if (el.dataset.dry) return migRun(true, el);
     if (!await confirmBox(t('mig.confirm'), t('mig.run'), false)) return migrateSheet();
@@ -1393,8 +1582,8 @@ const ACT = {
   'do-upload': doUpload,
   'pick-folder'(el) {
     const slot = el.dataset.folder, name = el.dataset.name;
-    if (name === 'up' && U) { const it = U.items[+el.dataset.i]; it.folder = slot; it.picked = true; it.type = typeFor(slot, it.n?.docType); if (slot === 'policy' && !it.expiry && it.n?.values.policyExpiry) it.expiry = it.n.values.policyExpiry; drawUpload(); }
-    else if (name === 'rv' && R) { R.v = { ...R.v, ...readForm($('#rvform'), ALL_FIELDS) }; R.folder = slot; for (const b of $$('[data-name="rv"]')) { b.classList.toggle('on', b.dataset.folder === slot); b.setAttribute('aria-checked', b.dataset.folder === slot); } }
+    if (name === 'up' && U) { const it = U.items[+el.dataset.i]; it.folder = slot; it.picked = true; it.type = typeFor(slot, it.n?.docType); if (slot === 'policy' && !it.expiry && it.n?.values.policyExpiry) it.expiry = it.n.values.policyExpiry; autoName(it); drawUpload(); }
+    else if (name === 'rv' && R) { R.v = { ...R.v, ...readForm($('#rvform'), ALL_FIELDS) }; R.folder = slot; for (const b of $$('[data-name="rv"]')) { b.classList.toggle('on', b.dataset.folder === slot); b.setAttribute('aria-checked', b.dataset.folder === slot); } refreshReviewNames(); }
     else if (name === 'move') return moveCur(slot);
   },
   'ai-new'(el) {
@@ -1529,9 +1718,15 @@ document.addEventListener('input', e => {
     if (el.dataset.f === 'q') { clearTimeout(qT); qT = setTimeout(() => { drawFilters(); drawResults(false); }, 120); }
     else { drawFilters(true); drawResults(true); }
   }
-  else if (el.dataset.u && U) { const it = U.items[+el.closest('.up-row').dataset.i]; it[el.dataset.u] = el.value; }
+  else if (el.dataset.u && U) {
+    const it = U.items[+el.closest('.up-row').dataset.i]; it[el.dataset.u] = el.value;
+    if (el.dataset.u === 'name') it.nameEdited = true;
+    if (el.dataset.u === 'plate') { it.plateSet = true; autoName(it); drawUpload(); }
+  }
+  else if (el.dataset.rn && R) { R.names[+el.dataset.rn] = el.value; R.namesEdited[+el.dataset.rn] = true; }
+  else if (el.dataset.rnName && RN) { RN.rows[+el.dataset.rnName].name = el.value; }
   else if (el.dataset.diff && U) { U.toggles[el.dataset.diff] = el.checked; drawUpload(); }
-  else if (el.dataset.r && R && el.closest('#rvform')) { R.v[el.dataset.r] = el.value; el.closest('.fld')?.classList.remove('ai-lo', 'ai-mid', 'has-err'); }
+  else if (el.dataset.r && R && el.closest('#rvform')) { R.v[el.dataset.r] = el.value; el.closest('.fld')?.classList.remove('ai-lo', 'ai-mid', 'has-err'); refreshReviewNames(); }
   else if (el.dataset.i && I) {
     const p = el.dataset.i;
     setPath(I.d, p, el.type === 'checkbox' ? el.checked : el.value);
@@ -1546,6 +1741,7 @@ document.addEventListener('change', e => {
   const el = e.target;
   if (el.type !== 'checkbox') return;
   if (el.dataset.diff && U) { U.toggles[el.dataset.diff] = el.checked; drawUpload(); }
+  if (el.dataset.rnOn && RN) { RN.rows[+el.dataset.rnOn].on = el.checked; rnCount(); }
   if (el.dataset.i === 'vat' && I) { I.d.vat = el.checked; $('#invTot').innerHTML = invTotalsHtml(); }
 });
 

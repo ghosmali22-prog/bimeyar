@@ -65,6 +65,17 @@ phone, tax ID, bank details, footer note, and the invoice number prefix (`RI` �
   script owner (ghosmali22@gmail.com) when there are policies expiring in the next 30 days.
 - Turn **off**: run **`disableDailyDigest`**.
 
+## v3.2 update (file names, rename tool, share link)
+
+Only steps 1 (paste `Code.gs`; `appsscript.json` did not change) and 4 (✏️ → **New version**, description `v3.2.0`).
+No new permission, no `setup` run, no Script property to add. After deploying:
+
+1. Upload a test file: the name is `{plate} - {customer}({month}) - {document}.pdf`; the same file again gets ` (2)`.
+2. Open a file → **Copy share link** → open the link in a private window: only that file is visible. → **Stop sharing**.
+3. Settings → **Rename files** (admin): check the list first. **Undo last rename** puts the old names back.
+
+Roll back: Deploy → Manage deployments → ✏️ → choose the previous version → Deploy.
+
 ## AI usage log
 
 Every AI **attempt** is logged without any customer data (time, model, status such as `ok` / `http503` /
