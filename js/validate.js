@@ -76,7 +76,7 @@ export function checkCustomer(c) {
     const digits = latinDigits(c.idNo).replace(/[\s-]/g, '');
     if (/^\d{13}$/.test(digits) && !thaiId(digits)) errors.idNo = 'v.idSum';
   }
-  for (const k of ['dob', 'policyStart', 'policyExpiry']) if (c[k] && !/^\d{4}-\d{2}-\d{2}$/.test(c[k])) errors[k] = 'v.date';
+  for (const k of ['dob', 'policyStart', 'policyExpiry', 'contractDate']) if (c[k] && !/^\d{4}-\d{2}-\d{2}$/.test(c[k])) errors[k] = 'v.date';
   if (c.policyStart && c.policyExpiry && c.policyExpiry <= c.policyStart) errors.policyExpiry = 'v.order';
   if (c.year && !/^\d{4}$/.test(c.year)) warnings.year = 'v.year';
   return { errors, warnings };

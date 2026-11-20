@@ -65,7 +65,37 @@ phone, tax ID, bank details, footer note, and the invoice number prefix (`RI` �
   script owner (ghosmali22@gmail.com) when there are policies expiring in the next 30 days.
 - Turn **off**: run **`disableDailyDigest`**.
 
+## v3.2 update (file names, rename tool, share link)
+
+Only steps 1 (paste `Code.gs`; `appsscript.json` did not change) and 4 (✏️ → **New version**, description `v3.2.0`).
+No new permission, no `setup` run, no Script property to add. After deploying:
+
+1. Upload a test file: the name is `{plate} - {customer}({month}) - {document}.pdf`; the same file again gets ` (2)`.
+2. Open a file → **Copy share link** → open the link in a private window: only that file is visible. → **Stop sharing**.
+3. Settings → **Rename files** (admin): check the list first. **Undo last rename** puts the old names back.
+
+Roll back: Deploy → Manage deployments → ✏️ → choose the previous version → Deploy.
+
 ## AI usage log
 
-Every AI call is logged without any customer data (time, duration, size, tokens, result) in the Script property
-`AI_LOG` (last 200 calls) and in Apps Script → Executions.
+Every AI **attempt** is logged without any customer data (time, model, status such as `ok` / `http503` /
+`timeout`, ms, size, tokens, try number) in the Script property `AI_LOG` (newest entries, trimmed to fit 9 KB)
+and in Apps Script → Executions.
+
+## When Google AI is busy (503 / 429)
+
+`aiExtract` retries automatically (2 s, 5 s, … with jitter, up to 3 tries per model) and then falls back to the
+next model in `AI_MODELS` (`gemini-3.1-flash-lite` → `gemini-3.8-flash` → `gemini-3.6-flash`). A slow failure
+(over 20 s) switches model at once.
+
+Time limits: a busy Google can take minutes for one request and Apps Script cannot stop a request half-way, so new
+attempts only start in the first 45 s; the app waits 240 s and shows the elapsed time and "this can take up to
+3 minutes". When nothing works the app shows "Google AI is busy right now" with **Try again** and
+**Fill in by hand** (the chosen photos are kept).
+
+Results are kept 10 minutes in the script cache (CacheService), keyed by a hash of the files. If the app gave up
+waiting but Google answered later, **Try again** returns that result at once (`AI_LOG` status `cache`). If the first
+request is still running, the second one waits for it (`joined`) instead of asking Google again.
+
+To see which models answer right now: in the editor choose **`aiModelsCheck`** → Run. It sends one test sentence
+(no customer data) to each model and prints the status and time in the log.

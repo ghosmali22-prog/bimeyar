@@ -6,12 +6,12 @@ import { toIsoDate, thaiPhone, thaiId, money, latinDigits, beToCe } from './vali
 
 /** Customer fields, grouped for the forms. */
 export const FIELD_GROUPS = {
-  customer: ['name', 'nameEn', 'phone', 'idNo', 'dob', 'address'],
+  customer: ['name', 'nick', 'nameEn', 'phone', 'idNo', 'dob', 'address'],
   vehicle: ['brand', 'model', 'year', 'color', 'plate', 'province', 'vin', 'engineNo'],
-  policy: ['insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'policyStart', 'policyExpiry'],
+  policy: ['insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'contractDate', 'policyStart', 'policyExpiry'],
 };
 export const ALL_FIELDS = [...FIELD_GROUPS.customer, ...FIELD_GROUPS.vehicle, ...FIELD_GROUPS.policy];
-export const DATE_FIELDS = new Set(['dob', 'policyStart', 'policyExpiry']);
+export const DATE_FIELDS = new Set(['dob', 'contractDate', 'policyStart', 'policyExpiry']);
 
 /** Which customer fields a document type may change */
 const UPDATES = {
@@ -37,7 +37,8 @@ export async function prepare(files) {
   for (const f of files) {
     const isImg = /^image\/(jpeg|png|webp|heic|heif)$/i.test(f.type), isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
     if (!isImg && !isPdf) continue;
-    const blob = isImg ? await compressImage(f, 2000, 0.8) : f;
+    // AI copy only (the saved file is compressed separately): long side 1600 px, JPEG 0.8, so 2 photos stay well under 1 MB
+    const blob = isImg ? await compressImage(f, 1600, 0.8, 300 * 1024) : f;
     total += blob.size;
     if (total > MAX_AI_MB * 1048576) throw Object.assign(new Error('ai.tooBig'), { key: 'ai.tooBig' });
     out.push({ mime: isPdf ? 'application/pdf' : (blob.type || 'image/jpeg').toLowerCase(), data: await b64(blob) });
@@ -63,14 +64,14 @@ export function normalize(r) {
   for (const k of ['address', 'brand', 'model', 'color', 'plate', 'province', 'vin', 'engineNo', 'insurer', 'policyNo', 'policyType']) { [v, c] = get(k); put(k, latinDigits(v), c); }
   [v, c] = get('year'); if (v) { const y = +(latinDigits(v).match(/\d{4}/) || [])[0]; put('year', y ? String(beToCe(y)) : v, c, y ? '' : 'v.year'); }
   for (const k of ['coverage', 'premium']) { [v, c] = get(k); if (v) { const m = money(v); put(k, m != null ? String(m) : v, c, m != null ? '' : 'v.money'); } }
-  for (const k of ['dob', 'policyStart', 'policyExpiry']) { [v, c] = get(k); if (v) { const d = toIsoDate(v); if (d) put(k, d, c); else notes[k] = 'v.date'; } }
+  for (const k of ['dob', 'contractDate', 'policyStart', 'policyExpiry']) { [v, c] = get(k); if (v) { const d = toIsoDate(v); if (d) put(k, d, c); else notes[k] = 'v.date'; } }
   if (values.policyStart && values.policyExpiry && values.policyExpiry <= values.policyStart) { conf.policyExpiry = Math.min(conf.policyExpiry, 0.4); notes.policyExpiry = 'v.order'; }
 
   const receipt = {};
   [v, c] = get('receiptAmount'); if (v) receipt.amount = money(v);
   [v, c] = get('receiptDate'); if (v) receipt.date = toIsoDate(v);
   [v, c] = get('payer'); if (v) receipt.payer = v;
-  return { docType: r?.docType || 'other', values, conf, notes, receipt };
+  return { docType: r?.docType || 'other', docName: String(r?.docName || '').trim(), values, conf, notes, receipt };
 }
 
 /** Folder the AI suggests for this document (the user always confirms). null = no suggestion. */

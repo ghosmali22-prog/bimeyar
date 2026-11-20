@@ -18,6 +18,7 @@
  *   COMPANY         company info for invoices (set from the app, admin only)
  *   INV_SEQ         last invoice number per year (set automatically, under a lock)
  *   AI_LOG          last 200 AI calls: time, ms, size, tokens, result. No customer data.
+ *   RENAME_LAST     id of the last batch of the "Rename files" tool, for "Undo last rename" (admin)
  */
 
 // Web OAuth Client ID used by the frontend's "Sign in with Google" (public, not a secret).
@@ -42,8 +43,34 @@ const SUBFOLDERS = [
 ];
 const SLOTS = SUBFOLDERS.map(s => s.slot);
 
-/** Gemini model used for reading documents. Change here only. */
-const GEMINI_MODEL = 'gemini-3.8-flash';
+/**
+ * Gemini models for reading documents, tried in this order (change here only).
+ * think = generationConfig.thinkingConfig.thinkingLevel: the lowest level each model accepts
+ * (gemini-3.8-flash has no 'minimal'; the Flash-Lite models do). Low thinking = faster extraction.
+ */
+const AI_MODELS = [
+  { id: 'gemini-3.1-flash-lite', think: 'minimal' },   // first: fast and available when the bigger models are busy
+  { id: 'gemini-3.8-flash', think: 'low' },
+  { id: 'gemini-3.6-flash', think: 'minimal' },
+];
+const GEMINI_MODEL = AI_MODELS[0].id;   // kept for older code and the setup log
+/** Retries per model on 429/500/503/504/timeout, and the wait before each retry (plus random jitter). */
+const AI_TRIES_PER_MODEL = 3;
+const AI_BACKOFF_MS = [2000, 5000, 10000];
+/**
+ * Time limits for one aiExtract call. The app waits 240 s; Apps Script allows 6 min.
+ * UrlFetchApp has no per-request timeout and one busy request already took 175 s, so a new attempt only starts
+ * while at least AI_MIN_LEFT_MS of AI_BUDGET_MS is left, i.e. in the first 45 s: even a 180 s request then ends
+ * by ~225 s. A result that still arrives after the app gave up is kept in the cache (AI_CACHE_S), so "Try again"
+ * returns it at once. An attempt that failed slowly (AI_SLOW_MS) switches to the next model.
+ */
+const AI_BUDGET_MS = 200000;
+const AI_MIN_LEFT_MS = 155000;
+const AI_SLOW_MS = 20000;
+/** Successful results are kept 10 minutes in CacheService, keyed by a SHA-256 of the files (never logged). */
+const AI_CACHE_S = 600;
+/** While a request for the same files is still running, a second request waits for it (polls) up to this long. */
+const AI_JOIN_MS = 200000;
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/';
 const AI_MAX_BYTES = 18 * 1024 * 1024;
 
@@ -54,6 +81,7 @@ const CFIELDS = {
   brand: 40, model: 60, year: 4, color: 30, province: 60, vin: 40, engineNo: 40,
   insurer: 80, policyNo: 60, policyType: 60, coverage: 20, premium: 20,
   policyStart: 'date', policyExpiry: 'date', note: 500,
+  nick: 40, contractDate: 'date',                                       // v3.2: nickname for file names, contract date (วันทำสัญญาประกันภัย)
 };
 
 /* ============================ entry points ============================ */
@@ -170,7 +198,9 @@ const ACTIONS = {
       if (!req.data) throw err('bad_request', 'No file data');
       const bytes = Utilities.base64Decode(req.data);
       if (bytes.length > MAX_BYTES) throw err('too_big', 'File is larger than 25 MB');
-      const name = clean(m.name, 200) || 'file';
+      const orig = clean(m.orig, 200);   // v3.2: the original file name, kept in the description
+      let name = fileName(m.name) || fileName(orig) || 'file';
+      if (!extOf(name) && extOf(orig)) name = fileName(name + extOf(orig));
       const mime = clean(m.mime, 120) || 'application/octet-stream';
       // New in v3: a sub-folder slot. Without one (old clients) the file goes into the customer folder, as before.
       let parent = m.customerId;
@@ -178,15 +208,16 @@ const ACTIONS = {
         if (SLOTS.indexOf(m.folder) < 0) throw err('bad_request', 'Unknown folder');
         parent = ensureSubs(m.customerId, false).folders[m.folder];
       }
+      name = uniqueName(name, siblingNames(parent));   // never the same name twice in a folder: " (2)", " (3)"…
       const blob = Utilities.newBlob(bytes, mime, name);
-      const f = Drive.Files.create({
-        name, mimeType: mime, parents: [parent], description: clean(m.note, 2000),
+      const f0 = Drive.Files.create({
+        name, mimeType: mime, parents: [parent], description: descJoin(clean(m.note, 2000), orig ? [ORIG + orig] : []),
         appProperties: {
           bimeyar: 'item', kind: 'file', type: type(m.type), expiry: date(m.expiry),
           by: user.email.slice(0, 100), at: new Date().toISOString(),
         },
       }, blob, { fields: FIELDS });
-      return toFile(f, m.customerId, m.folder || '');
+      return toFile(settleName(f0, parent), m.customerId, m.folder || '');
     },
   },
 
@@ -198,7 +229,10 @@ const ACTIONS = {
       const own = ownerOf(m);
       const res = { name: clean(f.name, 200) || undefined, appProperties: { type: type(f.type), expiry: date(f.expiry) } };
       // An invoice keeps its data in the description; never overwrite it with a note.
-      if (!(m.appProperties && m.appProperties.kind === 'invoice')) res.description = clean(f.note, 2000);
+      // The original-name / rename lines of the description are kept (the app shows only the note).
+      if (!(m.appProperties && m.appProperties.kind === 'invoice')) {
+        res.description = descJoin(clean(f.note, 2000), descSplit(Drive.Files.get(f.id, { fields: 'description' }).description).meta);
+      }
       return toFile(Drive.Files.update(res, f.id, null, { fields: FIELDS }), own.customer, own.slot);
     },
   },
@@ -221,6 +255,92 @@ const ACTIONS = {
   deleteFile: {
     need: 'editor',
     run: req => { assertFile(req.id); Drive.Files.update({ trashed: true }, req.id); return true; },
+  },
+
+  /* ---------- share ONE file by link (v3.2) ---------- */
+  /**
+   * Makes only this file "Anyone with the link: Viewer" and returns its link. assertFile refuses folders
+   * (customer folders, sub-folders, the Bimeyar folder) and anything outside Bimeyar, so nothing else is ever shared.
+   */
+  shareFile: {
+    need: 'editor',
+    run: req => {
+      const m = assertFile(req.id), own = ownerOf(m);
+      const perms = Drive.Permissions.list(req.id, { fields: 'permissions(id,type,role)' }).permissions || [];
+      const anyone = perms.filter(p => p.type === 'anyone');
+      if (!anyone.length) Drive.Permissions.create({ type: 'anyone', role: 'reader', allowFileDiscovery: false }, req.id);
+      anyone.forEach(p => { if (p.role !== 'reader') Drive.Permissions.update({ role: 'reader' }, req.id, p.id); });   // viewer only
+      const f = Drive.Files.update({ appProperties: { link: '1' } }, req.id, null, { fields: FIELDS + ',webViewLink' });
+      return { file: toFile(f, own.customer, own.slot), link: f.webViewLink || ('https://drive.google.com/file/d/' + req.id + '/view?usp=sharing') };
+    },
+  },
+  /** Makes the file private again: removes only the "anyone with the link" permission. */
+  unshareFile: {
+    need: 'editor',
+    run: req => {
+      const m = assertFile(req.id), own = ownerOf(m);
+      const perms = Drive.Permissions.list(req.id, { fields: 'permissions(id,type)' }).permissions || [];
+      perms.filter(p => p.type === 'anyone').forEach(p => Drive.Permissions.remove(req.id, p.id));
+      const f = Drive.Files.update({ appProperties: { link: null } }, req.id, null, { fields: FIELDS });
+      return toFile(f, own.customer, own.slot);
+    },
+  },
+
+  /* ---------- rename existing files (admin, v3.2) ---------- */
+  /**
+   * Renames the given files ONLY: no move, no delete, no content change. Invoices are never renamed.
+   * The old name is written in the description ("Renamed: old ⇒ new") and the file is tagged with the batch id,
+   * so "Undo last rename" can put the old names back. A name already used in the folder gets " (2)", " (3)"…
+   */
+  renameFiles: {
+    need: 'admin',
+    run: req => {
+      const batch = String(req.batch || '');
+      if (!/^[\w-]{6,40}$/.test(batch)) throw err('bad_request', 'Bad batch id');
+      const t0 = Date.now();
+      const rows = (Array.isArray(req.items) ? req.items : []).slice(0, 50).map(it => {
+        const id = String((it && it.id) || '');
+        if (Date.now() - t0 > 240000) return { id, status: 'later' };
+        try { return renameOne(id, it.name, batch); } catch (e) { return { id, status: 'error', msg: String(e.message || e) }; }
+      });
+      // remembered for "Undo last rename" only when something was renamed, so an empty run never hides the previous undo
+      if (rows.some(r => r.status === 'ok')) PropertiesService.getScriptProperties().setProperty('RENAME_LAST', batch);
+      return { rows };
+    },
+  },
+  /** Puts back the old names of the last rename batch. A file renamed again since then is left as it is. */
+  renameUndo: {
+    need: 'admin',
+    run: () => {
+      const batch = PropertiesService.getScriptProperties().getProperty('RENAME_LAST') || '';
+      const out = { done: 0, skipped: 0, more: false };
+      if (!/^[\w-]{6,40}$/.test(batch)) return out;
+      const list = Drive.Files.list({ q: "appProperties has { key='rnb' and value='" + batch + "' } and trashed=false", fields: 'files(id)', pageSize: 200, spaces: 'drive' }).files || [];
+      const t0 = Date.now();
+      for (const x of list) {
+        if (Date.now() - t0 > 240000) { out.more = true; break; }
+        try { assertFile(x.id); } catch (e) { continue; }
+        const f = Drive.Files.get(x.id, { fields: 'id,name,description,parents' });
+        const d = descSplit(f.description);
+        let i = d.meta.length - 1;
+        while (i >= 0 && d.meta[i].indexOf(RENAMED) !== 0) i--;
+        const s = i >= 0 ? d.meta[i].slice(RENAMED.length) : '', k = s.lastIndexOf(ARROW);
+        const oldName = k > 0 ? s.slice(0, k) : '', newName = k > 0 ? s.slice(k + ARROW.length) : '';
+        if (!oldName || newName !== f.name) {   // renamed again since: leave it as it is, only drop the batch tag
+          Drive.Files.update({ appProperties: { rnb: null } }, x.id);
+          out.skipped++;
+          continue;
+        }
+        withLock(() => {
+          d.meta.splice(i, 1);
+          const name = uniqueName(oldName, siblingNames((f.parents || [])[0], x.id));
+          Drive.Files.update({ name, description: descJoin(d.note, d.meta), appProperties: { rnb: null } }, x.id);
+        });
+        out.done++;
+      }
+      if (list.length >= 200) out.more = true;
+      return out;
+    },
   },
 
   // File content as base64 (files are private, so the browser can't load them from Drive directly)
@@ -527,11 +647,88 @@ function toCustomer(x) {
 function toFile(x, customerId, slot) {
   const ap = x.appProperties || {};
   const inv = ap.kind === 'invoice';
+  const d = inv ? { note: '', meta: [] } : descSplit(x.description);
+  const orig = d.meta.filter(l => l.indexOf(ORIG) === 0)[0];
   return {
     id: x.id, customerId: customerId || (x.parents || [])[0] || '', folder: slot || '', name: x.name, type: ap.type || 'other', expiry: ap.expiry || '',
-    note: inv ? '' : (x.description || ''), mime: x.mimeType, size: +x.size || 0, createdAt: x.createdTime, by: ap.by || '', at: ap.at || x.createdTime,
+    note: d.note, mime: x.mimeType, size: +x.size || 0, createdAt: x.createdTime, by: ap.by || '', at: ap.at || x.createdTime,
     invoice: inv ? (ap.invNo || x.name) : '',
+    orig: orig ? orig.slice(ORIG.length) : '', shared: ap.link === '1',   // v3.2
   };
+}
+
+/* ---------- file names and description lines (v3.2) ---------- */
+
+/**
+ * Lines the app adds to a file's description: the original file name and the rename history.
+ * The app shows the rest of the description as the file's note and never changes these lines.
+ */
+const ORIG = 'Original file name: ', RENAMED = 'Renamed: ', ARROW = ' ⇒ ';
+function descSplit(desc) {
+  const note = [], meta = [];
+  String(desc || '').split('\n').forEach(l => (l.indexOf(ORIG) === 0 || l.indexOf(RENAMED) === 0 ? meta : note).push(l));
+  return { note: note.join('\n').trim(), meta };
+}
+function descJoin(note, meta) {
+  meta = meta.slice();
+  // keep the description short: the original name + the last 10 renames
+  while (meta.filter(l => l.indexOf(RENAMED) === 0).length > 10) meta.splice(meta.findIndex(l => l.indexOf(RENAMED) === 0), 1);
+  return (note ? note + (meta.length ? '\n\n' : '') : '') + meta.join('\n');
+}
+/** File name without / \ : * ? " < > | (and control characters), at most 200 characters, extension kept. */
+function fileName(s) {
+  let n = String(s == null ? '' : s).replace(/[\/\\:*?"<>|\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim();
+  if (n.length > 200) { const e = extOf(n); n = n.slice(0, 200 - e.length).trim() + e; }
+  return n;
+}
+function extOf(name) { const m = String(name || '').match(/\.([A-Za-z0-9]{1,8})$/); return m ? '.' + m[1] : ''; }
+/** Names of everything else in a folder, as { name: 1 }. */
+function siblingNames(parent, exceptId) {
+  const names = {};
+  let page;
+  do {
+    const r = Drive.Files.list({ q: "'" + parent + "' in parents and trashed=false", fields: 'nextPageToken,files(id,name)', pageSize: 1000, pageToken: page, spaces: 'drive' });
+    (r.files || []).forEach(f => { if (f.id !== exceptId) names[f.name] = 1; });
+    page = r.nextPageToken;
+  } while (page);
+  return names;
+}
+/** "name.pdf" -> "name (2).pdf", "name (3).pdf"… until it is free. Same rule as uniqueIn in js/naming.js. */
+function uniqueName(name, taken) {
+  if (!taken[name]) return name;
+  const e = extOf(name), base = e ? name.slice(0, -e.length) : name;
+  for (let i = 2; i < 1000; i++) { const n = base + ' (' + i + ')' + e; if (!taken[n]) return n; }
+  return base + ' (' + Date.now() + ')' + e;
+}
+/**
+ * Two uploads at the same moment can pick the same free name. After saving, the later one moves on to the next number.
+ * Only the name changes. A busy lock never fails an upload that is already saved.
+ */
+function settleName(f, parent) {
+  try {
+    return withLock(() => {
+      const taken = siblingNames(parent, f.id);
+      return taken[f.name] ? Drive.Files.update({ name: uniqueName(f.name, taken) }, f.id, null, { fields: FIELDS }) : f;
+    });
+  } catch (e) { return f; }
+}
+/** One file of the rename tool. Only the name (and the description line + batch tag) change. */
+function renameOne(id, newName, batch) {
+  const m = assertFile(id);
+  if (m.appProperties && m.appProperties.kind === 'invoice') return { id, status: 'invoice' };
+  const cur = Drive.Files.get(id, { fields: 'id,name,description,parents' });
+  let name = fileName(newName);
+  const e = extOf(cur.name);
+  if (e && name.toLowerCase().slice(-e.length) !== e.toLowerCase()) name = fileName(name + e);   // the extension never changes
+  if (!name || name === e) return { id, status: 'empty' };
+  if (name === cur.name) return { id, status: 'same', name };
+  return withLock(() => {
+    name = uniqueName(name, siblingNames((cur.parents || [])[0], id));
+    if (name === cur.name) return { id, status: 'same', name };
+    const d = descSplit(cur.description);
+    Drive.Files.update({ name, description: descJoin(d.note, d.meta.concat([RENAMED + cur.name + ARROW + name])), appProperties: { rnb: batch } }, id);
+    return { id, status: 'ok', old: cur.name, name };
+  });
 }
 
 /* ============================ company settings ============================ */
@@ -813,9 +1010,13 @@ const AI_FIELDS = {
   insurer: 'Insurance company name', policyNo: 'Policy number', policyType: 'Policy type or class, e.g. ชั้น 1, 2+, 3, พ.ร.บ.',
   coverage: 'Sum insured / coverage amount, digits only', premium: 'Total premium, digits only, with decimals if printed',
   policyStart: 'Coverage start date, YYYY-MM-DD with the year exactly as printed', policyExpiry: 'Coverage end date, YYYY-MM-DD with the year exactly as printed',
+  contractDate: 'Contract date of the insurance (วันทำสัญญาประกันภัย / วันที่ทำสัญญา), YYYY-MM-DD with the year exactly as printed',
   receiptAmount: 'For a payment receipt or slip: amount paid, digits only', receiptDate: 'For a payment receipt: payment date, YYYY-MM-DD with the year exactly as printed',
   payer: 'For a payment receipt: name of the payer',
 };
+
+/** Thai document names for file names (v3.2); the same names as DOC_NAMES in js/naming.js. */
+const AI_DOC_NAMES = ['กรมธรรม์', 'บัตรประชาชน', 'ทะเบียนรถ', 'ใบขับขี่', 'หนังสือเดินทาง', 'หนังสือรับรองบริษัท', 'ภาพถ่ายรถ', 'สลิปโอนเงิน', 'ใบแจ้งหนี้', 'ใบเสร็จ'];
 
 function aiSchema() {
   const field = { type: 'object', properties: { value: { type: ['string', 'null'] }, confidence: { type: 'number', minimum: 0, maximum: 1 } }, required: ['value', 'confidence'] };
@@ -825,9 +1026,10 @@ function aiSchema() {
     type: 'object',
     properties: {
       docType: { type: 'string', enum: ['policy', 'registration', 'id_card', 'receipt', 'other'], description: 'policy = insurance policy or schedule; registration = vehicle registration book; id_card = ID card, passport or driving licence; receipt = payment receipt, transfer slip or invoice' },
+      docName: { type: 'string', description: 'Short Thai name of this document. Use one of: ' + AI_DOC_NAMES.join(', ') + '. If none fits, a short Thai name of the document as it calls itself.' },
       fields: { type: 'object', properties: props, required: Object.keys(AI_FIELDS) },
     },
-    required: ['docType', 'fields'],
+    required: ['docType', 'docName', 'fields'],
   };
 }
 
@@ -840,6 +1042,7 @@ const AI_PROMPT = [
   '3. Dates: return YYYY-MM-DD but keep the YEAR NUMBER EXACTLY AS PRINTED (for example a Buddhist year 2569 stays 2569). Do not convert eras.',
   '4. confidence is 0-1: 0.9+ only when the text is sharp and unambiguous; below 0.6 when partly blurred or the label is unclear.',
   '5. The customer is the insured person / owner, never the insurance company or the agent.',
+  '6. docName: the Thai name of what this document is (for example กรมธรรม์ for any insurance policy or schedule, ภาพถ่ายรถ for a photo of a car, สลิปโอนเงิน for a bank transfer slip).',
 ].join('\n');
 
 function aiExtract(req) {
@@ -856,52 +1059,123 @@ function aiExtract(req) {
   });
   if (bytes > AI_MAX_BYTES) throw err('too_big', 'Files are too large for reading');
   parts.push({ text: AI_PROMPT });
-  const body = {
+  const payloadFor = m => JSON.stringify({
     contents: [{ role: 'user', parts }],
-    generationConfig: { responseMimeType: 'application/json', responseJsonSchema: aiSchema() },
-  };
-  const t0 = Date.now();
-  let code = 0, usage = 0, result = 'ok';
+    generationConfig: { responseMimeType: 'application/json', responseJsonSchema: aiSchema(), thinkingConfig: { thinkingLevel: m.think } },
+  });
+
+  const t0 = Date.now(), attempts = [];
+  const cache = CacheService.getScriptCache(), ck = aiCacheKey(files);
+  let last = null;   // last error: { busy, code, msg }
+  let mine = false;  // this request runs the Gemini calls (and must clear the "running" mark)
   try {
-    const r = UrlFetchApp.fetch(GEMINI_URL + GEMINI_MODEL + ':generateContent', {
-      method: 'post', contentType: 'application/json', payload: JSON.stringify(body), muteHttpExceptions: true,
-      headers: { 'x-goog-api-key': key },
-    });
-    code = r.getResponseCode();
-    if (code === 429) { result = 'quota'; throw err('ai_quota', 'AI quota reached, try again later'); }
-    if (code === 400 || code === 401 || code === 403) {
-      const m = String(r.getContentText()).slice(0, 300);
-      result = 'http' + code;
-      if (/API key/i.test(m)) throw err('ai_nokey', 'The Gemini API key is not valid');
-      throw err('ai_error', 'AI request rejected (' + code + ')');
+    // 1) same files read in the last 10 minutes (for example the app gave up waiting): answer at once
+    const hit = aiCached(cache, ck);
+    if (hit) { attempts.push({ model: hit.model, status: 'cache', ms: 0 }); return Object.assign(hit, { cached: true }); }
+    // 2) the same files are being read right now by an earlier request: wait for that result instead of asking Google again
+    if (cache.get(ck + ':run')) {
+      while (Date.now() - t0 < AI_JOIN_MS && cache.get(ck + ':run')) {
+        Utilities.sleep(3000);
+        const r = aiCached(cache, ck);
+        if (r) { attempts.push({ model: r.model, status: 'joined', ms: Date.now() - t0 }); return Object.assign(r, { cached: true }); }
+      }
+      const r = aiCached(cache, ck);
+      if (r) { attempts.push({ model: r.model, status: 'joined', ms: Date.now() - t0 }); return Object.assign(r, { cached: true }); }
+      if (Date.now() - t0 >= AI_JOIN_MS - 5000) throw err('ai_busy', 'Google AI is busy right now');
     }
-    if (code !== 200) { result = 'http' + code; throw err('ai_error', 'AI service error (' + code + ')'); }
-    const j = JSON.parse(r.getContentText());
-    usage = (j.usageMetadata && j.usageMetadata.totalTokenCount) || 0;
-    const c = (j.candidates || [])[0];
-    const text = c && c.content && (c.content.parts || []).map(p => p.text || '').join('');
-    if (!text) { result = 'empty'; throw err('ai_error', 'The AI could not read this document'); }
-    let out;
-    try { out = JSON.parse(text); } catch (e) { result = 'badjson'; throw err('ai_error', 'The AI answer was not valid'); }
-    return { docType: out.docType || 'other', fields: out.fields || {}, model: GEMINI_MODEL };
-  } catch (e) {
-    if (result === 'ok') result = e.code || 'fail';
-    throw e;
+    // 3) ask Gemini; the clock for new attempts starts now
+    cache.put(ck + ':run', '1', 360);
+    mine = true;
+    const t1 = Date.now();
+    const left = () => AI_BUDGET_MS - (Date.now() - t1);
+    for (const m of AI_MODELS) {
+      const payload = payloadFor(m);
+      for (let i = 0; i < AI_TRIES_PER_MODEL; i++) {
+        if (i > 0) {
+          const wait = Math.round(AI_BACKOFF_MS[Math.min(i - 1, AI_BACKOFF_MS.length - 1)] * (0.7 + Math.random() * 0.6));   // jitter
+          if (left() - wait < AI_MIN_LEFT_MS) break;
+          Utilities.sleep(wait);
+        }
+        if (left() < AI_MIN_LEFT_MS) break;
+        const r = aiAttempt(m, payload, key);
+        attempts.push({ model: m.id, status: r.status, ms: r.ms, tokens: r.tokens || 0 });
+        if (r.out) {
+          const res = { docType: r.out.docType || 'other', docName: String(r.out.docName || '').slice(0, 60), fields: r.out.fields || {}, model: m.id, tries: attempts.length };
+          try { cache.put(ck + ':res', JSON.stringify(res), AI_CACHE_S); } catch (e) { }   // kept even if the app stopped waiting
+          return res;
+        }
+        last = r;
+        if (r.fatal) throw err(r.fatal, r.msg);   // bad key: no other model will work either
+        if (!r.retry) break;                      // this model refused the request: try the next model
+        if (r.ms > AI_SLOW_MS) break;             // overloaded and slow: switch model instead of waiting again
+      }
+      if (left() < AI_MIN_LEFT_MS) break;
+    }
+    if (last && last.busy) throw err('ai_busy', 'Google AI is busy right now');
+    throw err('ai_error', (last && last.msg) || 'The AI could not read this document');
   } finally {
-    aiLog({ at: new Date().toISOString(), ms: Date.now() - t0, files: files.length, kb: Math.round(bytes / 1024), tokens: usage, model: GEMINI_MODEL, result });
+    if (mine) try { cache.remove(ck + ':run'); } catch (e) { }
+    const base = { at: new Date().toISOString(), files: files.length, kb: Math.round(bytes / 1024) };
+    aiLog(attempts.map((a, i) => Object.assign({}, base, a, { try: i + 1, of: attempts.length, totalMs: Date.now() - t0 })));
   }
 }
 
-/** Usage log without any customer data */
-function aiLog(entry) {
+/** Cache key for a set of files: SHA-256 of their types and contents (the hash is not logged). */
+function aiCacheKey(files) {
+  const d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, files.map(f => f.mime + ':' + f.data).join('|'));
+  return 'ai2_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');
+}
+function aiCached(cache, ck) {
+  try { const v = cache.get(ck + ':res'); return v ? JSON.parse(v) : null; } catch (e) { return null; }
+}
+
+/**
+ * One request to one model. Returns { out } on success, otherwise
+ * { status, retry, busy, fatal?, msg }. retry/busy = 429, 500, 503, 504, timeout or network error.
+ */
+function aiAttempt(m, payload, key) {
+  const t = Date.now();
+  let res;
   try {
-    console.log('ai ' + JSON.stringify(entry));
+    res = UrlFetchApp.fetch(GEMINI_URL + m.id + ':generateContent', {
+      method: 'post', contentType: 'application/json', payload: payload, muteHttpExceptions: true,
+      headers: { 'x-goog-api-key': key },
+    });
+  } catch (e) {   // timeout or network problem inside Google
+    return { status: /time/i.test(String(e)) ? 'timeout' : 'neterr', ms: Date.now() - t, retry: true, busy: true, msg: 'AI service did not answer' };
+  }
+  const code = res.getResponseCode(), ms = Date.now() - t;
+  if (code === 200) {
+    let j, out, tokens = 0;
+    try { j = JSON.parse(res.getContentText()); } catch (e) { return { status: 'badjson', ms: ms, retry: false, msg: 'The AI answer was not valid' }; }
+    tokens = (j.usageMetadata && j.usageMetadata.totalTokenCount) || 0;
+    const c = (j.candidates || [])[0];
+    const text = c && c.content && (c.content.parts || []).map(p => p.text || '').join('');
+    if (!text) return { status: 'empty', ms: ms, tokens: tokens, retry: false, msg: 'The AI could not read this document' };
+    try { out = JSON.parse(text); } catch (e) { return { status: 'badjson', ms: ms, tokens: tokens, retry: false, msg: 'The AI answer was not valid' }; }
+    return { status: 'ok', ms: ms, tokens: tokens, out: out };
+  }
+  const status = 'http' + code;
+  if (code === 429 || code === 500 || code === 503 || code === 504) return { status: status, ms: ms, retry: true, busy: true, msg: 'AI service busy (' + code + ')' };
+  const text = String(res.getContentText()).slice(0, 300);
+  if ((code === 400 || code === 401 || code === 403) && /API key/i.test(text)) return { status: status, ms: ms, fatal: 'ai_nokey', msg: 'The Gemini API key is not valid' };
+  return { status: status, ms: ms, retry: false, msg: 'AI request rejected (' + code + ')' };   // e.g. 404: model not available -> next model
+}
+
+/** Usage log without any customer data. Script properties hold max 9 KB, so the oldest entries are dropped to fit. */
+function aiLog(entries) {
+  entries = [].concat(entries || []);
+  if (!entries.length) return;
+  try {
+    for (const e of entries) console.log('ai ' + JSON.stringify(e));
     withLock(() => {
       const p = PropertiesService.getScriptProperties();
       let log = [];
       try { log = JSON.parse(p.getProperty('AI_LOG') || '[]'); } catch (e) { }
-      log.push(entry);
-      p.setProperty('AI_LOG', JSON.stringify(log.slice(-200)));
+      log = log.concat(entries).slice(-200);
+      let s = JSON.stringify(log);
+      while (s.length > 8500 && log.length > 1) { log = log.slice(Math.ceil(log.length / 10)); s = JSON.stringify(log); }
+      p.setProperty('AI_LOG', s);
     });
   } catch (e) { }
 }
@@ -963,6 +1237,23 @@ function setup() {
   console.log('Gemini key set: ' + (aiKey() ? 'yes' : 'NO - add GEMINI_API_KEY in Project Settings > Script properties'));
   // touch the Docs service so the editor asks for the new permission
   try { DocumentApp.getActiveDocument(); } catch (e) { }
+}
+
+/**
+ * Run from the editor: sends a one-line test sentence (no customer data) to every model in AI_MODELS
+ * and prints status and time for each. Shows which models work and which are busy right now.
+ */
+function aiModelsCheck() {
+  const key = aiKey();
+  if (!key) return console.log('GEMINI_API_KEY is not set');
+  for (const m of AI_MODELS) {
+    const payload = JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: 'Reply with the JSON {"ok": true}.' }] }],
+      generationConfig: { responseMimeType: 'application/json', thinkingConfig: { thinkingLevel: m.think } },
+    });
+    const r = aiAttempt(m, payload, key);
+    console.log(m.id + ' (thinking ' + m.think + '): ' + r.status + ' in ' + r.ms + ' ms');
+  }
 }
 
 /** Run from the editor: dry-run report of the sub-folder migration (writes nothing). */

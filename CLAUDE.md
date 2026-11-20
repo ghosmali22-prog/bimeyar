@@ -18,11 +18,17 @@ to a production system. Talk to the owner (Pejman) in Persian.
   They are found by `slot`, never by name. Names live in `SUBFOLDERS` (backend) and `FOLDERS` (`js/config.js`).
   File = a file inside a customer folder OR one of its sub-folders, tagged with `appProperties.bimeyar = 'item'` and with type, expiry, uploader (`by`) and date (`at`).
   Files from v2 sit directly in the customer folder (`folder: ''`, shown as "Other / ไม่ระบุ"). They must stay there unless the user moves one.
+  v3.2 file extras: `appProperties.link = '1'` while the file is shared "anyone with the link: viewer" (only via `shareFile`, never a folder);
+  `appProperties.rnb` = batch id of the last rename-tool run (Script property `RENAME_LAST` = last batch, for "Undo last rename").
+  The description may end with lines `Original file name: …` and `Renamed: old ⇒ new`: the app shows them apart from the note and
+  `updateFile` keeps them (`descSplit` / `descJoin`). Never write them into an invoice description (that is JSON).
+  File names are built in `js/naming.js` (`{plate} - {customer}({month}) - {document}.{ext}`); the backend only cleans the name and
+  adds " (2)", " (3)"… (`uniqueName`): never overwrite, never delete. Customer fields `nick` and `contractDate` are optional (v3.2).
   Invoice = a PDF file in the `pay` sub-folder with `appProperties.kind = 'invoice'`, `invNo`, `status`; the invoice data is JSON in its description.
   Invoice numbers come from Script property `INV_SEQ` under `LockService` only.
   The root folder is tagged `appProperties.bimeyar = 'root'`. The company logo file is tagged `bimeyar = 'logo'`.
 - **AI**: Gemini is called only from the backend (`aiExtract`). The key is Script property `GEMINI_API_KEY`: never in the repo,
-  never in the frontend, never in logs. The model is `GEMINI_MODEL`. The AI never saves anything by itself: every value is shown
+  never in the frontend, never in logs. Models: `AI_MODELS` (tried in order, with retries on 429/5xx/timeouts inside a time budget; see `aiExtract`). The AI never saves anything by itself: every value is shown
   to the user first (review screen / "old → new" list). Log AI usage without customer data (`aiLog`).
 - **Login**: "Sign in with Google" (openid/email/profile only). The backend verifies the ID token on every
   request (audience = `CLIENT_ID`) and checks the access list.
@@ -68,9 +74,13 @@ to a production system. Talk to the owner (Pejman) in Persian.
 
 ## Current deployment
 
-- **Backend**: Apps Script deployment **Version 2** ("v3.0.0"), live since 2026-11-17. Version 1 is the v2 backend.
-- **Frontend**: `main` = release tag `v3.1.0` (v2 design with the v3 features). Before it: `v3.0.1-stable` (v3.0 look).
+- **Backend**: Apps Script deployment **Version 5** ("v3.2.0"), live since 2026-11-20, same `/exec` URL. It includes the v3.1.2 AI fixes.
+  Roll back: Manage deployments → edit → choose the version before 5 (v3.1.2 backend; it works with the v3.2.0 frontend except
+  share link, rename tool and the original-name line). Version 2 = v3.0.0, Version 1 = the v2 backend.
+- **Frontend**: `main` = release tag `v3.2.0` (automatic file names, rename tool with undo, nickname + contract date, share one file by link).
+  Rollback tag of `main` before it: `v3.1-pre-naming` (= `v3.1.0`). Before that: `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
+- Tests: `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
 
 ## Design (owner's decision)
 
