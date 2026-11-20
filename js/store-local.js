@@ -208,6 +208,72 @@ export class LocalStore {
     }
     return out;
   }
+  // Edit with AI in demo mode (same rules as the backend: keep the previous state, undo the last 5 batches)
+  aiLog() { try { return JSON.parse(localStorage.getItem('by_ai_log') || '[]'); } catch { return []; } }
+  aiLogPut(a) { try { localStorage.setItem('by_ai_log', JSON.stringify(a.slice(-5))); } catch { } }
+  async aiEditApply(batch, customerId, items, vehicles = []) {
+    const loc = f => ({ name: f.name, folder: f.folder || '', vehicleId: f.vehicleId || '', vslot: f.vslot || '', type: f.type || '' });
+    const TYPE = { '1': 'policy', '2': 'policy', '3': 'policy', '5.2': 'policy', '4': 'payment', '5.4': 'payment', '5.1': 'car', '5.3': 'car', '5.5': 'id' };
+    const rows = [], vrows = [];
+    for (const x of vehicles) {
+      const v = await rq(this.s('vehicles').get(x.id));
+      if (!v || v.customerId !== customerId) { vrows.push({ id: x.id, status: 'error' }); continue; }
+      const o = {}, n = {};
+      for (const [k, val] of Object.entries(x.fields || {})) if (k !== 'plate' && VFIELDS.includes(k) && (v[k] || '') !== (val || '')) { o[k] = v[k] || ''; n[k] = val || ''; }
+      if (!Object.keys(n).length) { vrows.push({ id: x.id, status: 'same' }); continue; }
+      for (const [k, val] of Object.entries(n)) { if (val) v[k] = val; else delete v[k]; }
+      v._ai = [...(v._ai || []).slice(-4), { b: batch, o, n }]; v.aib = batch;
+      await rq(this.s('vehicles', 'readwrite').put(v));
+      vrows.push({ id: x.id, status: 'ok' });
+    }
+    for (const it of items) {
+      const f = await rq(this.s('files').get(it.id));
+      if (!f || f.customerId !== customerId) { rows.push({ id: it.id, status: 'error' }); continue; }
+      const before = loc(f);
+      if (it.vehicleId) { f.folder = ''; f.vehicleId = it.vehicleId; f.vslot = it.slot; f.type = TYPE[it.slot] || f.type; }
+      if (it.name) f.name = withExt(String(it.name).trim(), extOf(before.name));
+      f.name = uniqueIn(f.name, await this.taken(f));
+      const after = loc(f);
+      if (JSON.stringify(after) === JSON.stringify(before)) { rows.push({ id: it.id, status: 'same' }); continue; }
+      f.aiHist = [...(f.aiHist || []).slice(-4), { b: batch, before, after }]; f.aib = batch;
+      await rq(this.s('files', 'readwrite').put(f));
+      rows.push({ id: it.id, status: 'ok', name: f.name });
+    }
+    const n = rows.filter(r => r.status === 'ok').length;
+    if (n || vrows.some(r => r.status === 'ok')) {
+      const a = this.aiLog(), c = await rq(this.s('customers').get(customerId));
+      let e = a.find(x => x.b === batch);
+      if (!e) a.push(e = { b: batch, at: nowIso(), by: 'demo', c: customerId, cn: c?.name || '', n: 0 });
+      e.n += n; this.aiLogPut(a);
+    }
+    return { rows, vehicles: vrows };
+  }
+  async aiEditUndo(batch, id = '') {
+    const a = this.aiLog();
+    if (!a.some(x => x.b === batch)) throw Object.assign(new Error('ae.tooOld'), { key: 'ae.tooOld' });
+    const out = { done: 0, skipped: 0, more: false };
+    const loc = f => ({ name: f.name, folder: f.folder || '', vehicleId: f.vehicleId || '', vslot: f.vslot || '', type: f.type || '' });
+    for (const f of await rq(this.s('files').getAll())) {
+      if (f.aib !== batch || (id && f.id !== id)) continue;
+      const e = f.aiHist?.at(-1);
+      if (!e || e.b !== batch || JSON.stringify(loc(f)) !== JSON.stringify(e.after)) { out.skipped++; continue; }
+      Object.assign(f, e.before); f.aiHist.pop(); f.aib = f.aiHist.at(-1)?.b || '';
+      f.name = uniqueIn(f.name, await this.taken(f));
+      await rq(this.s('files', 'readwrite').put(f)); out.done++;
+    }
+    if (!id) {
+      for (const v of await rq(this.s('vehicles').getAll())) {
+        const e = v._ai?.find(x => x.b === batch); if (!e) continue;
+        for (const k of Object.keys(e.n)) if ((v[k] || '') === (e.n[k] || '')) { if (e.o[k]) v[k] = e.o[k]; else delete v[k]; }
+        v._ai = v._ai.filter(x => x !== e); v.aib = v._ai.at(-1)?.b || '';
+        if (!v._ai.length) delete v._ai;
+        await rq(this.s('vehicles', 'readwrite').put(v)); out.done++;
+      }
+      const e = a.find(x => x.b === batch); if (e) { e.u = 1; this.aiLogPut(a); }
+    }
+    return out;
+  }
+  async aiEditList() { return this.aiLog(); }
   async quota() { return null; }
 
   // Company settings are kept in this browser in demo mode

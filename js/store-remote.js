@@ -119,6 +119,10 @@ export class ApiStore {
   restorePlan() { return call('restorePlan'); }
   restoreNames(batch, items) { return call('restoreNames', { batch, items }); }
   restoreUndo() { return call('restoreUndo'); }
+  // Edit with AI (editor, v4.3): apply what was ticked in the preview; undo a batch (or one file of it); last 5 (admin)
+  aiEditApply(batch, customerId, items, vehicles) { return call('aiEditApply', { batch, customerId, items, vehicles }); }
+  aiEditUndo(batch, id = '') { return call('aiEditUndo', { batch, id }); }
+  aiEditList() { return call('aiEditList'); }
   // Share ONE file by link (v3.2): "anyone with the link" can view that file only
   shareFile(id) { return call('shareFile', { id }); }
   unshareFile(id) { return call('unshareFile', { id }); }
