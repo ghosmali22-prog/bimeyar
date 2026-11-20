@@ -4,6 +4,7 @@ import { $, $$, esc, digits, norm, fmtDay, dateFmt, setDateFmt, todayIso, addDay
 import { LocalStore } from './store-local.js';
 import { ApiStore } from './store-remote.js';
 import * as auth from './auth.js';
+import * as device from './device.js';
 import { ask } from './assistant.js';
 import { seedDemo } from './demo.js';
 import { calcTotals, baht, lineAmount, invoiceHtml, INVOICE_CSS } from './invoice.js';
@@ -22,7 +23,8 @@ try { savedMode = localStorage.getItem('by_mode'); } catch { }
 
 const S = {
   view: 'dash', customers: [], files: [], invoices: [], exp: {}, company: null, sel: null, store: null,
-  gate: null,            // null | 'loading' | 'signin' | 'expired' | 'deny' | 'config' | 'gis'
+  gate: null,            // null | 'loading' | 'signin' | 'expired' | 'deny' | 'config' | 'gis' | 'unlock' | 'setpin' (v3.3)
+  pinLeft: null, pinMsg: '',   // unlock screen: wrong attempts left / message
   denied: '', role: 'admin', me: null,
   mode: savedMode === 'local' || !cloudReady() ? 'local' : 'cloud',
   filters: { customer: '', type: '', period: '', q: '', status: '', inv: '' },
@@ -55,6 +57,8 @@ async function connect() {
     return reload(true);
   }
   if (!cloudReady()) return showGate('config');
+  // Device password (v3.3): this device signed in with Google before -> only the password, no Google
+  if (device.has()) return device.unlocked() ? enterCloud() : showGate('unlock');
   showGate('loading');
   let has;
   try { has = await auth.init(lang); }
@@ -74,13 +78,32 @@ async function enterCloud() {
     const me = await st.init();
     S.store = st; S.me = me; S.role = me.role; S.sel = null;
     applyRole();
+    S.pinLeft = null; S.pinMsg = '';
+    // Right after "Sign in with Google": offer a device password (once; "Skip" keeps the old behaviour)
+    if (!me.dev && !device.has() && !device.skipped()) return showGate('setpin');
     await reload(true);
   } catch (e) {
     handleError(e);
   } finally { entering = false; }
 }
 
-auth.onSignIn(() => { if (S.mode === 'cloud' && S.gate && S.gate !== 'loading') enterCloud(); });
+auth.onSignIn(() => { if (S.mode === 'cloud' && S.gate && S.gate !== 'loading' && S.gate !== 'unlock' && S.gate !== 'setpin') enterCloud(); });
+
+/** Google sign-in screen. Sets up Google sign-in first (not loaded when the device was opened with its password). */
+async function googleGate(kind = 'signin') {
+  showGate('loading');
+  try { await auth.init(lang); } catch { return showGate('gis'); }
+  showGate(kind);
+}
+
+/** Auto-lock (15 min without use) and the device locking for any other reason: data leaves the screen and memory. */
+function lockNow() {
+  device.lock();
+  closeSheet();
+  S.store = null; S.me = null; S.customers = []; S.files = []; S.invoices = []; S.company = null; S.pinLeft = null; S.pinMsg = '';
+  showGate('unlock');
+}
+device.watchIdle(() => { if (S.mode === 'cloud' && device.has()) lockNow(); });
 
 function showGate(g, email = '') {
   S.gate = g; S.denied = email || S.denied;
@@ -108,13 +131,24 @@ function applyRole() {
 
 const ERR = { network: 'err.network', offline: 'err.offline', timeout: 'err.timeout', role: 'err.role', not_found: 'err.not_found', server: 'err.server', too_big: 'err.tooBig' };
 function handleError(e) {
-  console.error(e);
   const code = e?.code;
+  if (code !== 'bad_pin' && code !== 'locked') console.error(e);   // a wrong device password is not an app error
+  if (S.gate === 'deny' && (code === 'auth' || e?.auth)) return;   // a second request after "No access": keep that screen
+  if (code === 'locked') { if (S.gate !== 'unlock') lockNow(); return; }
+  if (code === 'bad_pin') { S.store = null; S.pinLeft = e.left ?? null; S.pinMsg = ''; return showGate('unlock'); }
+  if ((code === 'auth' || e?.auth) && e?.session === 'gone') {
+    // the device session ended: 5 wrong passwords, signed out from another device, or 30 days passed
+    S.store = null; S.pinMsg = S.pinLeft === 1 ? 'dv.tooMany' : 'dv.gone'; S.pinLeft = null;
+    auth.drop(); return googleGate('expired');
+  }
   if (code === 'auth' || e?.auth) { auth.drop(); return showGate('expired'); }
   if (code === 'forbidden') { S.store = null; return showGate('deny', e.email || auth.user()?.email || ''); }
+  if (code === 'sessions_full') return toast(t('dv.full'), 'err');
   toast(e?.key ? t(e.key) : ERR[code] ? t(ERR[code]) : e?.message || t('err.generic'), 'err');
   if (code === 'not_found' && S.store) reload().catch(() => { });
-  if (!S.store && S.mode === 'cloud' && S.gate === 'loading') showGate('signin');
+  if (!S.store && S.mode === 'cloud' && S.gate === 'loading') {
+    if (device.has()) { device.lock(); showGate('unlock'); } else showGate('signin');
+  }
 }
 
 async function run(fn) {
@@ -196,6 +230,7 @@ function mount() {
   v.className = 'enter';
   document.body.classList.toggle('gated', !!S.gate);
   if (S.gate === 'signin' || S.gate === 'expired') auth.button($('#gbtn'), lang).catch(() => { });
+  if (S.gate === 'unlock' || S.gate === 'setpin') setTimeout(() => $('.gate-form input[type=password]')?.focus({ preventScroll: true }), 60);
   if (!S.gate) drawAll(true);
   syncChrome();
   clearTimeout(enterT);
@@ -241,10 +276,42 @@ function gateHtml() {
       <div class="gate-foot">${demo}</div></section>`;
   if (g === 'config' || g === 'gis') return `<section class="gate card"><div class="gate-ico">${icon('cloud', 38)}</div><h1>${t('gate.title')}</h1><p>${t('gate.' + g)}</p>
       <div class="gate-actions">${g === 'gis' ? `<button class="btn primary" data-act="reload">${t('gate.retry')}</button>` : ''}${demo}</div></section>`;
+  if (g === 'unlock') {
+    const b = device.info() || {};
+    const msg = S.pinLeft != null ? t('dv.wrong', { n: S.pinLeft }) : '';
+    return `<section class="gate card">
+      <div class="gate-ico">${icon('lock', 38)}</div>
+      <h1>${t('dv.unlockTitle')}</h1>
+      <p>${t('dv.unlockText', { x: `<b dir="ltr">${esc(b.email || '')}</b>` })}</p>
+      <form class="form gate-form" data-form="unlock" id="ulform" novalidate>
+        <input type="email" name="username" autocomplete="username" value="${esc(b.email || '')}" hidden>
+        <label>${t('dv.pin')}<input type="password" name="pin" autocomplete="current-password" dir="ltr" required aria-describedby="pinMsg" enterkeyhint="go"></label>
+        <p class="gate-err" id="pinMsg" role="alert">${msg}</p>
+        <button class="btn primary block" id="ulbtn">${icon('lock', 18)}<span>${t('dv.unlock')}</span></button>
+      </form>
+      <div class="gate-actions"><button class="btn ghost" data-act="dv-forgot">${t('dv.forgot')}</button></div>
+      <div class="gate-foot">${demo}</div>
+    </section>`;
+  }
+  if (g === 'setpin') return `<section class="gate card">
+      <div class="gate-ico">${icon('shield', 38)}</div>
+      <h1>${t('dv.setTitle')}</h1>
+      <p>${t('dv.setText')}</p>
+      <form class="form gate-form" data-form="setpin" id="spform" novalidate>
+        <input type="email" name="username" autocomplete="username" value="${esc(S.me?.email || '')}" hidden>
+        <label>${t('dv.newPin')}<input type="password" name="pin" autocomplete="new-password" dir="ltr" required minlength="6" maxlength="128"></label>
+        <label>${t('dv.pin2')}<input type="password" name="pin2" autocomplete="new-password" dir="ltr" required></label>
+        <label>${t('dv.name')}<input name="name" maxlength="40" value="${esc(device.guessName())}" autocomplete="off"></label>
+        <p class="gate-err" id="spMsg" role="alert"></p>
+        <button class="btn primary block" id="spbtn">${icon('check', 18)}<span>${t('dv.save')}</span></button>
+      </form>
+      <p class="gate-note">${t('dv.setNote')}</p>
+      <div class="gate-actions"><button class="btn ghost" data-act="dv-skip">${t('dv.skip')}</button></div>
+    </section>`;
   return `<section class="gate card">
       <div class="gate-ico">${icon('shield', 38)}</div>
       <h1>${t('gate.title')}</h1>
-      <p>${t(g === 'expired' ? 'gate.expired' : 'gate.text')}</p>
+      <p>${S.pinMsg && g === 'expired' ? t(S.pinMsg) : t(g === 'expired' ? 'gate.expired' : 'gate.text')}</p>
       <div class="gbtn" id="gbtn"><div class="spin"></div></div>
       <div class="gate-foot">${demo}</div>
     </section>`;
@@ -1459,6 +1526,7 @@ function settingsSheet() {
           ? `${isAdmin() ? `<button class="btn primary" data-act="team">${icon('team', 18)}<span>${t('set.team')}</span></button>` : ''}${S.me.root ? `<button class="btn ghost" data-act="open-root">${icon('external', 17)}<span>${t('set.folder')}</span></button>` : ''}<span class="sp"></span><button class="btn danger-ghost" data-act="sign-out">${icon('logout', 17)}<span>${t('set.signout')}</span></button>`
           : `<span class="sp"></span><button class="btn primary" data-act="mode-cloud">${icon('cloud', 18)}<span>${t('set.signin')}</span></button>`}</div>
       </div>` : ''}
+      ${signedIn ? card('lock', t('dv.title'), device.unlocked() ? t('dv.subOn') : t('dv.subOff'), `<span class="sp"></span>${!device.has() ? `<button class="btn primary" data-act="dv-set">${icon('lock', 17)}<span>${t('dv.setBtn')}</span></button>` : ''}<button class="btn ghost" data-act="devices">${icon('phone', 17)}<span>${t('dv.open')}</span></button>`) : ''}
       ${S.store ? card('invoice', t('co.title'), isAdmin() ? t('co.sub') : t('co.subRo'), `<span class="sp"></span><button class="btn ghost" data-act="company">${icon('edit', 17)}<span>${t('co.title')}</span></button>`) : ''}
       ${signedIn && isAdmin() ? card('folder', t('mig.title'), t('mig.sub'), `<span class="sp"></span><button class="btn ghost" data-act="migrate">${icon('folder', 17)}<span>${t('mig.dry')}</span></button>`) : ''}
       ${S.store && isAdmin() && (signedIn || !cloud) ? card('edit', t('rn.title'), t('rn.sub'), `<span class="sp"></span><button class="btn ghost" data-act="rename">${icon('edit', 17)}<span>${t('rn.open')}</span></button>`) : ''}
@@ -1469,6 +1537,27 @@ function settingsSheet() {
       </div>
       <p class="ver">${t('set.ver', { v: digits(APP_VERSION) })}</p>
     </div>` });
+}
+
+/* ---------- my devices (v3.3) ---------- */
+const pad2 = n => String(n).padStart(2, '0');
+const when = iso => { const d = new Date(iso); return isNaN(d) ? '' : `${fmtDay(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`)} ${digits(`${pad2(d.getHours())}:${pad2(d.getMinutes())}`)}`; };
+function devicesSheet() {
+  sheet({ title: t('dv.title'), sub: t('dv.sub'), cls: 'wide', body: `
+    <div class="team-list" id="devMine"><p class="as-tip"><span class="spin sm"></span>${t('team.loading')}</p></div>
+    ${isAdmin() ? `<h3 class="dv-h">${t('dv.all')}</h3><div class="team-list" id="devAll"><p class="as-tip"><span class="spin sm"></span>${t('team.loading')}</p></div>` : ''}` });
+  run(async () => drawDevices('#devMine', await S.store.listMySessions(), false));
+  if (isAdmin()) run(async () => drawDevices('#devAll', await S.store.listAllSessions(), true));
+}
+function drawDevices(sel, list, all) {
+  const el = $(sel); if (!el) return;
+  el.innerHTML = list.length ? list.map((d, i) => `
+    <div class="team-row" style="--i:${Math.min(i, 10)}">
+      <span class="ava dv-ava">${icon('phone', 17)}</span>
+      <span class="tmain"><b>${esc(d.name)}</b><small>${all ? `<bdi dir="ltr">${esc(d.email)}</bdi> · ` : ''}${t('dv.last', { x: when(d.lastUsed) })} · ${t('dv.exp', { x: fmtDay(d.expires) })}</small></span>
+      ${d.current ? `<em class="role-chip">${t('dv.this')}</em>` : ''}
+      <button class="icon-btn sm danger" data-act="dv-revoke" data-sid="${esc(d.sid)}" data-name="${esc(d.name)}" ${all ? 'data-all="1"' : ''} title="${t('dv.signout')}" aria-label="${t('dv.signout')}">${icon('logout', 15)}</button>
+    </div>`).join('') : `<p class="as-tip">${t('dv.none')}</p>`;
 }
 
 /* ---------- team & access (admin) ---------- */
@@ -1646,9 +1735,38 @@ const ACT = {
   },
   async 'mode-local'() { setMode('local'); closeSheet(); S.company = null; await connect(); },
   async 'mode-cloud'() { setMode('cloud'); closeSheet(); S.company = null; await connect(); },
-  async 'sign-out'() { auth.signOut(); S.me = null; S.store = null; S.customers = []; S.files = []; S.invoices = []; S.company = null; applyRole(); closeSheet(); showGate('signin'); },
-  async retry() { auth.drop(); const tok = await auth.getToken(); if (tok) enterCloud(); else showGate('signin'); },
-  async 'switch-account'() { auth.signOut(); showGate('signin'); },
+  async 'sign-out'() {
+    // device password: end this device's session on the server too, then remove the blob
+    const c = device.current();
+    if (c && S.store) await S.store.revokeSession(c.sid).catch(() => { });
+    device.forget();
+    auth.signOut(); S.me = null; S.store = null; S.customers = []; S.files = []; S.invoices = []; S.company = null; applyRole(); closeSheet(); googleGate('signin');
+  },
+  async retry() {
+    auth.drop();
+    try { await auth.init(lang); } catch { return showGate('gis'); }
+    const tok = await auth.getToken(); if (tok) enterCloud(); else showGate('signin');
+  },
+  async 'switch-account'() { device.forget(); auth.signOut(); googleGate('signin'); },
+  devices: devicesSheet,
+  'dv-set'() { closeSheet(); showGate('setpin'); },
+  async 'dv-skip'() { device.skip(); if (S.store) await reload(true); else googleGate('signin'); },
+  async 'dv-forgot'() {
+    if (!await confirmBox(t('dv.forgotQ'), t('dv.forgotOk'), false)) return;
+    device.forgetForReset(); S.pinLeft = null; S.pinMsg = '';
+    auth.signOut();   // a real Google sign-in is needed, not a silent one
+    googleGate('signin');
+  },
+  async 'dv-revoke'(el) {
+    const sid = el.dataset.sid, all = !!el.dataset.all;
+    if (device.current()?.sid === sid) {
+      if (!await confirmBox(t('dv.revokeSelfQ'), t('dv.signout'))) return;
+      return ACT['sign-out']();
+    }
+    if (!await confirmBox(t('dv.revokeQ', { x: `<b>${esc(el.dataset.name)}</b>` }), t('dv.signout'))) return;
+    await (all ? S.store.revokeAny(sid) : S.store.revokeSession(sid));
+    devicesSheet(); toast(t('dv.revoked'));
+  },
   async 'team-remove'(el) {
     const email = el.dataset.email;
     if (!await confirmBox(t('team.removeQ', { x: `<b dir="ltr">${esc(email)}</b>` }), t('team.remove'))) return;
@@ -1673,6 +1791,28 @@ document.addEventListener('submit', e => {
   const kind = form.dataset.form;
   const btn = $(`[form="${form.id}"]`) || form.querySelector('.btn.primary');
   run(async () => {
+    if (kind === 'unlock') {
+      const pin = form.pin.value;
+      if (!pin) return;
+      const b = $('#ulbtn'); b.disabled = true; b.querySelector('span').textContent = t('dv.checking');
+      try { await device.open(pin); } catch { b.disabled = false; return; }
+      return enterCloud();
+    }
+    if (kind === 'setpin') {
+      const pin = form.pin.value, msg = $('#spMsg');
+      if (!device.okPin(pin)) { msg.textContent = t('dv.short'); return form.pin.focus(); }
+      if (pin !== form.pin2.value) { msg.textContent = t('dv.mismatch'); return form.pin2.focus(); }
+      const b = $('#spbtn'); b.disabled = true;
+      try {
+        const name = form.name.value.trim() || device.guessName();
+        const sess = await S.store.createDeviceSession(name, device.oldSid());
+        await device.seal(sess, pin, { email: S.me.email, name });
+        auth.drop();   // from now on this device uses its own session; the Google token is not kept
+        toast(t('dv.saved'));
+        await reload(true);
+      } finally { if (b.isConnected) b.disabled = false; }
+      return;
+    }
     if (kind === 'team-add') {
       const d = Object.fromEntries(new FormData(form));
       const email = d.email.trim().toLowerCase();

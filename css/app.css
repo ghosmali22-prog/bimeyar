@@ -749,3 +749,11 @@ img.fadein { animation: fade .5s ease both; }
   .rn-main input { height: 44px; font-size: 16px; }
   .rn-row > input[type=checkbox] { width: 22px; height: 22px; }
 }
+
+/* v3.3: device password (unlock / set password screens, My devices) */
+.gate-form { width: 100%; max-width: 340px; margin: 14px auto 0; text-align: start; }
+.gate-form .btn.block { width: 100%; justify-content: center; }
+.gate-err { min-height: 1.3em; margin: 0; color: var(--bad) !important; font-weight: 600; font-size: 13px; text-align: center; max-width: none !important; }
+.gate-note { font-size: 12.5px; max-width: 360px; margin-top: 10px; }
+.dv-h { font-size: 14px; font-weight: 700; margin: 18px 0 4px; }
+.dv-ava { display: grid; place-items: center; color: #fff; background: linear-gradient(140deg, var(--accent-2), var(--accent)); }
