@@ -12,7 +12,7 @@ const company = { name: 'บริษัทสมมติชัย ทราน
 const name = (c, folder = 'policy', ai = '', ext = '.pdf') => buildName({ plate: plateOnly(c.plate, c.province), customer: c, month: monthOf(c.contractDate, c.policyStart, '2026-01-15'), doc: docNameFor({ aiName: ai, folder }), ext });
 
 eq(name(company, 'policy', 'กรมธรรม์'), '99-0016 - สมมติชัย ทรานสปอร์ต(11) - กรมธรรม์.pdf', 'company name, BE contract date 04/11/2569');
-eq(name({ ...company, nick: 'สมมติชัย' }, 'policy', 'กรมธรรม์'), '99-0016 - สมมติชัย(11) - กรมธรรม์.pdf', 'nickname is used as typed');
+eq(name({ ...company, nick: 'k.aaa' }, 'policy', 'กรมธรรม์'), '99-0016 - สมมติชัย ทรานสปอร์ต(11) - กรมธรรม์.pdf', 'v4: the nickname is never used in file names');
 eq(name({ ...company, contractDate: '2026-03-09' }), '99-0016 - สมมติชัย ทรานสปอร์ต(3) - กรมธรรม์.pdf', 'March -> (3), not (03)');
 eq(name({ ...company, contractDate: '', policyStart: '2026-07-01' }), '99-0016 - สมมติชัย ทรานสปอร์ต(7) - กรมธรรม์.pdf', 'no contract date -> policy start month');
 eq(monthOf('', '', '2026-02-20'), 2, 'no dates -> upload month');
@@ -29,7 +29,7 @@ eq(customerPart({ name: 'บริษัท เอบีซี จำกัด (
 eq(customerPart({ name: 'หจก.สมชาย การช่าง' }), 'สมชาย การช่าง', 'หจก. removed');
 eq(customerPart({ name: 'ห้างหุ้นส่วนจำกัด ศรีสุข' }), 'ศรีสุข', 'ห้างหุ้นส่วนจำกัด removed');
 eq(customerPart({ name: 'นายสมชาย  ใจดี' }), 'นายสมชาย ใจดี', 'person name kept (only spaces squeezed)');
-eq(customerPart({ name: 'X', nick: '  ทดสอบ  ' }), 'ทดสอบ', 'nickname trimmed');
+eq(customerPart({ name: 'X', nick: '  ทดสอบ  ' }), 'X', 'v4: nickname ignored, customer name used');
 
 // plates
 eq(plateOnly('99-0016 นศ'), '99-0016', 'short province removed');
@@ -142,7 +142,7 @@ B.ACTIONS.renameFiles.run({ batch: 'rnEMPTY99', items: [{ id: f1.id, name: Drive
 eq(props.RENAME_LAST, 'rnTEST123', 'a run that renames nothing keeps the previous undo');
 
 // invoices are never renamed
-const inv = Drive.Files.create({ name: 'RI-2026-0001.pdf', mimeType: 'application/pdf', parents: [c.folders.pay], description: '{"no":"RI-2026-0001"}', appProperties: { bimeyar: 'item', kind: 'invoice' } });
+const inv = Drive.Files.create({ name: 'RI-2026-0001.pdf', mimeType: 'application/pdf', parents: [Object.values(Drive.files).find(f => f.appProperties?.bimeyar === 'sub' && f.appProperties.slot === 'pay' && f.parents[0] === c.id).id], description: '{"no":"RI-2026-0001"}', appProperties: { bimeyar: 'item', kind: 'invoice' } });
 eq(B.ACTIONS.renameFiles.run({ batch: 'rnTEST124', items: [{ id: inv.id, name: 'x' }] }).rows[0].status, 'invoice', 'invoice refused');
 eq(Drive.files[inv.id].name, 'RI-2026-0001.pdf', 'invoice name unchanged');
 
