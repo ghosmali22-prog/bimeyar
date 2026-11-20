@@ -1,5 +1,5 @@
 // Automatic file names (v3.2):  {PLATE} - {CUSTOMER}({M}) - {DOCNAME}.{ext}
-// e.g. "70-5416 - โชควิไล(11) - กรมธรรม์.pdf". No plate -> "โชควิไล(11) - บัตรประชาชน.jpg".
+// e.g. "70-5416 - โชควิไล ทรานสปอร์ต(7) - กรมธรรม์รถยนต์.pdf". No plate -> "โชควิไล(11) - บัตรประชาชน.jpg".
 // Pure functions (no DOM), also used by tests/naming.test.mjs. The backend only cleans the name
 // and adds " (2)", " (3)"… when the name is taken (see uniqueName in backend/Code.gs).
 
@@ -35,9 +35,11 @@ export function plateOnly(plate, province = '') {
 
 /** Company words removed from the customer name. Everything else stays exactly as written. */
 const COMPANY = ['ห้างหุ้นส่วนจำกัด', '(มหาชน)', 'บริษัท', 'จำกัด', 'หจก.', 'หจก', 'บจก.'];
+/**
+ * The customer part of a file name: the customer NAME exactly as written, without the company words
+ * (นาย / นาง / นางสาว stay). Never the nickname (v4): the nickname is the contact person, for display and search only.
+ */
 export function customerPart(c) {
-  const nick = safeName(c?.nick);
-  if (nick) return nick;
   let n = String(c?.name || '');
   for (const w of COMPANY) n = n.split(w).join(' ');
   return safeName(n);
@@ -76,6 +78,9 @@ export function docNameFromOld(oldName, folder, type) {
   }
   return docNameFor({ aiName: d, folder, type });
 }
+
+/** True when a name already follows the pattern "{plate} - {customer}({month}) - {document}": such names are never changed (v4). */
+export const followsPattern = name => !!plateFromName(name);
 
 /** Plate at the start of a name that already follows the pattern ("70-5416 - X(11) - …"). */
 export function plateFromName(name) {
