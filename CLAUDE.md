@@ -24,6 +24,10 @@ to a production system. Talk to the owner (Pejman) in Persian.
   "old" of the FIRST `Renamed:` line (descJoin always keeps it), the previous folder comes from the `Moved from: name [id]` line and
   is used only if it still exists for the same customer (never re-created). Adds `Restored: new ⇒ old`, tags `rsb`/`rsf`/`rst`,
   Script property `RESTORE_LAST`. Names given at upload and invoices are never restored.
+  v4.3 "Edit with AI" (editor; list = admin): `aiEditApply` / `aiEditUndo` / `aiEditList`. Only renames, moves within ITS OWN
+  customer's vehicles and MERGES ticked vehicle data (never the plate); keeps the previous state (file line
+  `AI edit <batch>: old ⇒ new [from>to|type]`, vehicle JSON `_ai`, tag `aib`, Script property `AIEDIT_LOG` = last 5) so the
+  undo is exact. The preview is computed in the app (`aiEditSuggest` in `js/vehicles.js`); nothing changes before Save.
   The description may end with lines `Original file name: …` and `Renamed: old ⇒ new`: the app shows them apart from the note and
   `updateFile` keeps them (`descSplit` / `descJoin`). Never write them into an invoice description (that is JSON).
   File names are built in `js/naming.js` (`{plate} - {customer}({month}) - {document}.{ext}`); the backend only cleans the name and
@@ -108,7 +112,7 @@ to a production system. Talk to the owner (Pejman) in Persian.
   Rollback tag of `main` before it: `v4.1.0-stable` (= `v4.1.0`). Before that: `v4.0.0-stable` (= `v4.0.0`), `v3.3.0-stable` (= `v3.3.0`), `v3.2-pre-device` (= `v3.2.0`),
   `v3.1-pre-naming` (= `v3.1.0`), `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
-- Tests: `node tests/restore.test.mjs` (v4.2 restore names), `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
+- Tests: `node tests/aiedit.test.mjs` (v4.3 Edit with AI), `node tests/restore.test.mjs` (v4.2 restore names), `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
 
 ## Design (owner's decision)
 

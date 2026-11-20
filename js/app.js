@@ -11,7 +11,7 @@ import { calcTotals, baht, lineAmount, invoiceHtml, INVOICE_CSS } from './invoic
 import { prepare, normalize, diff, fileNote, FIELD_GROUPS, DATE_FIELDS } from './ai.js';
 import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './validate.js';
 import { buildName, docNameFromOld, plateOnly, plateFromName, followsPattern, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
-import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey, needsAiRead, detectVehicles } from './vehicles.js';
+import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey, needsAiRead, detectVehicles, aiEditSuggest } from './vehicles.js';
 
 /*
  * Layout = the v2 design (dashboard with stat cards, dark customer panel with the purple case file,
@@ -621,7 +621,10 @@ function caseFile(c, mine) {
             <div class="irow"><small>${t('cf.policyExpiry')}</small><span>${m.exp ? `${fmtDay(m.exp)} · ${daysText(m.d)}` : t('st.notSet')}</span></div>
             ${m.legacy ? `<small class="src">${t('st.fromFile')}</small>` : ''}</section>
         </div>
-        <div class="vadd" data-need="edit"><button class="btn glassy sm" data-act="veh-add" data-id="${esc(c.id)}">${icon('plus', 15)}<span>${t('vh.add')}</span></button></div>
+        <div class="vadd" data-need="edit">
+          ${lastAib(c.id) ? `<button class="btn glassy sm" data-act="ae-undo" data-b="${esc(lastAib(c.id))}">${icon('history', 15)}<span>${t('ae.undo')}</span></button>` : ''}
+          ${mine.some(aeReadable) ? `<button class="btn glassy sm" data-act="ae-cust" data-id="${esc(c.id)}">${icon('wand', 15)}<span>${t('ae.cust')}</span></button>` : ''}
+          <button class="btn glassy sm" data-act="veh-add" data-id="${esc(c.id)}">${icon('plus', 15)}<span>${t('vh.add')}</span></button></div>
         ${all.length ? '' : `<p class="dnote">${icon('info', 15)}<span>${t('vh.none')}</span></p>`}
         ${files}
         <section class="dsec">
@@ -1279,6 +1282,8 @@ async function openFile(id) {
     </form>`}`,
     foot: `<button type="button" class="icon-btn danger" data-act="del-file" data-need="edit" data-id="${esc(f.id)}" title="${t('btn.delete')}">${icon('trash', 17)}</button>
       <button type="button" class="icon-btn" data-act="dl-file" title="${t('fl.download')}">${icon('download', 17)}</button>
+      ${canEdit() && !inv && aeReadable(f) ? `<button type="button" class="btn ghost sm" data-act="ae-file" data-id="${esc(f.id)}" title="${t('ae.file')}">${icon('wand', 16)}<span>${t('ae.file')}</span></button>` : ''}
+      ${canEdit() && f.aib ? `<button type="button" class="btn danger-ghost sm" data-act="ae-undo" data-b="${esc(f.aib)}" data-id="${esc(f.id)}">${icon('history', 16)}<span>${t('ae.undo')}</span></button>` : ''}
       ${S.store.kind === 'cloud' && canEdit() ? `<button type="button" class="btn ghost sm sh-btn" data-act="share-link" title="${t('sh.copy')}" aria-label="${t('sh.copy')}">${icon('link', 16)}<span>${t('sh.copy')}</span></button>
       <button type="button" class="btn ghost sm sh-btn" data-act="share-stop" id="shStop" title="${t('sh.stop')}" aria-label="${t('sh.stop')}" ${f.shared ? '' : 'style="display:none"'}>${icon('unlink', 16)}<span>${t('sh.stop')}</span></button>` : ''}
       ${navigator.share ? `<button type="button" class="icon-btn" data-act="share-file" title="${t('fl.share')}">${icon('share', 17)}</button>` : ''}
@@ -1916,6 +1921,225 @@ async function restoreUndo() {
   }
 }
 
+/* ---------- "Edit with AI" (editor, v4.3) ---------- */
+/*
+ * The AI reads one file (file window) or all files of a customer (case file) again. The app then works out the right
+ * folder, vehicle, month and name (always the customer's real name, never the nickname) and, for policies, the
+ * vehicle data. PREVIEW: before -> after for every file, everything editable, rows can be unticked; already correct =
+ * "OK, no change"; low confidence or AI error = "please choose" (unchanged unless chosen). Back = nothing changes.
+ * Only images and PDFs are read, two at a time, with a progress bar and Stop. Save sends small batches; "Undo AI edit"
+ * puts back the exact previous state (last 5 batches).
+ */
+let AE = null;
+const aeReadable = f => !f.invoice && (isImage(f) || isPdf(f));
+const aeLoc = f => f.vslot ? `${esc(vehLabel(vehById(f.vehicleId)))} · ${slotName(f.vslot)}` : FOLDER[f.folder] ? iso(FOLDER[f.folder].th) : 'ไม่ระบุ · ' + t('fo.other');
+/** the customer's vehicles + the new ones this edit would add */
+function aeList() {
+  const list = vehOf(AE.cid).map(v => ({ ...v }));
+  for (const n of Object.values(AE.newVeh)) list.push({ ...n.data, id: 'N:' + n.key, ym: n.ym, isNew: true });
+  return list;
+}
+const aeVeh = id => aeList().find(v => v.id === id) || null;
+function aiEditStart(cid, ids) {
+  if (!canEdit()) return toast(t('err.role'), 'err');
+  if (!aiOn()) return toast(S.mode === 'local' ? t('ai.localOnly') : t('ai.off'), 'err');
+  const files = S.files.filter(f => ids.includes(f.id) && f.customerId === cid);
+  if (!files.length) return toast(t('ae.noFiles'), 'err');
+  AE = { cid, rows: files.map(f => ({ f, ai: aeReadable(f) ? 'wait' : 'skip', st: f.invoice ? 'invoice' : aeReadable(f) ? 'wait' : 'skip', on: false, pick: { vkey: f.vehicleId || '', slot: f.vslot || '', name: f.name } })), newVeh: {}, vd: {}, stop: false };
+  sheet({ title: t('ae.title'), sub: esc(cust(cid)?.name || ''), cls: 'xwide', body: `<div id="aeHead"></div><div id="aeNew"></div><div class="up-list" id="aeList"></div><div id="aeDiff"></div>`,
+    foot: `<span class="sp"></span><button type="button" class="btn ghost" data-act="close-sheet">${t('btn.back')}</button><button type="button" class="btn primary" data-act="ae-save" id="aeGo"></button>` });
+  sheetClose = () => { if (AE) AE.stop = true; AE = null; };
+  drawAiEdit();
+  aeQueue();
+}
+async function aeQueue() {
+  const ae = AE;
+  const worker = async () => {
+    for (;;) {
+      if (AE !== ae || ae.stop) return;
+      const r = ae.rows.find(x => x.ai === 'wait');
+      if (!r) return;
+      r.ai = 'busy'; r.since = Date.now(); drawAiEdit();
+      try {
+        const blob = await S.store.getBlob(r.f.id);
+        const file = new File([blob], r.f.name, { type: blob.type || r.f.mime || '' });
+        r.n = normalize(await S.store.aiExtract(await prepare([file])));
+        r.ai = 'done';
+      } catch (e) { r.ai = 'err'; r.err = aiErr(e); }
+      if (AE !== ae) return;
+      aePlace(r);
+      drawAiEdit();
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  if (AE === ae && ae.stop) { for (const r of ae.rows) if (r.ai === 'wait') { r.ai = 'stopped'; r.st = 'skip'; } drawAiEdit(); }
+}
+/** The AI's suggestion for a row (low confidence / error -> "please choose", the row stays as it is) */
+function aePlace(r) {
+  if (r.ai !== 'done') { r.st = 'choose'; r.on = false; return; }
+  const c = cust(AE.cid), s = aiEditSuggest(r.f, c, aeList(), r.n);
+  r.sug = s;
+  if (s.conf === 'low' || s.conf === 'none') { r.st = 'choose'; r.on = false; return; }
+  let vkey = s.vid;
+  if (s.add) {
+    const key = AE.cid + '|' + plateKey(s.add.plate) + '|' + s.add.ym;
+    if (!AE.newVeh[key]) { const data = {}; for (const k of VFIELDS) if (r.n.values[k]) data[k] = r.n.values[k]; data.plate = s.add.plate; AE.newVeh[key] = { key, ym: s.add.ym, ok: false, data }; }
+    vkey = 'N:' + key;
+  }
+  r.pick = { vkey, slot: s.slot, name: s.name };
+  aeStatus(r);
+}
+/** 'ok' when the file is already right, else 'change' (ticked) */
+function aeStatus(r) {
+  const p = r.pick, f = r.f;
+  if (!p.vkey || !p.slot) { r.st = 'choose'; r.on = false; return; }
+  const same = p.vkey === (f.vehicleId || '') && p.slot === (f.vslot || '') && p.name === f.name;
+  r.st = same ? 'ok' : 'change';
+  r.on = !same;
+}
+/** "old -> new" vehicle data from the policies the AI read (existing vehicle records only; the plate never changes) */
+function aeDiff() {
+  const best = {};
+  for (const r of AE.rows) {
+    if (!r.n || r.st === 'choose' || r.st === 'skip' || !['1', '2', '3'].includes(r.pick.slot)) continue;
+    const v = S.vehicles.find(x => x.id === r.pick.vkey);
+    if (!v) continue;
+    for (const d of diff(v, r.n, 'policy')) {
+      if (!VFIELDS.includes(d.key) || d.key === 'plate') continue;
+      const k = v.id + '|' + d.key;
+      if (!best[k] || d.conf > best[k].conf) best[k] = { ...d, k, label: vehLabel(v) };
+    }
+  }
+  return Object.values(best).map(d => ({ ...d, on: AE.vd[d.k] ?? d.on }));
+}
+const aeChip = st => `<em class="conf ${{ ok: 'c-hi', change: 'c-mid', choose: 'c-lo', wait: '', skip: '', invoice: '' }[st] || ''}">${t('ae.st.' + st)}</em>`;
+function drawAiEdit() {
+  if (!AE || !$('#aeList')) return;
+  const rows = AE.rows, read = rows.filter(r => !['wait', 'busy'].includes(r.ai)).length, total = rows.length;
+  const busy = rows.some(r => r.ai === 'wait' || r.ai === 'busy');
+  $('#aeHead').innerHTML = `<p class="note">${icon('wand', 15)}<span>${t('ae.explain')}</span></p>
+    ${busy ? `<div class="ae-prog"><p class="as-tip"><span class="spin sm"></span>${t('ae.reading', { a: read, b: total })} <span class="slow-hint">${t('ai.slowHint')}</span></p>
+      <div class="prog"><i style="width:${Math.round(read / total * 100)}%"></i></div><button type="button" class="btn ghost sm" data-act="ae-stop" ${AE.stop ? 'disabled' : ''}>${icon('x', 15)}<span>${t('ae.stop')}</span></button></div>` : ''}`;
+  // new vehicles (renewal month / new plate): only made when ticked
+  const used = new Set(rows.filter(r => r.on).map(r => r.pick.vkey));
+  const nv = Object.values(AE.newVeh).filter(n => used.has('N:' + n.key));
+  $('#aeNew').innerHTML = nv.length ? `<section class="su-new">${nv.map(n => `<div class="su-card ${n.ok ? 'ok' : ''}" data-aenv="${esc(n.key)}">
+    <label class="su-ok"><input type="checkbox" data-aenv-ok ${n.ok ? 'checked' : ''}><b>${icon('car', 15)} ${t(vehOf(AE.cid).some(v => plateKey(v.plate) === plateKey(n.data.plate)) ? 'su.renew' : 'su.newVeh')}</b></label>
+    <div class="su-f"><label>${t('cf.plate')}<input value="${esc(n.data.plate || '')}" readonly></label><label>${t('vh.monthFolder')}<input value="${esc(ymText(n.ym))}" readonly></label></div></div>`).join('')}</section>` : '';
+  const list = aeList();
+  $('#aeList').innerHTML = rows.map((r, i) => {
+    const f = r.f, p = r.pick, v = aeVeh(p.vkey);
+    const editable = r.st !== 'invoice' && r.st !== 'skip' && r.ai !== 'wait' && r.ai !== 'busy';
+    const chgName = p.name !== f.name, chgLoc = p.vkey !== (f.vehicleId || '') || p.slot !== (f.vslot || '');
+    return `<div class="up-row ae-row ${r.st}" data-aei="${i}" style="--i:${Math.min(i, 8)}">
+      <label class="ae-on"><input type="checkbox" data-ae-on ${r.on ? 'checked' : ''} ${editable ? '' : 'disabled'} aria-label="${esc(f.name)}"></label>
+      <div class="up-main">
+        <div class="up-top"><small class="su-file">${ftBadge(f, 14, 'sm')} ${esc(f.name)}</small>${r.ai === 'wait' || r.ai === 'busy' ? '' : aeChip(r.st)}</div>
+        ${r.ai === 'busy' ? `<p class="ai-line busy"><span class="spin sm"></span>${t('ai.reading')} <span class="elapsed" data-since="${r.since}"></span></p>` : ''}
+        ${r.ai === 'err' ? `<p class="ai-line err">${icon('alert', 14)}${esc(r.err)} · ${t('ae.unchanged')}</p>` : ''}
+        ${r.ai === 'skip' ? `<p class="hint">${t(f.invoice ? 'ae.invoice' : 'ae.notReadable')}</p>` : ''}${r.ai === 'stopped' ? `<p class="hint">${t('ae.stopped')}</p>` : ''}
+        ${r.st === 'choose' && r.ai === 'done' ? `<p class="ai-line err">${icon('alert', 14)}${t('ae.lowConf')}</p>` : ''}
+        ${editable ? `<div class="ae-ba">
+          <div class="ae-b"><small>${t('ae.before')}</small><b>${esc(f.name)}</b><span>${aeLoc(f)}</span></div>
+          <div class="ae-a"><small>${t('ae.after')}</small>
+            <input data-ae="name" class="${chgName ? 'chg' : ''}" value="${esc(p.name)}" maxlength="200" aria-label="${t('u.fileName')}">
+            <div class="su-grid ae-grid">
+              <label>${t('vh.vehicle')}<select data-ae="vkey" class="${chgLoc && p.vkey !== (f.vehicleId || '') ? 'chg' : ''}">${opt('', t('su.choose'), p.vkey)}${list.map(x => opt(x.id, (x.isNew ? t('su.newVeh') + ': ' : '') + vehLabel(x), p.vkey)).join('')}</select></label>
+              <label>${t('vh.month')}<input value="${v ? esc(ymText(v.ym)) : '—'}" readonly tabindex="-1"></label>
+              <label>${t('fo.choose')}<select data-ae="slot" class="${p.slot !== (f.vslot || '') ? 'chg' : ''}">${opt('', t('su.choose'), p.slot)}${FILE_SLOTS.map(s => opt(s, VSLOT[s].th, p.slot)).join('')}</select></label>
+            </div></div></div>` : ''}
+      </div></div>`;
+  }).join('');
+  const d = aeDiff();
+  $('#aeDiff').innerHTML = d.length ? `<section class="diff"><h3>${icon('car', 16)}${t('ae.vehData')}</h3><p class="muted">${t('su.diffSub')}</p>${diffRows(d, 'data-aevd')}</section>` : '';
+  const go = $('#aeGo');
+  if (go) { const n = rows.filter(r => r.on).length + d.filter(x => x.on).length; go.textContent = t('ae.save', { n }); go.disabled = !n || AE.busy; }
+}
+/** a choice in a row changed */
+function aePick(r, k, val) {
+  r.pick[k] = val;
+  if (k === 'name') { r.nameEdited = true; return; }
+  if (!r.nameEdited) { const v = aeVeh(r.pick.vkey); r.pick.name = v && r.pick.slot ? vehicleFileName({ vehicle: v, customer: cust(AE.cid), slot: r.pick.slot, ext: extOf(r.f.name) }) : r.f.name; }
+  aeStatus(r);
+  drawAiEdit();
+}
+async function aiEditSave(btn) {
+  if (!AE || AE.busy) return;
+  const ae = AE, c = cust(ae.cid);
+  const rows = ae.rows.filter(r => r.on && r.pick.vkey && r.pick.slot);
+  const vd = aeDiff().filter(x => x.on);
+  if (!rows.length && !vd.length) return toast(t('ae.nothing'), 'err');
+  const nv = [...new Set(rows.map(r => r.pick.vkey).filter(k => k.startsWith('N:')))].map(k => ae.newVeh[k.slice(2)]);
+  if (nv.some(n => !n.ok)) { toast(t('su.confirmNew'), 'err'); $('#aeNew')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  ae.busy = true; ae.stop = true; drawAiEdit();
+  const total = rows.length + (vd.length ? 1 : 0);
+  sheet({ title: t('ae.title'), cls: 'small', body: `<p class="as-tip" id="aeProg"><span class="spin sm"></span>${t('ae.saving', { a: 0, b: total })}</p><div class="prog rs-bar"><i id="aeBar" style="width:0%"></i></div>` });
+  sheetClose = null;
+  const batch = 'ai' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  let ok = 0, same = 0, bad = 0, sent = 0, failed = null;
+  const prog = () => { const p = $('#aeProg'); if (p) p.innerHTML = `<span class="spin sm"></span>${t('ae.saving', { a: sent, b: total })}`; const b = $('#aeBar'); if (b) b.style.width = Math.round(sent / Math.max(1, total) * 100) + '%'; };
+  try {
+    // 1) the vehicles this edit needs: a new month / new plate (ticked) or the old single plate becomes a record
+    const real = {};
+    for (const k of new Set(rows.map(r => r.pick.vkey))) {
+      if (k.startsWith('N:')) { const n = ae.newVeh[k.slice(2)]; real[k] = (await S.store.saveVehicle({ customerId: c.id, ym: n.ym, ...n.data })).id; }
+      else if (k.startsWith('L:')) real[k] = (await realVehicle(vehById(k), c.id)).id;
+      else real[k] = k;
+    }
+    // 2) files (10 per request) and vehicle data (with the first request)
+    const items = rows.map(r => {
+      const moved = r.pick.vkey !== (r.f.vehicleId || '') || r.pick.slot !== (r.f.vslot || '');
+      return { id: r.f.id, name: r.pick.name !== r.f.name ? r.pick.name.trim() : '', vehicleId: moved ? real[r.pick.vkey] : '', slot: moved ? r.pick.slot : '' };
+    });
+    const byV = {};
+    for (const x of vd) { const [vid, key] = x.k.split('|'); (byV[vid] ||= {})[key] = x.new; }
+    let vehicles = Object.entries(byV).map(([id, fields]) => ({ id, fields }));
+    const queue = items.slice();
+    let tries = 0;
+    do {
+      const chunk = queue.splice(0, 10);
+      const res = await S.store.aiEditApply(batch, c.id, chunk, vehicles);
+      if (vehicles.length) { sent++; if (res.vehicles.some(x => x.status === 'ok')) ok++; }
+      vehicles = [];
+      for (const x of res.rows) {
+        if (x.status === 'later') { queue.push(chunk.find(y => y.id === x.id)); continue; }
+        sent++;
+        if (x.status === 'ok') ok++; else if (x.status === 'same') same++; else bad++;
+      }
+      prog();
+    } while (queue.length && tries++ < items.length + 20);
+  } catch (e) { failed = e; }
+  AE = null;
+  await reload().catch(() => { });
+  sheet({ title: t('ae.title'), sub: t('rn.report'), cls: 'small', body: `<p class="sh-text">${t('ae.done', { n: ok })}</p>${same ? `<p class="sh-text">${t('rn.same', { n: same })}</p>` : ''}${bad ? `<p class="sh-text">${t('rn.err', { n: bad })}</p>` : ''}<p class="muted">${t('ae.safe')}</p>`,
+    foot: `<button type="button" class="btn danger-ghost" data-act="ae-undo" data-b="${esc(batch)}">${icon('history', 17)}<span>${t('ae.undo')}</span></button><span class="sp"></span><button class="btn primary" data-act="close-sheet">${t('btn.close')}</button>` });
+  if (failed) throw failed;
+}
+/** Undo an AI-edit batch (id = only that file) */
+async function aiEditUndo(batch, id = '') {
+  if (!batch) return;
+  if (!await confirmBox(t(id ? 'ae.undoFileQ' : 'ae.undoQ'), t('ae.undo'), false)) return;
+  sheet({ title: t('ae.undo'), cls: 'small', body: `<p class="as-tip"><span class="spin sm"></span>${t('rn.undoing')}</p>` });
+  let done = 0, skipped = 0, r, guard = 0;
+  try {
+    do { r = await S.store.aiEditUndo(batch, id); done += r.done; skipped += r.skipped; } while (r.more && (r.done || r.skipped) && guard++ < 50);
+  } finally {
+    await reload().catch(() => { });
+    sheet({ title: t('ae.undo'), sub: t('rn.report'), cls: 'small', body: `<p class="sh-text">${done || skipped ? t('ae.undone', { n: done }) : t('rn.undoNone')}</p>${skipped ? `<p class="sh-text">${t('ae.undoSkip', { n: skipped })}</p>` : ''}`,
+      foot: `<span class="sp"></span><button class="btn primary" data-act="close-sheet">${t('btn.close')}</button>` });
+  }
+}
+/** Settings (admin): the last 5 AI edits, each can be undone */
+async function aiEditsSheet() {
+  sheet({ title: t('ae.list'), cls: 'wide', body: `<p class="as-tip"><span class="spin sm"></span>${t('team.loading')}</p>` });
+  const list = (await S.store.aiEditList()).slice().reverse();
+  sheet({ title: t('ae.list'), sub: t('ae.listSub'), cls: 'wide', body: list.length ? `<div class="team-list">${list.map((x, i) => `<div class="team-row" style="--i:${i}"><span class="ava dv-ava">${icon('wand', 17)}</span>
+    <span class="tmain"><b>${esc(x.cn || cust(x.c)?.name || '—')}</b><small>${when(x.at)} · ${t('ae.nFiles', { n: x.n })} · <bdi dir="ltr">${esc(x.by)}</bdi>${x.u ? ' · ' + t('ae.wasUndone') : ''}</small></span>
+    ${x.u ? '' : `<button class="btn ghost sm" data-act="ae-undo" data-b="${esc(x.b)}">${icon('history', 15)}<span>${t('ae.undo')}</span></button>`}</div>`).join('')}</div>` : `<p class="sh-text">${t('ae.none')}</p>` });
+}
+/** The newest AI-edit batch of a customer's files (for "Undo AI edit" on the customer screen) */
+const lastAib = cid => S.files.filter(f => f.customerId === cid && f.aib).map(f => f.aib).sort().pop() || '';
+
 /* ---------- assistant ---------- */
 function assistantSheet() {
   const first = S.customers[0]?.name;
@@ -1955,6 +2179,7 @@ function settingsSheet() {
       ${signedIn ? card('lock', t('dv.title'), device.unlocked() ? t('dv.subOn') : t('dv.subOff'), `<span class="sp"></span>${!device.has() ? `<button class="btn primary" data-act="dv-set">${icon('lock', 17)}<span>${t('dv.setBtn')}</span></button>` : ''}<button class="btn ghost" data-act="devices">${icon('phone', 17)}<span>${t('dv.open')}</span></button>`) : ''}
       ${S.store ? card('invoice', t('co.title'), isAdmin() ? t('co.sub') : t('co.subRo'), `<span class="sp"></span><button class="btn ghost" data-act="company">${icon('edit', 17)}<span>${t('co.title')}</span></button>`) : ''}
       ${S.store && isAdmin() && (signedIn || !cloud) ? card('move', t('mv.title'), t('mv.sub'), `<span class="sp"></span><button class="btn ghost" data-act="move-tool">${icon('move', 17)}<span>${t('mv.open')}</span></button>`) : ''}
+      ${S.store && isAdmin() && (signedIn || !cloud) ? card('wand', t('ae.list'), t('ae.listSub'), `<span class="sp"></span><button class="btn ghost" data-act="ae-list">${icon('history', 17)}<span>${t('rn.open')}</span></button>`) : ''}
       ${S.store && isAdmin() && (signedIn || !cloud) ? card('history', t('rs.title'), t('rs.sub'), `<span class="sp"></span><button class="btn ghost" data-act="restore">${icon('history', 17)}<span>${t('rn.open')}</span></button>`) : ''}
       ${S.store && isAdmin() && (signedIn || !cloud) ? card('edit', t('rn.title'), t('rn.sub'), `<span class="sp"></span><button class="btn ghost" data-act="rename">${icon('edit', 17)}<span>${t('rn.open')}</span></button>`) : ''}
       ${cloud ? `<div class="set-card"><div class="set-h">${icon('wand', 22)}<div><b>${t('ai.status')}</b><small>${S.store?.aiReady ? t('ai.on') : t('ai.off')}</small></div><span class="sp"></span><em class="st-badge ${S.store?.aiReady ? 'ok' : 'off'}">${S.store?.aiReady ? t('ai.ready') : t('ai.notSet')}</em></div></div>` : ''}
@@ -2025,7 +2250,7 @@ const uploadSpot = cid => {
 };
 
 /* ================= actions ================= */
-const EDIT_ACTS = new Set(['smart', 'veh-add', 'veh-edit', 'del-vehicle', 'mv-slot', 'share-link', 'share-stop', 'upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
+const EDIT_ACTS = new Set(['ae-file', 'ae-cust', 'ae-save', 'ae-undo', 'smart', 'veh-add', 'veh-edit', 'del-vehicle', 'mv-slot', 'share-link', 'share-stop', 'upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
 const ACT = {
   go(el) { S.view = el.dataset.view; S.mobileDetail = false; closeSheet(); mount(); scrollTo({ top: 0, behavior: 'smooth' }); },
   'close-sheet': closeSheet,
@@ -2042,6 +2267,13 @@ const ACT = {
   'mv-old'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return oldFoldersSheet(); },
   'mv-slot'(el) { return moveCur(el.dataset.slot); },
   restore() { if (!isAdmin()) return toast(t('err.role'), 'err'); return restoreSheet(); },
+  /* v4.3: Edit with AI */
+  'ae-file'(el) { const f = S.files.find(x => x.id === el.dataset.id); if (f) aiEditStart(f.customerId, [f.id]); },
+  'ae-cust'(el) { const cid = el.dataset.id || S.sel; aiEditStart(cid, S.files.filter(f => f.customerId === cid && aeReadable(f)).map(f => f.id)); },
+  'ae-stop'() { if (AE) { AE.stop = true; drawAiEdit(); } },
+  'ae-save'(el) { return aiEditSave(el); },
+  'ae-undo'(el) { return aiEditUndo(el.dataset.b, el.dataset.id || ''); },
+  'ae-list'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return aiEditsSheet(); },
   'rs-all'(el) { if (!RS) return; for (const r of RS.rows) r.on = !!el.dataset.on; for (const c of $$('[data-rs-on]')) c.checked = !!el.dataset.on; rsBtn(); },
   'rs-apply'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return restoreApply(); },
   'rs-undo'() { if (!isAdmin()) return toast(t('err.role'), 'err'); return restoreUndo(); },
@@ -2328,6 +2560,7 @@ document.addEventListener('input', e => {
     if (b) { b.disabled = !ok; b.textContent = t('mv.apply', { n: ok }); }
   }
   else if (el.dataset.invVeh !== undefined && I) invPickVehicle(el.value);
+  else if (el.dataset.ae && AE) { const r = AE.rows[+el.closest('.ae-row').dataset.aei]; if (el.dataset.ae === 'name') aePick(r, 'name', el.value); else aePick(r, el.dataset.ae, el.value); }
   else if (el.dataset.rsName !== undefined && RS) { RS.rows[+el.closest('.rs-row').dataset.rs].want = el.value; rsBtn(); }
   else if (el.dataset.rsBack !== undefined && RS) RS.rows[+el.closest('.rs-row').dataset.rs].back = el.value === '1';
   else if (el.dataset.mvdYm !== undefined && MV) {   // a detected vehicle's month: its rows follow (unless changed by hand)
@@ -2354,6 +2587,9 @@ document.addEventListener('change', e => {
   if (el.type !== 'checkbox') return;
   if (el.dataset.diff && U) { U.toggles[el.dataset.diff] = el.checked; drawUpload(); }
   if (el.dataset.rnOn && RN) { RN.rows[+el.dataset.rnOn].on = el.checked; rnCount(); }
+  if (el.dataset.aeOn !== undefined && AE) { AE.rows[+el.closest('.ae-row').dataset.aei].on = el.checked; drawAiEdit(); }
+  if (el.dataset.aenvOk !== undefined && AE) { AE.newVeh[el.closest('[data-aenv]').dataset.aenv].ok = el.checked; drawAiEdit(); }
+  if (el.dataset.aevd && AE) { AE.vd[el.dataset.aevd] = el.checked; drawAiEdit(); }
   if (el.dataset.rsOn !== undefined && RS) { RS.rows[+el.closest('.rs-row').dataset.rs].on = el.checked; rsBtn(); }
   if (el.dataset.mvdOn !== undefined && MV) {   // untick a detected vehicle: its files are not moved
     const box = el.closest('.mv-dv'), gi = +box.dataset.g, g = MV.groups[gi], v = g.det.vehicles.find(x => x.key === box.dataset.k);
