@@ -839,3 +839,18 @@ img.fadein { animation: fade .5s ease both; }
 @media (max-width: 480px) {
   .su-grid, .su-f, .mv-to, .vslots { grid-template-columns: 1fr; }
 }
+
+/* v4.1: "Detect vehicles automatically" in the move tool */
+.mv-det { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 10px; }
+.mv-det > .btn { align-self: flex-start; }
+.mv-dv { display: grid; grid-template-columns: auto auto minmax(150px, 180px) minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 48px; padding: 6px 12px; border-radius: 16px; background: #fff; border: 1px solid var(--line); cursor: pointer; }
+.mv-dv.off { opacity: .55; }
+.mv-dv > input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); }
+.mv-dv input[type=month] { height: 38px; border-radius: 12px; border: 1px solid rgba(26, 23, 48, .1); padding: 0 10px; font: inherit; font-size: 13px; min-width: 0; }
+.mv-dv small { color: var(--muted); font-size: 11.5px; min-width: 0; }
+.mv-dv .cnt { font-style: normal; font-size: 11px; background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 1px 9px; white-space: nowrap; }
+@media (max-width: 820px) {
+  .mv-dv { grid-template-columns: auto 1fr auto; }
+  .mv-dv input[type=month] { grid-column: 1 / -1; height: 44px; font-size: 16px; }
+  .mv-dv small { grid-column: 1 / -1; }
+}
