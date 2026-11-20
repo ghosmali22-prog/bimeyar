@@ -320,4 +320,29 @@ export function detectVehicles(c, files, vehicles = [], ai = {}) {
   }).sort((a, b) => a.ym.localeCompare(b.ym) || a.plate.localeCompare(b.plate));
   return { vehicles: out, assign };
 }
+/* ---------------- "Edit with AI" (v4.3) ---------------- */
+/**
+ * What a file of customer c should be, from the AI's new reading n (normalize()). list = the customer's vehicles
+ * (vehiclesOf) + new ones of this edit ({ id: 'N:…', isNew }). The name is always made from the customer's real name
+ * (never the nickname), so misspellings and wrong spacing in old names are fixed.
+ * Returns { slot, vid, add: { plate, ym } | null, name, conf: 'high' | 'mid' | 'low' | 'none' }.
+ * 'low' / 'none' = "please choose": the file stays unchanged unless the user chooses.
+ */
+export function aiEditSuggest(f, c, list, n, today = new Date().toISOString().slice(0, 10)) {
+  if (!n) return { slot: '', vid: '', add: null, name: '', conf: 'none' };
+  const v = n.values || {};
+  const slot = slotFromAi(n, today) || (FILE_SLOTS.includes(f.vslot) ? f.vslot : '');
+  const cur = list.find(x => x.id === f.vehicleId);
+  const fv = findVehicle(v, slot, list);
+  let vid = '', add = null, conf = 'high';
+  if (fv.vid) { vid = fv.vid; conf = fv.conf; }
+  else if (fv.add) add = { plate: plateOnly(v.plate, v.province), ym: fv.ym || ymForVehicle(v, today) };
+  else if (cur) { vid = cur.id; conf = 'mid'; }   // the AI found no plate / chassis: the file keeps its vehicle
+  else conf = 'none';
+  if (v.plate && (n.conf?.plate ?? 1) < 0.6) conf = 'low';   // a blurred plate is never trusted
+  if (!slot) conf = 'none';
+  const veh = vid ? list.find(x => x.id === vid) : add;
+  const name = veh && slot ? vehicleFileName({ vehicle: veh, customer: c, slot, ext: extOf(f.name) }) : '';
+  return { slot, vid, add, name, conf };
+}
 export { safeName };
