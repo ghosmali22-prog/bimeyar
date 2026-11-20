@@ -76,6 +76,20 @@ No new permission, no `setup` run, no Script property to add. After deploying:
 
 Roll back: Deploy → Manage deployments → ✏️ → choose the previous version → Deploy.
 
+## v3.3 update (device password)
+
+Only steps 1 (paste `Code.gs`; `appsscript.json` did not change) and 4 (✏️ → **New version**, description `v3.3.0`).
+No new permission, no `setup` run, no Script property to add (`DEVICE_SESSIONS` is created by itself on the first
+device password). `ACL` and `ROOT_ID` are not touched. After deploying:
+
+1. Sign in with Google → the app asks for a device password → set one → the app opens.
+2. Close the app and open it again: only the password is asked.
+3. Settings → **My devices**: this device is listed. On a second device, sign out the first one: the first one is
+   sent to Google sign-in on its next action.
+
+Roll back: Deploy → Manage deployments → ✏️ → choose the previous version → Deploy. (With the old backend, devices
+with a password are sent to Google sign-in once; nothing else changes.)
+
 ## AI usage log
 
 Every AI **attempt** is logged without any customer data (time, model, status such as `ok` / `http503` /

@@ -1,5 +1,25 @@
 # Changelog
 
+## v3.3.0 (2026-11-21)
+
+- **Device password**: sign in with Google once per device, then open the app with a password (at least 6 characters)
+  or a 6-digit PIN. Right after "Sign in with Google" the app asks for it; **Skip** keeps the old behaviour
+  (Settings → My devices → "Set a device password" sets it later).
+- The backend gives the device its own session (`createDeviceSession`, only with a Google ID token): a random 256-bit
+  secret that is shown once; Script property `DEVICE_SESSIONS` keeps only its SHA-256, email, device name, created,
+  last used and expiry (30 days). Every request sends either the Google ID token or the session; the role is read from
+  the ACL on every request, so a person removed from the ACL is blocked at once (and their sessions are deleted).
+- On the device the secret is encrypted with PBKDF2-SHA-256 (250 000 rounds, random salt) + AES-CTR; only that blob is in
+  localStorage. AES-CTR has no check value, so a wrong password cannot be tested on the device: the **server** counts
+  wrong attempts and deletes the session after 5 (the device then deletes the blob and asks for Google). A copied blob
+  cannot be guessed offline. The password is never stored or sent.
+- Unlock screen (v2 design), **Forgot password** (Google again, new password, the old session is removed),
+  auto-lock after 15 minutes without use (password, no Google), **Sign out** removes the blob and ends the session.
+- Settings → **My devices**: device name, last used, expires, sign out any device. Admins also see every user's devices.
+- At most 5 devices per person (a 6th replaces the one not used for the longest time).
+- Backend changed (new actions `createDeviceSession`, `listMySessions`, `revokeSession`, `listAllSessions`, `revokeAny`;
+  `doPost` accepts `dev: { sid, key }`). No new permissions, no `setup` run. Demo mode unchanged.
+
 ## v3.2.0 (2026-11-20)
 
 - **Automatic file names on upload**: `{plate} - {customer}({month}) - {document}.{ext}`,

@@ -32,6 +32,13 @@ to a production system. Talk to the owner (Pejman) in Persian.
   to the user first (review screen / "old → new" list). Log AI usage without customer data (`aiLog`).
 - **Login**: "Sign in with Google" (openid/email/profile only). The backend verifies the ID token on every
   request (audience = `CLIENT_ID`) and checks the access list.
+- **Device password (v3.3)**: after the first Google sign-in a device can get its own session (`createDeviceSession`,
+  Google ID token only). Script property `DEVICE_SESSIONS` keeps only the SHA-256 of the secret (+ email, device name,
+  created, last used, expires = 30 days, wrong attempts). Requests then send `dev: { sid, key }` instead of `token`;
+  the role is still read from the ACL on every request, never cached. The device keeps only an AES-CTR blob
+  (PBKDF2 250k) in localStorage (`by_dev`); there is no check value on purpose, so only the server can tell a wrong
+  password and it deletes the session after 5. Never add a check value/hash to the blob and never cache sessions.
+  Code: `js/device.js`, `sessionAuth` / `dsEdit` in `backend/Code.gs`. Test: `node tests/device-session.test.mjs`.
 - **Access list**: Script Properties key `ACL` = `{ "email": "admin" | "editor" | "viewer" }`. The script owner is always admin.
 
 ## Hard rules
@@ -74,13 +81,13 @@ to a production system. Talk to the owner (Pejman) in Persian.
 
 ## Current deployment
 
-- **Backend**: Apps Script deployment **Version 5** ("v3.2.0"), live since 2026-11-20, same `/exec` URL. It includes the v3.1.2 AI fixes.
-  Roll back: Manage deployments → edit → choose the version before 5 (v3.1.2 backend; it works with the v3.2.0 frontend except
-  share link, rename tool and the original-name line). Version 2 = v3.0.0, Version 1 = the v2 backend.
-- **Frontend**: `main` = release tag `v3.2.0` (automatic file names, rename tool with undo, nickname + contract date, share one file by link).
-  Rollback tag of `main` before it: `v3.1-pre-naming` (= `v3.1.0`). Before that: `v3.0.1-stable` (v3.0 look).
+- **Backend**: Apps Script deployment **Version 6** ("v3.3.0 device password"), live since 2026-11-21, same `/exec` URL.
+  Roll back: Manage deployments → edit → choose **Version 5** (v3.2.0 backend; with it, devices with a password are sent to
+  Google sign-in once, everything else works). Version 5 includes the v3.1.2 AI fixes. Version 2 = v3.0.0, Version 1 = the v2 backend.
+- **Frontend**: `main` = release tag `v3.3.0` (device password: Google once per device, then password/PIN; My devices).
+  Rollback tag of `main` before it: `v3.2-pre-device` (= `v3.2.0`). Before that: `v3.1-pre-naming` (= `v3.1.0`), `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
-- Tests: `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
+- Tests: `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
 
 ## Design (owner's decision)
 
