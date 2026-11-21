@@ -1853,21 +1853,56 @@ function aiChain(files) {
 }
 
 /**
- * The same schema for Claude's structured output. Claude's JSON schema has no minimum/maximum and needs
- * additionalProperties: false on every object; "value" is a plain string ("" = not printed) instead of
- * string|null, so the schema has no union types. "" is turned back into null in claudeAttempt.
+ * Claude gets NO strict json_schema: a schema with this many fields gives "compiled grammar is too large" (400).
+ * The JSON shape is written in the prompt instead (AI_PROMPT_CLAUDE), and the reply is parsed (claudeParse) and
+ * normalized (claudeNormalize) into exactly the structure Gemini returns. A reply that cannot be parsed counts as
+ * a Claude failure, so Gemini is used.
  */
-function aiSchemaClaude() {
-  const s = aiSchema();
-  (function fix(o) {
-    if (!o || typeof o !== 'object') return;
-    if (Array.isArray(o)) return o.forEach(fix);
-    delete o.minimum; delete o.maximum;
-    if (Array.isArray(o.type)) o.type = 'string';
-    if (o.type === 'object') o.additionalProperties = false;
-    Object.keys(o).forEach(k => fix(o[k]));
-  })(s);
-  return s;
+
+/** The first complete {...} block of a reply (```json fences and text around it are ignored). null = none. */
+function claudeParse(text) {
+  const s = String(text || '').replace(/```(?:json)?/gi, '');
+  const a = s.indexOf('{');
+  if (a < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = a; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) {
+      try { const o = JSON.parse(s.slice(a, i + 1)); return o && typeof o === 'object' && !Array.isArray(o) ? o : null; } catch (e) { return null; }
+    }
+  }
+  return null;
+}
+
+/** Claude's parsed reply -> { docType, docName, slot, fields: { key: { value: string|null, confidence: 0-1 } } } */
+function claudeNormalize(o) {
+  const DOC_TYPES = ['policy', 'registration', 'id_card', 'receipt', 'other'];
+  const docType = DOC_TYPES.indexOf(String(o.docType || '')) >= 0 ? String(o.docType) : 'other';
+  const slot = VFILE_SLOTS.indexOf(String(o.slot == null ? '' : o.slot)) >= 0 ? String(o.slot) : 'unknown';
+  const src = o.fields && typeof o.fields === 'object' ? o.fields : {};
+  const fields = {};
+  Object.keys(AI_FIELDS).forEach(k => {
+    const x = src[k];
+    let v = x && typeof x === 'object' ? x.value : x;   // also accepts a bare value instead of { value, confidence }
+    v = v == null || typeof v === 'object' ? '' : String(v).trim();
+    let c = x && typeof x === 'object' ? Number(x.confidence) : 0;
+    c = isFinite(c) ? Math.min(1, Math.max(0, c)) : 0;
+    fields[k] = v ? { value: v, confidence: c } : { value: null, confidence: 0 };
+  });
+  return { docType: docType, docName: typeof o.docName === 'string' ? o.docName : '', slot: slot, fields: fields };
+}
+
+/** Request body for Claude: the files as document / image blocks, then the prompt. Effort low, no output format. */
+function claudeBody(content) {
+  return JSON.stringify({
+    model: CLAUDE_MODEL,
+    max_tokens: CLAUDE_MAX_TOKENS,
+    output_config: { effort: CLAUDE_EFFORT },
+    messages: [{ role: 'user', content: content }],
+  });
 }
 
 const AI_FIELDS = {
@@ -1930,8 +1965,18 @@ const AI_PROMPT = [
   '7. slot: the folder of this document (see its description). A พ.ร.บ. (compulsory insurance) is 3, not 1. Use unknown when you cannot tell.',
   '8. plate and vin: read them from the document itself (a photo may show the plate on the car). Never guess them.',
 ].join('\n');
-/** Claude's schema has no null value (see aiSchemaClaude). */
-const AI_PROMPT_CLAUDE = AI_PROMPT + '\n9. In this answer "value" is always a string: write an empty string "" where the rules above say null.';
+/** Claude has no response schema (see claudeParse), so the JSON shape is in the prompt. Built from AI_FIELDS. */
+const AI_PROMPT_CLAUDE = [
+  AI_PROMPT,
+  '',
+  'ANSWER FORMAT: Reply with ONLY one JSON object, no markdown, no code fences, no text before or after it. Shape:',
+  '{"docType": "...", "docName": "...", "slot": "...", "fields": {"<key>": {"value": "..." or null, "confidence": 0.0-1.0}, ...}}',
+  '- docType: one of policy, registration, id_card, receipt, other (policy = insurance policy or schedule; registration = vehicle registration book; ' +
+  'id_card = ID card, passport or driving licence; receipt = payment receipt, transfer slip or invoice).',
+  '- docName: short Thai name of this document. Use one of: ' + AI_DOC_NAMES.join(', ') + '. If none fits, a short Thai name of the document as it calls itself.',
+  '- slot: one of ' + VFILE_SLOTS.concat(['unknown']).join(', ') + '. ' + AI_SLOT_HELP,
+  '- fields: include EVERY key below; value null when not clearly printed:',
+].concat(Object.keys(AI_FIELDS).map(k => '  ' + k + ': ' + AI_FIELDS[k])).join('\n');
 
 function aiExtract(req) {
   const files = (req.files || []).slice(0, 8);
@@ -1949,18 +1994,12 @@ function aiExtract(req) {
   const chain = aiChain(files);
   if (!chain.length) throw err('bad_request', 'This photo type cannot be read. Use JPEG or PNG.');   // only Claude is set up and a file is HEIC
   const keys = { claude: claudeKey(), gemini: aiKey() };
-  const payloadFor = m => m.prov === 'claude' ? JSON.stringify({
-    model: m.id,
-    max_tokens: CLAUDE_MAX_TOKENS,
-    output_config: { effort: CLAUDE_EFFORT, format: { type: 'json_schema', schema: aiSchemaClaude() } },
-    messages: [{
-      role: 'user',
-      content: files.map(f => f.mime === 'application/pdf'
-        ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: String(f.data || '') } }
-        : { type: 'image', source: { type: 'base64', media_type: String(f.mime), data: String(f.data || '') } })
-        .concat([{ type: 'text', text: AI_PROMPT_CLAUDE }]),
-    }],
-  }) : JSON.stringify({
+  const payloadFor = m => m.prov === 'claude' ? claudeBody(
+    files.map(f => f.mime === 'application/pdf'
+      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: String(f.data || '') } }
+      : { type: 'image', source: { type: 'base64', media_type: String(f.mime), data: String(f.data || '') } })
+      .concat([{ type: 'text', text: AI_PROMPT_CLAUDE }])
+  ) : JSON.stringify({
     contents: [{ role: 'user', parts }],
     generationConfig: { responseMimeType: 'application/json', responseJsonSchema: aiSchema(), thinkingConfig: { thinkingLevel: m.think } },
   });
@@ -2065,11 +2104,9 @@ function claudeAttempt(m, payload, key) {
     if (j.stop_reason === 'max_tokens') return { status: 'maxtokens', ms: ms, tokens: tokens, retry: false, msg: 'The AI could not read this document' };
     const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('');
     if (!text) return { status: 'empty', ms: ms, tokens: tokens, retry: false, msg: 'The AI could not read this document' };
-    try { out = JSON.parse(text); } catch (e) { return { status: 'badjson', ms: ms, tokens: tokens, retry: false, msg: 'The AI answer was not valid' }; }
-    // "" = not printed (see aiSchemaClaude): give the app the same null as Gemini does
-    const F = (out && out.fields) || {};
-    Object.keys(F).forEach(k => { if (F[k] && String(F[k].value == null ? '' : F[k].value).trim() === '') F[k].value = null; });
-    return { status: 'ok', ms: ms, tokens: tokens, out: out };
+    out = claudeParse(text);
+    if (!out) return { status: 'badjson', ms: ms, tokens: tokens, retry: false, msg: 'The AI answer was not valid' };   // -> Gemini
+    return { status: 'ok', ms: ms, tokens: tokens, out: claudeNormalize(out) };
   }
   const status = 'http' + code;
   // 529 = Anthropic overloaded
@@ -2203,13 +2240,13 @@ function aiModelsCheck() {
   const ck = claudeKey();
   if (!ck) console.log('CLAUDE_API_KEY is not set (Gemini is used)');
   else {
-    // the real schema and settings of aiExtract, with a test sentence instead of a document (no customer data)
-    const r = claudeAttempt({ prov: 'claude', id: CLAUDE_MODEL }, JSON.stringify({
-      model: CLAUDE_MODEL, max_tokens: CLAUDE_MAX_TOKENS,
-      output_config: { effort: CLAUDE_EFFORT, format: { type: 'json_schema', schema: aiSchemaClaude() } },
-      messages: [{ role: 'user', content: 'Test only, there is no document. Return docType other, slot unknown and every value "".' }],
-    }), ck);
-    console.log(CLAUDE_MODEL + ' (Claude, effort ' + CLAUDE_EFFORT + '): ' + r.status + ' in ' + r.ms + ' ms' + (r.detail ? ' | ' + r.detail : ''));
+    // the same request, prompt, parsing and normalizing as aiExtract, with no document attached (no customer data)
+    const r = claudeAttempt({ prov: 'claude', id: CLAUDE_MODEL }, claudeBody([
+      { type: 'text', text: 'TEST ONLY: no document is attached. Follow the answer format, with docType other, slot unknown and every value null.\n\n' + AI_PROMPT_CLAUDE },
+    ]), ck);
+    console.log(CLAUDE_MODEL + ' (Claude, effort ' + CLAUDE_EFFORT + '): ' + r.status + ' in ' + r.ms + ' ms' +
+      (r.out ? ' | parsed: docType ' + r.out.docType + ', slot ' + r.out.slot + ', ' + Object.keys(r.out.fields).length + ' fields' : '') +
+      (r.detail ? ' | ' + r.detail : ''));
   }
   const key = aiKey();
   if (!key) return console.log('GEMINI_API_KEY is not set');

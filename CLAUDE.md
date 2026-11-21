@@ -47,7 +47,9 @@ to a production system. Talk to the owner (Pejman) in Persian.
 - **AI** (v4.4): Claude first, Gemini as automatic fallback, called only from the backend (`aiExtract`, used by every AI feature).
   Keys are Script properties `CLAUDE_API_KEY` and `GEMINI_API_KEY`: never in the repo, never in the frontend, never in logs.
   Claude model: `CLAUDE_MODEL` (`claude-haiku-5-5` only, owner's decision: no Sonnet); PDFs as `document` blocks, photos as
-  `image` blocks; schema `aiSchemaClaude`. Without `CLAUDE_API_KEY`, or when Claude fails, the Gemini `AI_MODELS` are used.
+  `image` blocks; NO strict json_schema for Claude (a schema this big gives "compiled grammar is too large"): the shape
+  is in `AI_PROMPT_CLAUDE`, the reply is parsed by `claudeParse` and normalized by `claudeNormalize` into the same
+  structure as Gemini's (unparseable = Claude failure -> Gemini). Without `CLAUDE_API_KEY`, or when Claude fails, the Gemini `AI_MODELS` are used.
   Models are tried in order (`aiChain`), with retries on 429/5xx/529/timeouts inside a time budget; see `aiExtract`. The AI never saves anything by itself: every value is shown
   to the user first (review screen / "old → new" list). Log AI usage without customer data (`aiLog`).
 - **Login**: "Sign in with Google" (openid/email/profile only). The backend verifies the ID token on every
