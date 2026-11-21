@@ -107,14 +107,16 @@ to a production system. Talk to the owner (Pejman) in Persian.
 
 ## Current deployment
 
-- **Backend**: Apps Script deployment **Version 9** ("v4.3.0" Edit with AI), live since 2026-11-21, same `/exec` URL.
-  Roll back: Manage deployments → edit → choose **Version 8** (v4.2.0 backend; the v4.3 app works with it, only
-  "Edit with AI" / "Undo AI edit" need Version 9).
-  Version 8 = v4.2.0 (restore original file names). Version 7 = v4.0.0 (vehicles, folders per month/plate, Smart upload, move tool). Version 6 = v3.3.0: roll back the
+- **Backend**: Apps Script deployment **Version 10** ("v4.4.0 Claude AI (Haiku 5.5) + Gemini fallback"), live since
+  2026-11-22 02:00, same `/exec` URL; `backend/Code.gs` on `main` (37f834d) is identical to it. `aiModelsCheck`:
+  `claude-haiku-5-5 (Claude, effort low): ok in 2478 ms | parsed: docType other, slot unknown, 27 fields`.
+  Roll back: Manage deployments → edit → choose **Version 9** (v4.3.0 backend, Gemini only; the v4.4 app works with it).
+  Quicker, without a deployment: delete Script property `CLAUDE_API_KEY` (Gemini is used at once).
+  Version 9 = v4.3.0 (Edit with AI; "Edit with AI" / "Undo AI edit" need Version 9+). Version 8 = v4.2.0 (restore original file names). Version 7 = v4.0.0 (vehicles, folders per month/plate, Smart upload, move tool). Version 6 = v3.3.0: roll back the
   frontend first; files already moved into the v4 folders stay in Drive but the v3 app does not show them.
   Version 5 = v3.2.0 (incl. the v3.1.2 AI fixes), Version 2 = v3.0.0, Version 1 = the v2 backend.
-- **Frontend**: `main` = release tag `v4.3.0` (v4.2 + "Edit with AI").
-  Rollback tag of `main` before it: `v4.2.0-stable` (= `v4.2.0`). Before that: `v4.1.0-stable` (= `v4.1.0`), `v4.0.0-stable` (= `v4.0.0`), `v3.3.0-stable` (= `v3.3.0`), `v3.2-pre-device` (= `v3.2.0`),
+- **Frontend**: `main` = release tag `v4.4.0` (v4.3 + AI on Claude, Gemini as fallback; only AI texts changed).
+  Rollback tag of `main` before it: `v4.3-pre-claude` (= `v4.3.0`). Before that: `v4.2.0-stable` (= `v4.2.0`), `v4.1.0-stable` (= `v4.1.0`), `v4.0.0-stable` (= `v4.0.0`), `v3.3.0-stable` (= `v3.3.0`), `v3.2-pre-device` (= `v3.2.0`),
   `v3.1-pre-naming` (= `v3.1.0`), `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
 - Tests: `node tests/ai-provider.test.mjs` (v4.4 Claude + Gemini fallback), `node tests/aiedit.test.mjs` (v4.3 Edit with AI), `node tests/restore.test.mjs` (v4.2 restore names), `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
