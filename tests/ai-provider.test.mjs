@@ -16,6 +16,7 @@ function load({ claude, gemini, replies }) {
   if (gemini) props.GEMINI_API_KEY = gemini;
   const calls = [];
   const store = {};
+  const lines = [];   // console.log of Code.gs
   const PropertiesService = { getScriptProperties: () => ({ getProperty: k => props[k] ?? null, setProperty: (k, v) => { props[k] = v; }, deleteProperty: k => { delete props[k]; } }) };
   const LockService = { getScriptLock: () => ({ waitLock() { }, releaseLock() { } }) };
   const CacheService = { getScriptCache: () => ({ get: k => store[k] ?? null, put: (k, v) => { store[k] = v; }, remove: k => { delete store[k]; } }) };
@@ -38,10 +39,11 @@ function load({ claude, gemini, replies }) {
   const gs = readFileSync(new URL('../backend/Code.gs', import.meta.url), 'utf8');
   const Session = { getEffectiveUser: () => ({ getEmail: () => 'owner@example.com' }) };
   const B = new Function('PropertiesService', 'LockService', 'CacheService', 'Utilities', 'UrlFetchApp', 'console', 'Session',
-    `${gs}\nreturn { aiExtract, aiSchemaClaude, ACTIONS, CLAUDE_MODEL };`)(PropertiesService, LockService, CacheService, Utilities, UrlFetchApp, { log() { } }, Session);
-  return { B, calls, props, store };
+    `${gs}\nreturn { aiExtract, claudeParse, claudeNormalize, ACTIONS, CLAUDE_MODEL, AI_FIELDS, aiModelsCheck };`)(PropertiesService, LockService, CacheService, Utilities, UrlFetchApp, { log: s => lines.push(String(s)) }, Session);
+  return { B, calls, props, store, lines };
 }
-const claudeOk = fields => ({ code: 200, body: { stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 20 }, content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: JSON.stringify(answer(fields)) }] } });
+const claudeText = text => ({ code: 200, body: { stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 20 }, content: [{ type: 'thinking', thinking: '' }, { type: 'text', text }] } });
+const claudeOk = fields => claudeText(JSON.stringify(answer(fields)));
 const geminiOk = fields => ({ code: 200, body: { usageMetadata: { totalTokenCount: 50 }, candidates: [{ content: { parts: [{ text: JSON.stringify(answer(fields)) }] } }] } });
 const PDF = { mime: 'application/pdf', data: 'JVBERi0xLjQK' };
 const JPG = { mime: 'image/jpeg', data: '/9j/4AAQSkZJRg==' };
@@ -63,7 +65,11 @@ const tryErr = fn => { try { fn(); return null; } catch (e) { return e; } };
   ok(blocks[0].type === 'document' && blocks[0].source.media_type === 'application/pdf' && blocks[0].source.type === 'base64' && blocks[0].source.data === PDF.data, '1 PDF as document block');
   ok(blocks[1].type === 'image' && blocks[1].source.media_type === 'image/jpeg' && blocks[1].source.data === JPG.data, '1 photo as image block');
   ok(blocks[2].type === 'text' && /STRICT RULES/.test(blocks[2].text), '1 prompt last');
-  ok(c.body.output_config.format.type === 'json_schema', '1 structured output');
+  ok(c.body.output_config.effort === 'low' && !('format' in c.body.output_config), '1 effort low, no json_schema format', c.body.output_config);
+  ok(/ONLY one JSON object, no markdown/.test(blocks[2].text), '1 prompt asks for one JSON object');
+  ok(Object.keys(t.B.AI_FIELDS).every(k => blocks[2].text.includes('  ' + k + ': ' + t.B.AI_FIELDS[k])), '1 prompt lists every AI_FIELDS key + description');
+  ok(/policy, registration, id_card, receipt, other/.test(blocks[2].text) && /1, 2, 3, 4, 5\.1, 5\.2, 5\.3, 5\.4, 5\.5, unknown/.test(blocks[2].text), '1 prompt lists docType + slot values');
+  ok(Object.keys(r.fields).length === Object.keys(t.B.AI_FIELDS).length && r.fields.vin.value === null && r.fields.vin.confidence === 0, '1 missing fields filled as null / 0');
   const L = log(t.props);
   ok(L.length === 1 && L[0].prov === 'claude' && L[0].model === 'claude-haiku-5-5' && L[0].status === 'ok', '1 AI_LOG has provider + model', L);
   ok(!t.props.AI_LOG.includes('sk-test') && !t.props.AI_LOG.includes('สมชาย'), '1 no key or customer data in AI_LOG');
@@ -73,15 +79,44 @@ const tryErr = fn => { try { fn(); return null; } catch (e) { return e; } };
   ok(log(t.props)[1].status === 'cache' && log(t.props)[1].prov === 'claude', '2 cache logged with provider');
 }
 
-// 3) Claude schema: no minimum/maximum, no type arrays, additionalProperties false everywhere
+// 3) parsing the reply robustly + normalizing
 {
   const t = load({ claude: 'k', replies: {} });
-  const s = JSON.stringify(t.B.aiSchemaClaude());
-  ok(!/"minimum"|"maximum"/.test(s), '3 no numeric constraints');
-  ok(!/"type":\[/.test(s), '3 no type arrays');
-  let objs = 0, bad = 0;
-  (function walk(o) { if (!o || typeof o !== 'object') return; if (o.type === 'object') { objs++; if (o.additionalProperties !== false) bad++; } Object.values(o).forEach(walk); })(JSON.parse(s));
-  ok(objs > 20 && bad === 0, '3 additionalProperties false on every object', { objs, bad });
+  const P = t.B.claudeParse;
+  ok(P('{"a":1}').a === 1, '3 plain JSON');
+  ok(P('```json\n{"a":2}\n```').a === 2, '3 ```json fences');
+  ok(P('Here it is:\n```\n{"a":3}\n```\nDone.').a === 3, '3 text + bare fences around it');
+  ok(P('x {"a":"}{ \\" }","b":{"c":4}} y {"a":9}').b.c === 4, '3 first balanced block, braces + quotes inside strings');
+  ok(P('no json') === null && P('{"a": ') === null && P('{bad json}') === null && P('') === null && P(null) === null, '3 unparseable -> null');
+  ok(P('[1,2]') === null, '3 array is not an answer');
+  const N = t.B.claudeNormalize({ docType: 'passport', slot: '5', docName: 7, fields: { nameTh: { value: '  ก  ', confidence: 1.7 }, plate: { value: '1กก', confidence: -2 }, vin: { value: 'X', confidence: 'abc' }, idNo: '1234', phone: { value: '' , confidence: 0.9 }, address: { value: { a: 1 } }, extra: { value: 'no' } } });
+  ok(N.docType === 'other' && N.slot === 'unknown' && N.docName === '', '3 invalid docType/slot/docName -> other/unknown/""', N);
+  ok(N.fields.nameTh.value === 'ก' && N.fields.nameTh.confidence === 1, '3 trimmed, confidence clamped to 1');
+  ok(N.fields.plate.confidence === 0 && N.fields.vin.confidence === 0, '3 confidence clamped to 0 / not a number -> 0');
+  ok(N.fields.idNo.value === '1234' && N.fields.idNo.confidence === 0, '3 bare value accepted with confidence 0');
+  ok(N.fields.phone.value === null && N.fields.phone.confidence === 0 && N.fields.address.value === null, '3 empty / object value -> null, 0');
+  ok(!('extra' in N.fields) && Object.keys(N.fields).length === Object.keys(t.B.AI_FIELDS).length, '3 exactly the AI_FIELDS keys');
+  ok(t.B.claudeNormalize({ docType: 'receipt', slot: '5.4', fields: null }).slot === '5.4', '3 valid slot kept');
+}
+
+// 3b) a fenced reply with text around it works end to end; an unparseable reply -> Gemini
+{
+  const t = load({ claude: 'k', gemini: 'g', replies: { claude: [claudeText('Sure:\n```json\n' + JSON.stringify(answer({ plate: { value: '70-5416', confidence: 0.95 } })) + '\n```')] } });
+  const r = t.B.aiExtract({ files: [PDF] });
+  ok(r.prov === 'claude' && r.fields.plate.value === '70-5416' && r.slot === '1', '3b fenced reply parsed', r);
+  const u = load({ claude: 'k', gemini: 'g', replies: { claude: [claudeText('I cannot read this document.')], gemini: [geminiOk({})] } });
+  const r2 = u.B.aiExtract({ files: [PDF] });
+  ok(r2.prov === 'gemini' && u.calls.filter(c => c.prov === 'claude').length === 1, '3b unparseable -> Gemini, no Claude retry');
+  ok(log(u.props)[0].status === 'badjson' && log(u.props)[0].prov === 'claude', '3b logged as claude badjson');
+}
+
+// 3c) aiModelsCheck uses the same request path (no format, same prompt) and prints the parsed result
+{
+  const t = load({ claude: 'k', replies: { claude: [claudeOk({})] } });
+  t.B.aiModelsCheck();
+  const c = t.calls[0], lines = t.lines;
+  ok(c && c.body.model === 'claude-haiku-5-5' && !('format' in c.body.output_config) && /ANSWER FORMAT/.test(c.body.messages[0].content[0].text), '3c aiModelsCheck same request', c && c.body);
+  ok(lines.some(l => /claude-haiku-5-5 \(Claude, effort low\): ok .*parsed: docType policy, slot 1, \d+ fields/.test(l)), '3c prints parsed result', lines);
 }
 
 // 4) Claude busy (529) on every try -> Gemini answers; retries kept

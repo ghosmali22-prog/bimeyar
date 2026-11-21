@@ -113,8 +113,9 @@ Version 7 if any file was moved).
    Property `CLAUDE_API_KEY`, value = the key → **Save script properties**. Keep `GEMINI_API_KEY` (it is the fallback).
    Never put the key in the repo, in `js/config.js`, in a chat or in an e-mail.
 2. Step 1 above: paste `Code.gs` (`appsscript.json` did not change) → **Save**.
-3. In the editor choose **`aiModelsCheck`** → Run. The log must show `claude-haiku-5-5 (Claude, effort low): ok in … ms`.
-   (`http401` = wrong key, `http400` + "credit" = no credit; the app then keeps using Gemini.)
+3. In the editor choose **`aiModelsCheck`** → Run. The log must show
+   `claude-haiku-5-5 (Claude, effort low): ok in … ms | parsed: docType other, slot unknown, 27 fields`.
+   (`http401` = wrong key, `http400` + "credit" = no credit, `badjson` = the reply was not JSON; the app then uses Gemini.)
 4. Step 4 above: **Deploy → Manage deployments → ✏️ → Version: New version** → description `v4.4.0` → **Deploy**.
    The `/exec` URL stays the same. Never "New deployment".
 
