@@ -1,4 +1,4 @@
-// AI document reading: prepares files, cleans and checks what Gemini returned, and builds the
+// AI document reading: prepares files, cleans and checks what the AI (Claude, or Gemini as fallback) returned, and builds the
 // "old value -> new value" list. The AI itself runs in the Apps Script backend (the key never reaches the browser).
 import { MAX_AI_MB } from './config.js';
 import { compressImage } from './util.js';

@@ -160,7 +160,7 @@ export class ApiStore {
   // Sub-folder migration (admin)
   migrate(dryRun, from) { return call('migrateFolders', { dryRun, from, limit: 40 }); }
 
-  // AI (editor+). The backend starts its last Gemini attempt within 45 s and is normally done by ~225 s; 240 s leaves
+  // AI (editor+). The backend starts its last AI attempt (Claude or Gemini) within 45 s and is normally done by ~225 s; 240 s leaves
   // room for the upload. A result that comes later is cached in the backend for 10 min ("Try again" gets it at once).
   aiExtract(files) { return call('aiExtract', { files }, null, 240000); }
 
