@@ -106,6 +106,32 @@ Roll back: Deploy → Manage deployments → ✏️ → choose **Version 6** →
 there and stay in Drive; the v3 app shows them only after v4 is back, so roll back the frontend first and keep
 Version 7 if any file was moved).
 
+## v4.4 update (AI on Claude, Gemini as fallback) = Version 10
+
+1. **Claude key**: https://console.anthropic.com → API keys → Create key (and add credit under Billing).
+   Apps Script → ⚙️ **Project Settings** → **Script properties** → **Add script property**:
+   Property `CLAUDE_API_KEY`, value = the key → **Save script properties**. Keep `GEMINI_API_KEY` (it is the fallback).
+   Never put the key in the repo, in `js/config.js`, in a chat or in an e-mail.
+2. Step 1 above: paste `Code.gs` (`appsscript.json` did not change) → **Save**.
+3. In the editor choose **`aiModelsCheck`** → Run. The log must show
+   `claude-haiku-5-5 (Claude, effort low): ok in … ms | parsed: docType other, slot unknown, 27 fields`.
+   (`http401` = wrong key, `http400` + "credit" = no credit, `badjson` = the reply was not JSON; the app then uses Gemini.)
+4. Step 4 above: **Deploy → Manage deployments → ✏️ → Version: New version** → description `v4.4.0` → **Deploy**.
+   The `/exec` URL stays the same. Never "New deployment".
+
+No new permission, no `setup` run. `ACL`, `ROOT_ID`, `INV_SEQ`, `AI_LOG`, `CLIENT_ID`, `DEVICE_SESSIONS`,
+`GEMINI_API_KEY` and Drive data are not touched. The v4.3 app works with this backend. After deploying:
+
+1. **Add customer with AI** with one policy PDF → the fields are filled in.
+2. Apps Script → **Executions** (or Project Settings → Script property `AI_LOG`): the newest `ai` entries have
+   `"prov":"claude","model":"claude-haiku-5-5","status":"ok"`. (`"prov":"gemini"` = the fallback was used.)
+3. **Smart upload** with one photo → check the review list → **Back**.
+
+The model is `CLAUDE_MODEL` in `Code.gs` (change it there only, then New version).
+To stop using Claude without a deployment: delete the Script property `CLAUDE_API_KEY` (Gemini is used at once).
+
+Roll back: Deploy → Manage deployments → ✏️ → choose **Version 9** → Deploy (Gemini only, as before).
+
 ## v4.3 update (Edit with AI) = Version 9
 
 Only steps 1 (paste `Code.gs`; `appsscript.json` did not change) and 4 (✏️ → **New version**, description `v4.3.0`).
@@ -133,15 +159,16 @@ Roll back: Deploy → Manage deployments → ✏️ → choose **Version 7** →
 
 ## AI usage log
 
-Every AI **attempt** is logged without any customer data (time, model, status such as `ok` / `http503` /
+Every AI **attempt** is logged without any customer data (time, provider `prov` = `claude` / `gemini` (v4.4), model, status such as `ok` / `http503` /
 `timeout`, ms, size, tokens, try number) in the Script property `AI_LOG` (newest entries, trimmed to fit 9 KB)
 and in Apps Script → Executions.
 
 ## When Google AI is busy (503 / 429)
 
 `aiExtract` retries automatically (2 s, 5 s, … with jitter, up to 3 tries per model) and then falls back to the
-next model in `AI_MODELS` (`gemini-3.1-flash-lite` → `gemini-3.8-flash` → `gemini-3.6-flash`). A slow failure
-(over 20 s) switches model at once.
+next model: since v4.4 `claude-haiku-5-5` (`CLAUDE_MODEL`, only when `CLAUDE_API_KEY` is set) → the Gemini models in
+`AI_MODELS` (`gemini-3.1-flash-lite` → `gemini-3.8-flash` → `gemini-3.6-flash`). A slow failure
+(over 20 s) switches model at once. A bad Claude key or no Claude credit switches to Gemini at once.
 
 Time limits: a busy Google can take minutes for one request and Apps Script cannot stop a request half-way, so new
 attempts only start in the first 45 s; the app waits 240 s and shows the elapsed time and "this can take up to

@@ -1,5 +1,28 @@
 # Changelog
 
+## v4.4.0 (2026-11-22)
+
+- **AI now runs on Claude** (`claude-haiku-5-5`, constant `CLAUDE_MODEL` in `backend/Code.gs`) for every AI feature:
+  "Add customer with AI", Smart upload (customer, vehicle / plate, month, folder, document type), auto-detect vehicles,
+  file naming and "Edit with AI". They all use the one backend action `aiExtract`, so the app logic did not change.
+  PDFs go to Claude as `document` blocks and photos as `image` blocks (base64): Claude reads the files directly.
+  No strict json_schema for Claude (this schema is too big: "compiled grammar is too large"): the JSON shape (keys and
+  descriptions from `AI_FIELDS`, allowed docType / slot values) is in the prompt, and the reply is parsed robustly
+  (```json fences and text around it are ignored, the first `{…}` block is used) and normalized into exactly the
+  structure the app already gets from Gemini (missing field = null / confidence 0, invalid docType / slot = other /
+  unknown, confidence 0–1). A reply that cannot be parsed counts as a Claude failure, so Gemini is used.
+- **Gemini stays as automatic fallback**: when Script property `CLAUDE_API_KEY` is missing, or Claude is busy
+  (429 / 5xx / 529 / timeout, after the same retries), rejects the request (bad key, no credit, 400), refuses, or a
+  photo type Claude cannot read (HEIC) is sent, the Gemini models in `AI_MODELS` are used as before.
+- Same retries, time budget and 10-minute cache. `AI_LOG` entries now have `prov` (`claude` / `gemini`) next to `model`.
+- `aiModelsCheck` (run in the Apps Script editor) also tests Claude with the same request, prompt and parsing as `aiExtract`; `setup` shows whether
+  `CLAUDE_API_KEY` is set.
+- App texts no longer say "Google AI"; the Settings card says "Claude, Gemini as backup". No design change.
+- **Backend changed → Version 10**. New Script property `CLAUDE_API_KEY` (set by the owner). No new permission, no `setup`.
+  The v4.3 app works with this backend; without `CLAUDE_API_KEY` this backend works exactly like Version 9.
+- Rollback tag of `main` before this change: `v4.3-pre-claude` (= `v4.3.0`).
+- Test: `node tests/ai-provider.test.mjs`.
+
 ## v4.3.0 (2026-11-21)
 
 - **Edit with AI** (admin and editor): in the file window ("Edit with AI", that file) and on the customer screen
