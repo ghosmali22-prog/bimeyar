@@ -18,7 +18,9 @@
  * Script Properties used:
  *   ACL             access list (see above)
  *   ROOT_ID         id of the "Bimeyar" folder (set automatically)
- *   GEMINI_API_KEY  Google AI Studio key for document reading (set by the owner, never in the repo)
+ *   CLAUDE_API_KEY  Anthropic (Claude) API key for document reading, v4.4 (set by the owner, never in the repo).
+ *                   Claude is tried first; without it (or when Claude fails) Gemini is used.
+ *   GEMINI_API_KEY  Google AI Studio key for document reading, the automatic fallback (set by the owner, never in the repo)
  *   COMPANY         company info for invoices (set from the app, admin only)
  *   INV_SEQ         last invoice number per year (set automatically, under a lock)
  *   AI_LOG          last 200 AI calls: time, ms, size, tokens, result. No customer data.
@@ -94,7 +96,21 @@ const VFIELDS = {
 };
 
 /**
- * Gemini models for reading documents, tried in this order (change here only).
+ * v4.4: Claude reads the documents first (every AI feature goes through aiExtract). Change the model here only.
+ * PDFs are sent as "document" blocks and photos as "image" blocks (base64), so Claude reads the files directly.
+ * When CLAUDE_API_KEY is missing, or Claude fails (busy, bad key, no credit, refusal, ...), the Gemini models
+ * below are used automatically, with the same retries, time budget and cache.
+ */
+const CLAUDE_MODEL = 'claude-haiku-5-5';
+const CLAUDE_URL = 'https://api.anthropic.com/v1/messages';
+const CLAUDE_API_VERSION = '2023-06-01';
+const CLAUDE_EFFORT = 'low';          // low thinking = faster extraction (the default for this model is medium)
+const CLAUDE_MAX_TOKENS = 8000;       // the JSON answer is small; room for the model's thinking
+/** File types Claude can read; anything else (e.g. a HEIC photo that could not be converted) goes to Gemini. */
+const CLAUDE_MIMES = /^(image\/(jpeg|png|gif|webp)|application\/pdf)$/;
+
+/**
+ * Gemini models for reading documents (fallback after Claude), tried in this order (change here only).
  * think = generationConfig.thinkingConfig.thinkingLevel: the lowest level each model accepts
  * (gemini-3.8-flash has no 'minimal'; the Flash-Lite models do). Low thinking = faster extraction.
  */
@@ -170,7 +186,7 @@ function doPost(e) {
 /* ============================ actions ============================ */
 
 const ACTIONS = {
-  me: { need: 'viewer', run: (req, user, role) => ({ email: user.email, name: user.name, role, owner: ownerEmail() === user.email, root: role === 'admin' ? rootId() : '', ai: !!aiKey(), v: 4, dev: !!user.sid }) },
+  me: { need: 'viewer', run: (req, user, role) => ({ email: user.email, name: user.name, role, owner: ownerEmail() === user.email, root: role === 'admin' ? rootId() : '', ai: !!(claudeKey() || aiKey()), v: 4, dev: !!user.sid }) },
 
   /* ---------- device sign-in (v3.3) ---------- */
   // Only with a Google ID token. Returns the secret once; only its SHA-256 is stored.
@@ -1821,9 +1837,73 @@ function invoicePdf(inv, dateFmt) {
   }
 }
 
-/* ============================ AI (Gemini) ============================ */
+/* ============================ AI (Claude first, Gemini as fallback) ============================ */
 
+/** Gemini key (fallback). */
 function aiKey() { return PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY') || ''; }
+/** Claude key (v4.4). Only read here; never logged, never sent to the app. */
+function claudeKey() { return PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY') || ''; }
+
+/** The models to try, in order: Claude (if its key is set and it can read every file), then the Gemini models. */
+function aiChain(files) {
+  const chain = [];
+  if (claudeKey() && files.every(f => CLAUDE_MIMES.test(String(f.mime || '')))) chain.push({ prov: 'claude', id: CLAUDE_MODEL });
+  if (aiKey()) AI_MODELS.forEach(m => chain.push(Object.assign({ prov: 'gemini' }, m)));
+  return chain;
+}
+
+/**
+ * Claude gets NO strict json_schema: a schema with this many fields gives "compiled grammar is too large" (400).
+ * The JSON shape is written in the prompt instead (AI_PROMPT_CLAUDE), and the reply is parsed (claudeParse) and
+ * normalized (claudeNormalize) into exactly the structure Gemini returns. A reply that cannot be parsed counts as
+ * a Claude failure, so Gemini is used.
+ */
+
+/** The first complete {...} block of a reply (```json fences and text around it are ignored). null = none. */
+function claudeParse(text) {
+  const s = String(text || '').replace(/```(?:json)?/gi, '');
+  const a = s.indexOf('{');
+  if (a < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = a; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) {
+      try { const o = JSON.parse(s.slice(a, i + 1)); return o && typeof o === 'object' && !Array.isArray(o) ? o : null; } catch (e) { return null; }
+    }
+  }
+  return null;
+}
+
+/** Claude's parsed reply -> { docType, docName, slot, fields: { key: { value: string|null, confidence: 0-1 } } } */
+function claudeNormalize(o) {
+  const DOC_TYPES = ['policy', 'registration', 'id_card', 'receipt', 'other'];
+  const docType = DOC_TYPES.indexOf(String(o.docType || '')) >= 0 ? String(o.docType) : 'other';
+  const slot = VFILE_SLOTS.indexOf(String(o.slot == null ? '' : o.slot)) >= 0 ? String(o.slot) : 'unknown';
+  const src = o.fields && typeof o.fields === 'object' ? o.fields : {};
+  const fields = {};
+  Object.keys(AI_FIELDS).forEach(k => {
+    const x = src[k];
+    let v = x && typeof x === 'object' ? x.value : x;   // also accepts a bare value instead of { value, confidence }
+    v = v == null || typeof v === 'object' ? '' : String(v).trim();
+    let c = x && typeof x === 'object' ? Number(x.confidence) : 0;
+    c = isFinite(c) ? Math.min(1, Math.max(0, c)) : 0;
+    fields[k] = v ? { value: v, confidence: c } : { value: null, confidence: 0 };
+  });
+  return { docType: docType, docName: typeof o.docName === 'string' ? o.docName : '', slot: slot, fields: fields };
+}
+
+/** Request body for Claude: the files as document / image blocks, then the prompt. Effort low, no output format. */
+function claudeBody(content) {
+  return JSON.stringify({
+    model: CLAUDE_MODEL,
+    max_tokens: CLAUDE_MAX_TOKENS,
+    output_config: { effort: CLAUDE_EFFORT },
+    messages: [{ role: 'user', content: content }],
+  });
+}
 
 const AI_FIELDS = {
   nameTh: 'Customer full name in Thai script, exactly as printed',
@@ -1885,12 +1965,23 @@ const AI_PROMPT = [
   '7. slot: the folder of this document (see its description). A พ.ร.บ. (compulsory insurance) is 3, not 1. Use unknown when you cannot tell.',
   '8. plate and vin: read them from the document itself (a photo may show the plate on the car). Never guess them.',
 ].join('\n');
+/** Claude has no response schema (see claudeParse), so the JSON shape is in the prompt. Built from AI_FIELDS. */
+const AI_PROMPT_CLAUDE = [
+  AI_PROMPT,
+  '',
+  'ANSWER FORMAT: Reply with ONLY one JSON object, no markdown, no code fences, no text before or after it. Shape:',
+  '{"docType": "...", "docName": "...", "slot": "...", "fields": {"<key>": {"value": "..." or null, "confidence": 0.0-1.0}, ...}}',
+  '- docType: one of policy, registration, id_card, receipt, other (policy = insurance policy or schedule; registration = vehicle registration book; ' +
+  'id_card = ID card, passport or driving licence; receipt = payment receipt, transfer slip or invoice).',
+  '- docName: short Thai name of this document. Use one of: ' + AI_DOC_NAMES.join(', ') + '. If none fits, a short Thai name of the document as it calls itself.',
+  '- slot: one of ' + VFILE_SLOTS.concat(['unknown']).join(', ') + '. ' + AI_SLOT_HELP,
+  '- fields: include EVERY key below; value null when not clearly printed:',
+].concat(Object.keys(AI_FIELDS).map(k => '  ' + k + ': ' + AI_FIELDS[k])).join('\n');
 
 function aiExtract(req) {
-  const key = aiKey();
-  if (!key) throw err('ai_nokey', 'GEMINI_API_KEY is not set in Script Properties');
   const files = (req.files || []).slice(0, 8);
   if (!files.length) throw err('bad_request', 'No file');
+  if (!claudeKey() && !aiKey()) throw err('ai_nokey', 'CLAUDE_API_KEY / GEMINI_API_KEY is not set in Script Properties');
   let bytes = 0;
   const parts = files.map(f => {
     const mime = String(f.mime || '');
@@ -1900,7 +1991,15 @@ function aiExtract(req) {
   });
   if (bytes > AI_MAX_BYTES) throw err('too_big', 'Files are too large for reading');
   parts.push({ text: AI_PROMPT });
-  const payloadFor = m => JSON.stringify({
+  const chain = aiChain(files);
+  if (!chain.length) throw err('bad_request', 'This photo type cannot be read. Use JPEG or PNG.');   // only Claude is set up and a file is HEIC
+  const keys = { claude: claudeKey(), gemini: aiKey() };
+  const payloadFor = m => m.prov === 'claude' ? claudeBody(
+    files.map(f => f.mime === 'application/pdf'
+      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: String(f.data || '') } }
+      : { type: 'image', source: { type: 'base64', media_type: String(f.mime), data: String(f.data || '') } })
+      .concat([{ type: 'text', text: AI_PROMPT_CLAUDE }])
+  ) : JSON.stringify({
     contents: [{ role: 'user', parts }],
     generationConfig: { responseMimeType: 'application/json', responseJsonSchema: aiSchema(), thinkingConfig: { thinkingLevel: m.think } },
   });
@@ -1912,25 +2011,28 @@ function aiExtract(req) {
   try {
     // 1) same files read in the last 10 minutes (for example the app gave up waiting): answer at once
     const hit = aiCached(cache, ck);
-    if (hit) { attempts.push({ model: hit.model, status: 'cache', ms: 0 }); return Object.assign(hit, { cached: true }); }
+    if (hit) { attempts.push({ prov: hit.prov || 'gemini', model: hit.model, status: 'cache', ms: 0 }); return Object.assign(hit, { cached: true }); }
     // 2) the same files are being read right now by an earlier request: wait for that result instead of asking Google again
     if (cache.get(ck + ':run')) {
       while (Date.now() - t0 < AI_JOIN_MS && cache.get(ck + ':run')) {
         Utilities.sleep(3000);
         const r = aiCached(cache, ck);
-        if (r) { attempts.push({ model: r.model, status: 'joined', ms: Date.now() - t0 }); return Object.assign(r, { cached: true }); }
+        if (r) { attempts.push({ prov: r.prov || 'gemini', model: r.model, status: 'joined', ms: Date.now() - t0 }); return Object.assign(r, { cached: true }); }
       }
       const r = aiCached(cache, ck);
-      if (r) { attempts.push({ model: r.model, status: 'joined', ms: Date.now() - t0 }); return Object.assign(r, { cached: true }); }
+      if (r) { attempts.push({ prov: r.prov || 'gemini', model: r.model, status: 'joined', ms: Date.now() - t0 }); return Object.assign(r, { cached: true }); }
       if (Date.now() - t0 >= AI_JOIN_MS - 5000) throw err('ai_busy', 'Google AI is busy right now');
     }
-    // 3) ask Gemini; the clock for new attempts starts now
+    // 3) ask Claude, then Gemini (aiChain); the clock for new attempts starts now
     cache.put(ck + ':run', '1', 360);
     mine = true;
     const t1 = Date.now();
     const left = () => AI_BUDGET_MS - (Date.now() - t1);
-    for (const m of AI_MODELS) {
-      const payload = payloadFor(m);
+    let fatal = null;   // a bad key of one provider: remembered, the next provider is still tried
+    let busy = false;   // any attempt was busy (429/5xx/timeout)
+    for (const m of chain) {
+      if (fatal && fatal.prov === m.prov) continue;   // same provider, same bad key
+      const payload = payloadFor(m), key = keys[m.prov];
       for (let i = 0; i < AI_TRIES_PER_MODEL; i++) {
         if (i > 0) {
           const wait = Math.round(AI_BACKOFF_MS[Math.min(i - 1, AI_BACKOFF_MS.length - 1)] * (0.7 + Math.random() * 0.6));   // jitter
@@ -1939,21 +2041,23 @@ function aiExtract(req) {
         }
         if (left() < AI_MIN_LEFT_MS) break;
         const r = aiAttempt(m, payload, key);
-        attempts.push({ model: m.id, status: r.status, ms: r.ms, tokens: r.tokens || 0 });
+        attempts.push({ prov: m.prov, model: m.id, status: r.status, ms: r.ms, tokens: r.tokens || 0 });
         if (r.out) {
           const slot = VFILE_SLOTS.indexOf(String(r.out.slot || '')) >= 0 ? String(r.out.slot) : '';
-          const res = { docType: r.out.docType || 'other', docName: String(r.out.docName || '').slice(0, 60), slot: slot, fields: r.out.fields || {}, model: m.id, tries: attempts.length };
+          const res = { docType: r.out.docType || 'other', docName: String(r.out.docName || '').slice(0, 60), slot: slot, fields: r.out.fields || {}, prov: m.prov, model: m.id, tries: attempts.length };
           try { cache.put(ck + ':res', JSON.stringify(res), AI_CACHE_S); } catch (e) { }   // kept even if the app stopped waiting
           return res;
         }
         last = r;
-        if (r.fatal) throw err(r.fatal, r.msg);   // bad key: no other model will work either
+        if (r.busy) busy = true;
+        if (r.fatal) { fatal = { prov: m.prov, code: r.fatal, msg: r.msg }; break; }   // bad key: skip this provider's other models
         if (!r.retry) break;                      // this model refused the request: try the next model
         if (r.ms > AI_SLOW_MS) break;             // overloaded and slow: switch model instead of waiting again
       }
       if (left() < AI_MIN_LEFT_MS) break;
     }
-    if (last && last.busy) throw err('ai_busy', 'Google AI is busy right now');
+    if (busy) throw err('ai_busy', 'The AI is busy right now');
+    if (fatal && last && last.fatal) throw err(fatal.code, fatal.msg);   // every provider tried had a bad key
     throw err('ai_error', (last && last.msg) || 'The AI could not read this document');
   } finally {
     if (mine) try { cache.remove(ck + ':run'); } catch (e) { }
@@ -1976,6 +2080,45 @@ function aiCached(cache, ck) {
  * { status, retry, busy, fatal?, msg }. retry/busy = 429, 500, 503, 504, timeout or network error.
  */
 function aiAttempt(m, payload, key) {
+  return m.prov === 'claude' ? claudeAttempt(m, payload, key) : geminiAttempt(m, payload, key);
+}
+
+/** One request to Claude (Messages API). Same return shape as geminiAttempt. */
+function claudeAttempt(m, payload, key) {
+  const t = Date.now();
+  let res;
+  try {
+    res = UrlFetchApp.fetch(CLAUDE_URL, {
+      method: 'post', contentType: 'application/json', payload: payload, muteHttpExceptions: true,
+      headers: { 'x-api-key': key, 'anthropic-version': CLAUDE_API_VERSION },
+    });
+  } catch (e) {
+    return { status: /time/i.test(String(e)) ? 'timeout' : 'neterr', ms: Date.now() - t, retry: true, busy: true, msg: 'AI service did not answer' };
+  }
+  const code = res.getResponseCode(), ms = Date.now() - t;
+  if (code === 200) {
+    let j, out;
+    try { j = JSON.parse(res.getContentText()); } catch (e) { return { status: 'badjson', ms: ms, retry: false, msg: 'The AI answer was not valid' }; }
+    const u = j.usage || {}, tokens = (u.input_tokens || 0) + (u.output_tokens || 0);
+    if (j.stop_reason === 'refusal') return { status: 'refusal', ms: ms, tokens: tokens, retry: false, msg: 'The AI could not read this document' };
+    if (j.stop_reason === 'max_tokens') return { status: 'maxtokens', ms: ms, tokens: tokens, retry: false, msg: 'The AI could not read this document' };
+    const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('');
+    if (!text) return { status: 'empty', ms: ms, tokens: tokens, retry: false, msg: 'The AI could not read this document' };
+    out = claudeParse(text);
+    if (!out) return { status: 'badjson', ms: ms, tokens: tokens, retry: false, msg: 'The AI answer was not valid' };   // -> Gemini
+    return { status: 'ok', ms: ms, tokens: tokens, out: claudeNormalize(out) };
+  }
+  const status = 'http' + code;
+  // 529 = Anthropic overloaded
+  if (code === 429 || code === 500 || code === 502 || code === 503 || code === 504 || code === 529) return { status: status, ms: ms, retry: true, busy: true, msg: 'AI service busy (' + code + ')' };
+  // detail = Anthropic's error text, shown only by aiModelsCheck in the editor (never put in AI_LOG)
+  const detail = String(res.getContentText()).slice(0, 300);
+  if (code === 401 || code === 403) return { status: status, ms: ms, fatal: 'ai_nokey', msg: 'The Claude API key is not valid', detail: detail };
+  return { status: status, ms: ms, retry: false, msg: 'AI request rejected (' + code + ')', detail: detail };   // e.g. 400 no credit / bad request -> Gemini
+}
+
+/** One request to one Gemini model. */
+function geminiAttempt(m, payload, key) {
   const t = Date.now();
   let res;
   try {
@@ -2083,7 +2226,8 @@ function fail(code, message, extra) { return json(Object.assign({ ok: false, err
 function setup() {
   const id = rootId();
   console.log('Owner: ' + ownerEmail() + ' | Bimeyar folder: https://drive.google.com/drive/folders/' + id);
-  console.log('Gemini key set: ' + (aiKey() ? 'yes' : 'NO - add GEMINI_API_KEY in Project Settings > Script properties'));
+  console.log('Claude key set: ' + (claudeKey() ? 'yes (model ' + CLAUDE_MODEL + ')' : 'NO - add CLAUDE_API_KEY in Project Settings > Script properties'));
+  console.log('Gemini key set (fallback): ' + (aiKey() ? 'yes' : 'NO - add GEMINI_API_KEY in Project Settings > Script properties'));
   // touch the Docs service so the editor asks for the new permission
   try { DocumentApp.getActiveDocument(); } catch (e) { }
 }
@@ -2093,6 +2237,17 @@ function setup() {
  * and prints status and time for each. Shows which models work and which are busy right now.
  */
 function aiModelsCheck() {
+  const ck = claudeKey();
+  if (!ck) console.log('CLAUDE_API_KEY is not set (Gemini is used)');
+  else {
+    // the same request, prompt, parsing and normalizing as aiExtract, with no document attached (no customer data)
+    const r = claudeAttempt({ prov: 'claude', id: CLAUDE_MODEL }, claudeBody([
+      { type: 'text', text: 'TEST ONLY: no document is attached. Follow the answer format, with docType other, slot unknown and every value null.\n\n' + AI_PROMPT_CLAUDE },
+    ]), ck);
+    console.log(CLAUDE_MODEL + ' (Claude, effort ' + CLAUDE_EFFORT + '): ' + r.status + ' in ' + r.ms + ' ms' +
+      (r.out ? ' | parsed: docType ' + r.out.docType + ', slot ' + r.out.slot + ', ' + Object.keys(r.out.fields).length + ' fields' : '') +
+      (r.detail ? ' | ' + r.detail : ''));
+  }
   const key = aiKey();
   if (!key) return console.log('GEMINI_API_KEY is not set');
   for (const m of AI_MODELS) {

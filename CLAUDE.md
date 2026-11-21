@@ -44,8 +44,13 @@ to a production system. Talk to the owner (Pejman) in Persian.
   Invoice = a PDF file in the `pay` sub-folder (v3) or folder `4` of a vehicle (v4) with `appProperties.kind = 'invoice'`, `invNo`, `status`; the invoice data is JSON in its description.
   Invoice numbers come from Script property `INV_SEQ` under `LockService` only.
   The root folder is tagged `appProperties.bimeyar = 'root'`. The company logo file is tagged `bimeyar = 'logo'`.
-- **AI**: Gemini is called only from the backend (`aiExtract`). The key is Script property `GEMINI_API_KEY`: never in the repo,
-  never in the frontend, never in logs. Models: `AI_MODELS` (tried in order, with retries on 429/5xx/timeouts inside a time budget; see `aiExtract`). The AI never saves anything by itself: every value is shown
+- **AI** (v4.4): Claude first, Gemini as automatic fallback, called only from the backend (`aiExtract`, used by every AI feature).
+  Keys are Script properties `CLAUDE_API_KEY` and `GEMINI_API_KEY`: never in the repo, never in the frontend, never in logs.
+  Claude model: `CLAUDE_MODEL` (`claude-haiku-5-5` only, owner's decision: no Sonnet); PDFs as `document` blocks, photos as
+  `image` blocks; NO strict json_schema for Claude (a schema this big gives "compiled grammar is too large"): the shape
+  is in `AI_PROMPT_CLAUDE`, the reply is parsed by `claudeParse` and normalized by `claudeNormalize` into the same
+  structure as Gemini's (unparseable = Claude failure -> Gemini). Without `CLAUDE_API_KEY`, or when Claude fails, the Gemini `AI_MODELS` are used.
+  Models are tried in order (`aiChain`), with retries on 429/5xx/529/timeouts inside a time budget; see `aiExtract`. The AI never saves anything by itself: every value is shown
   to the user first (review screen / "old → new" list). Log AI usage without customer data (`aiLog`).
 - **Login**: "Sign in with Google" (openid/email/profile only). The backend verifies the ID token on every
   request (audience = `CLIENT_ID`) and checks the access list.
@@ -112,7 +117,7 @@ to a production system. Talk to the owner (Pejman) in Persian.
   Rollback tag of `main` before it: `v4.2.0-stable` (= `v4.2.0`). Before that: `v4.1.0-stable` (= `v4.1.0`), `v4.0.0-stable` (= `v4.0.0`), `v3.3.0-stable` (= `v3.3.0`), `v3.2-pre-device` (= `v3.2.0`),
   `v3.1-pre-naming` (= `v3.1.0`), `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
-- Tests: `node tests/aiedit.test.mjs` (v4.3 Edit with AI), `node tests/restore.test.mjs` (v4.2 restore names), `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
+- Tests: `node tests/ai-provider.test.mjs` (v4.4 Claude + Gemini fallback), `node tests/aiedit.test.mjs` (v4.3 Edit with AI), `node tests/restore.test.mjs` (v4.2 restore names), `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
 
 ## Design (owner's decision)
 
