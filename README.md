@@ -21,7 +21,7 @@ It installs on an iPhone like a normal app (PWA) and works in **English**, **Tha
 - **Expiring**: one row per vehicle, sorted by the nearest expiry, grouped: expired / next 7 / next 30 / next 60 days.
 - **Invoices**: create an invoice from a customer (everything is pre-filled), A4 PDF with Thai font, saved
   automatically in the customer's payment folder, share or download on the phone, mark as paid, re-generate.
-- **AI (Gemini)**: take a photo of a policy and the app fills in the new customer for you. You check every field
+- **AI (Claude, Gemini as backup)**: take a photo of a policy and the app fills in the new customer for you. You check every field
   before anything is saved. On every upload the AI suggests the folder and shows "old value → new value" changes.
 - **Team & access** (admin): add people by Gmail as admin, editor (view, upload, edit, AI) or viewer (view only).
 - Deletes go to the Drive trash and can be restored for 30 days.
@@ -68,13 +68,15 @@ Owner's Google Drive → "Bimeyar" folder          Gemini API (key only in Scrip
 | Backend | `backend/Code.gs` + `backend/appsscript.json`, Apps Script project "Bimeyar backend" (owner ghosmali22@gmail.com); its `/exec` URL is `API_URL` in `js/config.js` |
 | Login | Google Cloud project "Bimeyar", Web OAuth client (`GOOGLE_CLIENT_ID` in `js/config.js`) |
 | Data | "Bimeyar" folder in the owner's Google Drive (never in this repo) |
-| Script Properties | `ACL` (access list), `GEMINI_API_KEY` (AI), `COMPANY` (invoice details), `INV_SEQ` (invoice numbers), `AI_LOG` (AI usage, no customer data) |
+| Script Properties | `ACL` (access list), `CLAUDE_API_KEY` (AI), `GEMINI_API_KEY` (AI fallback), `COMPANY` (invoice details), `INV_SEQ` (invoice numbers), `AI_LOG` (AI usage, no customer data) |
 
-## The Gemini API key
+## The AI keys (Claude first, Gemini as backup)
 
-The key is stored **only** in Apps Script → Project Settings → Script properties, as `GEMINI_API_KEY`.
-It is never in this repo and never reaches the browser: the app sends the document to the backend, the backend
-calls Gemini. Get a key at https://aistudio.google.com/apikey. The models are `AI_MODELS` in `backend/Code.gs` (tried in order when Google is busy).
+Since v4.4 the backend reads documents with Claude (`CLAUDE_MODEL` = `claude-haiku-5-5` in `backend/Code.gs`, key
+`CLAUDE_API_KEY`, from https://console.anthropic.com) and falls back to Gemini automatically (key `GEMINI_API_KEY`).
+The keys are stored **only** in Apps Script → Project Settings → Script properties.
+They are never in this repo and never reach the browser: the app sends the document to the backend, the backend
+calls Claude / Gemini. Get a key at https://aistudio.google.com/apikey. The models are `AI_MODELS` in `backend/Code.gs` (tried in order when Google is busy).
 
 ## Data fields
 
@@ -129,6 +131,7 @@ No build step and no dependencies: plain HTML, CSS and JavaScript modules.
 
 - **آدرس اپ:** https://ghosmali22-prog.github.io/bimeyar/
 - **فایل‌ها کجا هستند؟** در پوشهٔ «Bimeyar» در Google Drive حساب مالک. هر مشتری یک پوشه با ۴ زیرپوشه دارد. هیچ فایل مشتری روی GitHub نیست.
-- **کلید Gemini:** فقط در Apps Script ← Project Settings ← Script properties با نام `GEMINI_API_KEY`.
+- **کلید Claude (از v4.4):** فقط در Apps Script ← Project Settings ← Script properties با نام `CLAUDE_API_KEY`.
+- **کلید Gemini (پشتیبان خودکار):** فقط در Apps Script ← Project Settings ← Script properties با نام `GEMINI_API_KEY`.
 - **به‌روزرسانی backend:** فایل [backend/DEPLOY.md](backend/DEPLOY.md) را قدم به قدم انجام بده.
 - **قبل از هر تغییری در کد:** به Claude Code بگو اول فایل CLAUDE.md را بخواند و `git pull` کند.
