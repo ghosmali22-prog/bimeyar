@@ -2296,29 +2296,29 @@ const AI_FIELDS = {
   address: 'Customer address',
   dob: 'Date of birth, YYYY-MM-DD with the year exactly as printed (do not convert Buddhist years)',
   brand: 'Vehicle brand, e.g. Toyota', model: 'Vehicle model, e.g. Yaris', year: 'Vehicle model/registration year as printed',
-  color: 'Vehicle colour', plate: 'Licence plate number without the province (e.g. "71 7895" -> "71-7895")', province: 'Province of the licence plate',
+  color: 'Vehicle colour', plate: 'Licence plate number without the province, written NN-NNNN when it is 2 + 4 digits', province: 'Province of the licence plate',
   vin: 'Chassis number / VIN (line 1 of เลขตัวถัง / Chassis No., never the engine number on line 2)', engineNo: 'Engine number (เลขเครื่องยนต์, or line 2 of the Chassis No. cell when two lines are printed)',
-  insurer: 'Insurance company name', policyNo: 'Policy number', policyType: 'Policy class as printed (ชั้น 1, 2, 2+, 3, 3+), "พ.ร.บ." for compulsory insurance, or null if no class is printed',
+  insurer: 'Insurance company name exactly as printed, in Thai when printed in Thai (with บริษัท … จำกัด (มหาชน))', policyNo: 'Policy number', policyType: 'Policy class as printed (ชั้น 1, 2, 2+, 3, 3+), "พ.ร.บ." for compulsory insurance, or null if no class is printed',
   coverage: 'Sum insured / coverage amount, digits only', premium: 'Total premium, digits only, with decimals if printed',
   policyStart: 'Coverage start date, YYYY-MM-DD with the year exactly as printed', policyExpiry: 'Coverage end date, YYYY-MM-DD with the year exactly as printed',
   contractDate: 'Contract date of the insurance (วันทำสัญญาประกันภัย / วันที่ทำสัญญา, not coverage start), YYYY-MM-DD with the year exactly as printed',
   receiptAmount: 'For a payment receipt or slip: amount paid, digits only', receiptDate: 'For a payment receipt: payment date, YYYY-MM-DD with the year exactly as printed',
   payer: 'For a payment receipt: name of the payer',
   insuredName: 'Name of the insured person or company (ผู้เอาประกันภัย / ชื่อ : on พ.ร.บ.) or the vehicle owner, exactly as printed',   // v4
-  bodyType: 'Vehicle body type as printed (แบบตัวถัง, e.g. รถเก๋ง, รถกระบะ, รถบรรทุก, ตู้บรรทุก, หัวลาก)',                                    // v4
+  bodyType: 'Vehicle body type (แบบตัวถัง) copied exactly as printed on THIS document; never a synonym or a more general word',                                    // v4
   carValue: 'Vehicle value (ราคารถยนต์ / ทุนประกันภัยรถยนต์), digits only',
   odCover: 'Own damage coverage (ความเสียหายต่อตัวรถยนต์): the amount, or "ไม่คุ้มครอง" when printed as not covered',
   tfCover: 'Theft / fire coverage (รถยนต์สูญหาย ไฟไหม้): the amount, or "ไม่คุ้มครอง" when printed as not covered',
-  companyCode: 'For พ.ร.บ.: insurer short code printed with the number, e.g. VIB',
-  prbNo: 'For พ.ร.บ.: the last segment of the policy number to the right of the company code, e.g. 9620656',
-  barcode: 'For พ.ร.บ.: long barcode number at the top right, e.g. 3710496206565',
+  companyCode: 'For พ.ร.บ.: insurer short code printed with the number (3 capital letters)',
+  prbNo: 'For พ.ร.บ.: the digits of the LAST segment of the policy number of THIS document (after the last /)',
+  barcode: 'For พ.ร.บ.: the long number printed under/next to the barcode at the top right of THIS document, digits only',
   receiptNo: 'For พ.ร.บ.: เลขที่ of the receipt',
-  vehicleCode: 'For พ.ร.บ.: รหัสรถ, e.g. 2.40D',
-  cc: 'For พ.ร.บ.: engine displacement (cc) as printed',
-  seats: 'For พ.ร.บ.: seats as printed',
-  weight: 'For พ.ร.บ.: weight as printed',
+  vehicleCode: 'For พ.ร.บ.: รหัสรถ as printed',
+  cc: 'For พ.ร.บ.: engine size in C.C. only (the FIRST number of the cell "C.C./No. of Seats/Weight", e.g. A/B/C -> A)',
+  seats: 'For พ.ร.บ.: number of seats only (the SECOND number of that cell)',
+  weight: 'For พ.ร.บ.: total weight only (the THIRD number of that cell, tons)',
   taxId: 'For พ.ร.บ.: insured tax ID, digits only',
-  periodTime: 'For พ.ร.บ.: start/end time as printed, e.g. 16.30',
+  periodTime: 'For พ.ร.บ.: start/end time of the coverage period as printed (HH.MM)',
   issueDate: 'For พ.ร.บ.: วันที่ออกกรมธรรม์/วันทำ, YYYY-MM-DD with the year as printed',
   netPremium: 'For พ.ร.บ.: เบี้ยประกันภัยสุทธิ, digits only with decimals',
   discount: 'For พ.ร.บ.: ส่วนลด, digits only with decimals',
@@ -2369,12 +2369,12 @@ const AI_PROMPT = [
   '7. slot: the folder of this document (see its description). A พ.ร.บ. (compulsory insurance) is 3, not 1. Use unknown when you cannot tell.',
   '8. plate and vin: read them from the document itself (a photo may show the plate on the car). Never guess them.',
   '9. policyType: if a class is printed (ชั้น 1, 2, 2+, 3, 3+) return it exactly; if none is printed return null and fill odCover and tfCover from the coverage table (never guess the class). A พ.ร.บ. has no class: policyType = "พ.ร.บ.".',
-  '10. Always fill bodyType (แบบตัวถัง, e.g. ตู้บรรทุก, รถบรรทุก) and carValue when printed.',
-  '11. The "เลขตัวถัง / Chassis No." cell often has TWO lines: line 1 = chassis/VIN (e.g. FG8JRLA12653), line 2 = ENGINE number (e.g. J08E0EH12419). vin = line 1 only, engineNo = line 2. Never return an engine number as vin.',
-  '12. plate: registration number only, written NN-NNNN for e.g. "71 7895" -> "71-7895"; the province (e.g. อย) goes in province.',
-  '13. On a พ.ร.บ. the insured (insuredName and nameTh) is exactly the text after "ชื่อ :" (e.g. ห้างหุ้นส่วนจำกัด พี พี เอส ทรานสปอร์ต). Never return a name that is not printed on THIS document; never the broker, agent or insurer.',
-  '14. contractDate = วันทำสัญญาประกันภัย (not the coverage start). policyNo = full number as printed (e.g. "00283 69100/กธ/9620656").',
-  '15. For a พ.ร.บ.: docType prb, slot 3, fill the พ.ร.บ. keys (companyCode … brokerLicense) and premium = total.',
+  '10. Always fill bodyType (แบบตัวถัง) exactly as printed (never a synonym) and carValue when printed. insurer: the name as printed, in Thai when printed in Thai.',
+  '11. The "เลขตัวถัง / Chassis No." cell often has TWO lines: line 1 = chassis/VIN, line 2 = ENGINE number. vin = line 1 only, engineNo = line 2. Never return an engine number as vin.',
+  '12. plate: registration number only, written NN-NNNN when it is 2 + 4 digits; the province (or its short form) goes in province.',
+  '13. On a พ.ร.บ. the insured (insuredName and nameTh) is exactly the text after "ชื่อ :" on THIS document. Never return a name that is not printed on THIS document; never the broker, agent or insurer.',
+  '14. contractDate = วันทำสัญญาประกันภัย (not the coverage start). policyNo = the full number as printed. Every number (policyNo, prbNo, receiptNo, barcode) must be read from THIS document only: documents of one customer look alike and differ in single digits, so read each digit; never reuse a number from another document or from these rules.',
+  '15. For a พ.ร.บ.: docType prb, slot 3, fill the พ.ร.บ. keys (companyCode … brokerLicense) and premium = total. The cell "ขนาดเครื่องยนต์/จำนวนที่นั่ง/น้ำหนักรวม (C.C./No. of Seats/Weight)" holds 3 numbers A/B/C: cc = A, seats = B, weight = C; never the whole text in one field.',
 ].join('\n');
 /** Claude has no response schema (see claudeParse), so the JSON shape is in the prompt. Built from AI_FIELDS. */
 const AI_PROMPT_CLAUDE = [
@@ -2481,7 +2481,7 @@ function aiExtract(req) {
 /** Cache key for a set of files: SHA-256 of their types and contents (the hash is not logged). */
 function aiCacheKey(files) {
   const d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, files.map(f => f.mime + ':' + f.data).join('|'));
-  return 'ai4_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');   // ai4: v4.4.1 answers (prb + extra fields); never mixed with older cached answers
+  return 'ai5_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');   // ai5: v4.5.1 prompt (no example numbers); never mixed with older cached answers
 }
 function aiCached(cache, ck) {
   try { const v = cache.get(ck + ':res'); return v ? JSON.parse(v) : null; } catch (e) { return null; }
