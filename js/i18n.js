@@ -808,6 +808,9 @@ const PRB_TEXT = {
   'prb.chk.barcode': ['The barcode does not contain the PRB number.', 'บาร์โค้ดไม่มีเลข พ.ร.บ. นี้', 'بارکد شامل شمارهٔ پ.ر.ب. نیست.'],
   'prb.chk.vat': ['Amounts do not add up: VAT should be {v}, total {t}.', 'ยอดเงินไม่ตรงกัน: VAT ควรเป็น {v} ยอดรวม {t}', 'مبالغ جور نیست: VAT باید {v} و جمع {t} باشد.'],
   'prb.chk.plateVin': ['Plate and chassis do not match another row ({x}).', 'ทะเบียนกับเลขตัวถังไม่ตรงกับอีกแถว ({x})', 'پلاک و شاسی با ردیف دیگر جور نیست ({x}).'],
+  'prb.autoFixed': ['Auto-corrected (was: {x})', 'แก้ไขอัตโนมัติ (เดิม: {x})', 'خودکار اصلاح شد (قبلاً: {x})'],
+  'prb.sugPolicy': ['Use full policy no.: {x}', 'ใช้เลขกรมธรรม์เต็ม: {x}', 'استفاده از شمارهٔ کامل بیمه‌نامه: {x}'],
+  'prb.sugName': ['Use the spelling of the other rows: {x}', 'ใช้ชื่อสะกดแบบแถวอื่น: {x}', 'استفاده از املای ردیف‌های دیگر: {x}'],
   'prb.chk.period': ['The end date is not after the start date.', 'วันสิ้นสุดไม่อยู่หลังวันเริ่ม', 'تاریخ پایان بعد از شروع نیست.'],
 };
 for (const [key, values] of Object.entries(PRB_TEXT)) {
