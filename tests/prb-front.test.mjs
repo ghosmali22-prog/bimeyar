@@ -34,15 +34,15 @@ eq(prbStatus({ end: '2026-12-23' }, TODAY), 'active', 'prbStatus active 31d');
 eq(prbStatus({ end: '' }, TODAY), 'none', 'prbStatus empty');
 eq(prbStatus({}, TODAY), 'none', 'prbStatus missing');
 
-// 3. sortRows (9990656, 9990654, '', 9990655 -> 54,55,56,'')
+// 3. sortRows (1000006, 1000004, '', 1000005 -> 04,05,06,'')
 const unsorted = [
-  { id: 'a', prbNo: '9990656', plate: '71-0003' },
-  { id: 'b', prbNo: '9990654', plate: '71-0001' },
+  { id: 'a', prbNo: '1000006', plate: '71-0003' },
+  { id: 'b', prbNo: '1000004', plate: '71-0001' },
   { id: 'c', prbNo: '', plate: '71-0004' },
-  { id: 'd', prbNo: '9990655', plate: '71-0002' },
+  { id: 'd', prbNo: '1000005', plate: '71-0002' },
 ];
-eq(sortRows(unsorted).map(r => r.prbNo), ['9990654', '9990655', '9990656', ''], 'sortRows numeric + empty last');
-eq(unsorted[0].prbNo, '9990656', 'sortRows does not mutate input');
+eq(sortRows(unsorted).map(r => r.prbNo), ['1000004', '1000005', '1000006', ''], 'sortRows numeric + empty last');
+eq(unsorted[0].prbNo, '1000006', 'sortRows does not mutate input');
 const tieRows = [
   { prbNo: '', plate: '71-2000', createdAt: '2026-11-02' },
   { prbNo: '', plate: '71-1000', createdAt: '2026-11-05' },
@@ -78,8 +78,8 @@ eq(prbMonth({ contractDate: '2026-11-09', issueDate: '2026-10-01', start: '2026-
 eq(prbMonth({ issueDate: '2026-10-01', start: '2026-12-01' }), 10, 'prbMonth issueDate second');
 eq(prbMonth({ start: '2026-12-01' }), 12, 'prbMonth start third');
 eq(
-  prbFileName({ plate: '99-0262', contractDate: '2026-11-09' }, 'ห้างหุ้นส่วนจำกัด ที ที เอส ทรานสปอร์ต', '.pdf'),
-  '99-0262 - ที ที เอส ทรานสปอร์ต(11) - พ.ร.บ..pdf',
+  prbFileName({ plate: '00-0001', contractDate: '2026-11-09' }, 'ห้างหุ้นส่วนจำกัด ทดสอบ ขนส่ง', '.pdf'),
+  '00-0001 - ทดสอบ ขนส่ง(11) - พ.ร.บ..pdf',
   'prbFileName exact contract example'
 );
 
@@ -92,9 +92,9 @@ const aiNorm = normalize({
     insuredName: 'ห้างหุ้นส่วนจำกัด สมมติ โลจิสติกส์',
     taxId: '0103555000999',
     address: '99/9 ถนนสมมติ กรุงเทพฯ 10900',
-    prbNo: '9990656',
-    barcode: '3710499906565',
-    plate: '99 0262',
+    prbNo: '1000006',
+    barcode: '3710410000065',
+    plate: '00 0001',
     province: 'นครปฐม',
     brand: 'HINO',
     model: 'FG8J',
@@ -106,7 +106,7 @@ const aiNorm = normalize({
     weight: '15',
     companyCode: '37',
     insurer: 'บริษัท สมมติประกันภัย จำกัด (มหาชน)',
-    policyNo: '37104-9990656-5',
+    policyNo: '37104-1000006-5',
     receiptNo: 'RC-001',
     contractDate: '09/11/2569',
     issueDate: '09/11/2569',
@@ -124,7 +124,7 @@ const aiNorm = normalize({
 });
 eq(isPrbDoc(aiNorm), true, 'isPrbDoc true for prb docType');
 eq(isPrbDoc({ docType: 'other', values: { policyType: 'พ.ร.บ.' }, prb: {} }), true, 'isPrbDoc true by policyType');
-eq(isPrbDoc({ docType: 'other', slot: '3', values: {}, prb: { prbNo: '9990656' } }), true, 'isPrbDoc true by slot 3 + prbNo');
+eq(isPrbDoc({ docType: 'other', slot: '3', values: {}, prb: { prbNo: '1000006' } }), true, 'isPrbDoc true by slot 3 + prbNo');
 eq(isPrbDoc({ docType: 'policy', slot: '1', values: { policyType: 'ชั้น 1' }, prb: {} }), false, 'isPrbDoc false for class 1 policy');
 
 const mapped = rowFromAi(aiNorm);
@@ -133,9 +133,9 @@ eq(mapped.insured, {
   taxId: '0103555000999',
   address: '99/9 ถนนสมมติ กรุงเทพฯ 10900',
 }, 'rowFromAi insured');
-eq(mapped.row.prbNo, '9990656', 'rowFromAi prbNo');
-eq(mapped.row.barcode, '3710499906565', 'rowFromAi barcode');
-eq(mapped.row.plate, '99-0262', 'rowFromAi normalized plate');
+eq(mapped.row.prbNo, '1000006', 'rowFromAi prbNo');
+eq(mapped.row.barcode, '3710410000065', 'rowFromAi barcode');
+eq(mapped.row.plate, '00-0001', 'rowFromAi normalized plate');
 eq([mapped.row.vin, mapped.row.engineNo], ['FG8JFAKE00001', 'J08EFAKE00001'], 'rowFromAi vin and engineNo');
 eq([mapped.row.contractDate, mapped.row.issueDate, mapped.row.start, mapped.row.end], ['2026-11-09', '2026-11-09', '2026-11-09', '2027-11-09'], 'rowFromAi ISO CE dates');
 eq([mapped.row.netPremium, mapped.row.discount, mapped.row.stamps, mapped.row.vat, mapped.row.total], ['600', '0', '3', '42.21', '645.21'], 'rowFromAi money strings');
@@ -143,18 +143,18 @@ eq([mapped.row.brokerName, mapped.row.brokerLicense], ['นายสมมติ
 
 // 7. findDup
 const existing = [
-  { id: 'r1', prbNo: '9990654', barcode: '3710499906541', name: 'one.pdf' },
-  { id: 'r2', prbNo: '9990655', barcode: '3710499906558', name: 'two.pdf' },
+  { id: 'r1', prbNo: '1000004', barcode: '3710410000041', name: 'one.pdf' },
+  { id: 'r2', prbNo: '1000005', barcode: '3710410000058', name: 'two.pdf' },
 ];
-eq(findDup({ prbNo: '9990655', barcode: '' }, existing)?.id, 'r2', 'findDup by prbNo');
-eq(findDup({ prbNo: '', barcode: '3710499906541' }, existing)?.id, 'r1', 'findDup by barcode');
-eq(findDup({ prbNo: '9990655', barcode: '3710499906558' }, existing, 'r2'), null, 'findDup ignores exceptId');
+eq(findDup({ prbNo: '1000005', barcode: '' }, existing)?.id, 'r2', 'findDup by prbNo');
+eq(findDup({ prbNo: '', barcode: '3710410000041' }, existing)?.id, 'r1', 'findDup by barcode');
+eq(findDup({ prbNo: '1000005', barcode: '3710410000058' }, existing, 'r2'), null, 'findDup ignores exceptId');
 eq(findDup({ prbNo: '', barcode: '' }, existing), null, 'findDup empty returns null');
 
 // 8. LocalStore พ.ร.บ. methods (upload, duplicate check, update, invoice seq)
 const store = new LocalStore();
 const up1 = await store.prbUpload(new Blob(['pdf'], { type: 'application/pdf' }), mapped.insured, mapped.row, { name: 'test1.pdf' });
-eq(up1.row.prbNo, '9990656', 'LocalStore prbUpload row');
+eq(up1.row.prbNo, '1000006', 'LocalStore prbUpload row');
 let dupErr = '';
 try {
   await store.prbUpload(new Blob(['pdf']), mapped.insured, { ...mapped.row }, { name: 'dup.pdf' });
