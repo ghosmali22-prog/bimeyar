@@ -12,7 +12,7 @@ import { prepare, normalize, diff, fileNote, FIELD_GROUPS, DATE_FIELDS } from '.
 import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './validate.js';
 import { buildName, docNameFromOld, plateOnly, plateFromName, followsPattern, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
 import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey, needsAiRead, detectVehicles, aiEditSuggest } from './vehicles.js';
-import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup, prbSanity, suggestInsured, groupInsured, prbPost, suggestPolicyNo, majorityName } from './prb.js';
+import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup, prbSanity, suggestInsured, groupInsured, prbPost, suggestPolicyNo, majorityName, consensusName } from './prb.js';
 import { parseDate } from './dates.js';
 
 /*
@@ -1202,7 +1202,7 @@ function rowPick(it, k, val) {
 async function doUpload(btn) {
   if (!U || U.busy) return;
   if (U.items.some(it => it.ai === 'busy' || it.ai === 'wait')) return toast(t('ai.reading'));
-  const prbItems = U.items.filter(it => !it.done && it.prbRoute).map(it => ({ file: it.file, ...rowFromAi(it.n) }));
+  const prbItems = U.items.filter(it => !it.done && it.prbRoute).map(it => ({ file: it.file, n: it.n, ...rowFromAi(it.n) }));
   const todo = U.items.filter(it => !it.done && !it.prbRoute);
   const missing = todo.find(it => !it.cid || !it.vkey || !it.slot);
   if (missing) { toast(t('su.pickAll'), 'err'); $(`.up-row[data-i="${U.items.indexOf(missing)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
@@ -2392,7 +2392,14 @@ function prbReviewHint() {
   const warning = $('#prbWarning'), chk = prbChecks(it), all = [...chk.errors, ...chk.warns];
   warning.hidden = !all.length;
   warning.textContent = all.map(prbChkText).join(' · ');
-  const sug = $('#prbSuggest'); if (sug && !it.existing) sug.innerHTML = prbSuggestHtml(it, PR.items.indexOf(it));
+  const sug = $('#prbSuggest'), idx = PR.items.indexOf(it);
+  if (sug && !it.existing) {
+    const sp = suggestPolicyNo(it.row, PR.items.filter(x => x !== it).map(x => x.row), { branchCode: it.n?.prb?.branchCode });
+    const mn = consensusName(PR.items.map(x => x.insured?.name || ''), idx, (P.data?.insured || []).map(x => x.name));
+    sug.innerHTML = prbSuggestHtml(it, idx)
+      + (sp ? `<button type="button" class="link prb-sug" data-act="prb-accept" data-i="${idx}" data-k="policyNo" data-v="${esc(sp.value)}">${esc(t('prb.sugPolicy', { x: sp.value }))}</button>` : '')
+      + (mn ? `<button type="button" class="link prb-sug" data-act="prb-use-name" data-i="${idx}" data-name="${esc(mn)}">${esc(t('prb.sugName', { x: mn }))}</button>` : '');
+  }
   $('#prbFilename').textContent = it.existing?.name || prbFileName(it.row, it.insured.name, extOf((it.file || it.source)?.name || 'document.pdf'));
 }
 function prbBusy(on) {
@@ -2410,6 +2417,7 @@ async function prbReadAi() {
     const mapped = rowFromAi(n);
     for (const [k, v] of Object.entries(mapped.insured)) if (v) it.insured[k] = v;
     for (const [k, v] of Object.entries(mapped.row)) if (v) it.row[k] = v;
+    it.n = n;
     const fx = prbPost([it])[0]; if (fx.auto.policyNo) it.auto = { ...it.auto, policyNo: fx.auto.policyNo };
     it.message = t(isPrbDoc(n) ? 'prb.aiReview' : 'prb.notPrb');
   } catch (e) { if (PR === session) it.message = t('prb.aiFailed'); handleError(e); }
@@ -2489,7 +2497,7 @@ function prbBatchChecks() {
       + (!c.errors.length && !c.warns.length && it.state !== 'failed' && it.ai !== 'busy' && it.ai !== 'wait' ? '<span class="prb-st ok">OK</span>' : '');
     // v4.5.2: one-click suggestions: full policy number from the batch consensus, majority spelling of the insured
     const others = PR.items.filter((x, j) => j !== i && !x.skip).map(x => x.row);
-    const sp = suggestPolicyNo(it.row, others), mn = majorityName(PR.items.map(x => x.skip ? '' : x.insured.name), i);
+    const sp = suggestPolicyNo(it.row, others, { branchCode: it.n?.prb?.branchCode }), mn = consensusName(PR.items.map(x => x.skip ? '' : x.insured.name), i, (P.data?.insured || []).map(x => x.name));
     el.innerHTML += (it.auto?.policyNo && it.auto.policyNo !== it.row.policyNo ? `<div class="prb-autonote">${esc(t('prb.autoFixed', { x: it.auto.policyNo }))}</div>` : '')
       + (sp ? `<button type="button" class="link prb-sug" data-act="prb-accept" data-i="${i}" data-k="policyNo" data-v="${esc(sp.value)}">${esc(t('prb.sugPolicy', { x: sp.value }))}</button>` : '')
       + (mn ? `<button type="button" class="link prb-sug" data-act="prb-use-name" data-i="${i}" data-name="${esc(mn)}">${esc(t('prb.sugName', { x: mn }))}</button>` : '');
@@ -2656,8 +2664,8 @@ const ACT = {
     if (!PR) return;
     const it = PR.items[+el.dataset.i]; if (!it || it.state === 'saved') return;
     it.row[el.dataset.k] = el.dataset.v;
-    const inp = $(`[data-pi="${el.dataset.i}"][data-pk="${el.dataset.k}"]`); if (inp) inp.value = el.dataset.v;
-    prbBatchChecks();
+    const inp = $(`[data-pi="${el.dataset.i}"][data-pk="${el.dataset.k}"]`) || $(`#prbForm [name="${el.dataset.k}"]`); if (inp) inp.value = el.dataset.v;
+    if (PR.batch && !PR.cardOpen) prbBatchChecks(); else prbReviewHint();
   },
   'prb-more'(el) { if (!PR) return; PR.index = +el.dataset.i; PR.cardOpen = true; prbReview(); },
   'prb-prev'() { if (!PR) return; prbReadForm(); PR.index = (PR.index - 1 + PR.items.length) % PR.items.length; prbReview(); },

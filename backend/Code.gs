@@ -2334,6 +2334,8 @@ const AI_FIELDS = {
   brokerName: 'For พ.ร.บ.: broker or agent name as printed',
   brokerLicense: 'For พ.ร.บ.: broker or agent licence number as printed',
   plateText: 'The licence plate cell exactly as printed, including the province text after the number',   // v4.5.2
+  branchCode: 'For พ.ร.บ.: the 5-digit branch number printed directly under the company code (e.g. under VIB), next to the policy number',   // v4.5.3
+  cswText: 'For พ.ร.บ.: the cell "ขนาดเครื่องยนต์/จำนวนที่นั่ง/น้ำหนักรวม (C.C./No. of Seats/Weight)" copied exactly as printed (three numbers with /)',   // v4.5.3
 };
 
 /** v4: the folder of the vehicle file a document belongs to (see VSLOTS). */
@@ -2380,8 +2382,8 @@ const AI_PROMPT = [
   '11. The "เลขตัวถัง / Chassis No." cell often has TWO lines: line 1 = chassis/VIN, line 2 = ENGINE number. vin = line 1 only, engineNo = line 2. Never return an engine number as vin.',
   '12. plate: registration number only, written NN-NNNN when it is 2 + 4 digits. plateText: the plate cell exactly as printed (number AND the province text after it). province: ONLY the text after the number in that cell (or its short form as printed); never take it from the address.',
   '13. On a พ.ร.บ. the insured (insuredName and nameTh) is exactly the text after "ชื่อ :" on THIS document, with the same spacing (no space after บริษัท when none is printed). Never return a name that is not printed on THIS document; never the broker, agent or insurer.',
-  '14. contractDate = วันทำสัญญาประกันภัย (not the coverage start). policyNo = the full number as printed with ALL its groups (on Viriyah: two groups of 5 digits, then /กธ/, then the PRB number); keep every group and the Thai letters exactly. Every number (policyNo, prbNo, receiptNo, barcode) must be read from THIS document only: documents of one customer look alike and differ in single digits, so read each digit; never reuse a number from another document or from these rules.',
-  '15. For a พ.ร.บ.: docType prb, slot 3, fill the พ.ร.บ. keys (companyCode … brokerLicense) and premium = total. The cell "ขนาดเครื่องยนต์/จำนวนที่นั่ง/น้ำหนักรวม (C.C./No. of Seats/Weight)" holds 3 numbers A/B/C: cc = A, seats = B, weight = C; never the whole text in one field.',
+  '14. contractDate = วันทำสัญญาประกันภัย (not the coverage start). policyNo = the full number as printed with ALL its groups (on Viriyah: two groups of 5 digits, then /กธ/, then the PRB number; the FIRST group is the branch number printed under VIB, also return it as branchCode); keep every group and the Thai letters exactly. Every number (policyNo, prbNo, receiptNo, barcode) must be read from THIS document only: documents of one customer look alike and differ in single digits, so read each digit; never reuse a number from another document or from these rules.',
+  '15. For a พ.ร.บ.: docType prb, slot 3, fill the พ.ร.บ. keys (companyCode … brokerLicense) and premium = total. The cell "ขนาดเครื่องยนต์/จำนวนที่นั่ง/น้ำหนักรวม (C.C./No. of Seats/Weight)" holds 3 numbers A/B/C: copy that cell exactly into cswText (the app splits it); cc = A, seats = B, weight = C; never the whole text in one field.',
 ].join('\n');
 /** Claude has no response schema (see claudeParse), so the JSON shape is in the prompt. Built from AI_FIELDS. */
 const AI_PROMPT_CLAUDE = [
@@ -2488,7 +2490,7 @@ function aiExtract(req) {
 /** Cache key for a set of files: SHA-256 of their types and contents (the hash is not logged). */
 function aiCacheKey(files) {
   const d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, files.map(f => f.mime + ':' + f.data).join('|'));
-  return 'ai6_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');   // ai6: v4.5.2 prompt (plateText, full policy number); never mixed with older cached answers
+  return 'ai7_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');   // ai7: v4.5.3 prompt (branchCode, cswText); never mixed with older cached answers
 }
 function aiCached(cache, ck) {
   try { const v = cache.get(ck + ':res'); return v ? JSON.parse(v) : null; } catch (e) { return null; }

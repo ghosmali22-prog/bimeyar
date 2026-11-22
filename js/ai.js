@@ -57,8 +57,8 @@ export function prbCheck({ netPremium, stamps, vat, total } = {}) {
   const vatS = Math.round(base * 0.07), sum = base + satang(vat);
   return { ok: Math.abs(satang(vat) - vatS) <= 1 && Math.abs(sum - satang(total)) <= 1, vatExpected: vatS / 100, totalExpected: sum / 100 };
 }
-const PRB_TEXT = ['companyCode', 'receiptNo', 'vehicleCode', 'cc', 'seats', 'weight', 'periodTime', 'brokerName', 'brokerLicense'];
-const PRB_DIGITS = ['prbNo', 'barcode', 'taxId'];
+const PRB_TEXT = ['companyCode', 'receiptNo', 'vehicleCode', 'cc', 'seats', 'weight', 'periodTime', 'brokerName', 'brokerLicense', 'cswText'];
+const PRB_DIGITS = ['prbNo', 'barcode', 'taxId', 'branchCode'];
 const PRB_MONEY = ['netPremium', 'discount', 'stamps', 'vat', 'total'];
 const splitCSW = s => {
   if (s == null) return null;
@@ -141,7 +141,11 @@ export function normalize(r) {
   }
   const prb = {};
   for (const k of PRB_TEXT) { [v] = get(k); if (v) prb[k] = latinDigits(v); }
-  for (const k of ['cc', 'seats', 'weight']) { if (prb[k]) { const csw = splitCSW(prb[k]); if (csw) { Object.assign(prb, csw); break; } } }
+  // v4.5.3: the raw "C.C./Seats/Weight" text decides cc, seats and weight (split in code); separately read values are not trusted
+  const cswRaw = prb.cswText ? splitCSW(prb.cswText) : null;
+  if (cswRaw) Object.assign(prb, cswRaw);
+  else if (prb.cswText) { delete prb.cc; delete prb.seats; delete prb.weight; prb.notes = { ...(prb.notes || {}), cc: 'v.ccBad' }; }
+  else for (const k of ['cc', 'seats', 'weight']) { if (prb[k]) { const csw = splitCSW(prb[k]); if (csw) { Object.assign(prb, csw); break; } } }
   // v4.5.2: cc is an integer from the C.C./Seats/Weight triple only; never the vehicle code (e.g. 2.40D)
   if (prb.cc && (!/^\d+$/.test(prb.cc.trim()) || prb.cc === prb.vehicleCode)) { delete prb.cc; prb.notes = { ...(prb.notes || {}), cc: 'v.ccBad' }; }
   for (const k of PRB_DIGITS) { [v] = get(k); const d = latinDigits(v).replace(/\D/g, ''); if (d) prb[k] = d; }
