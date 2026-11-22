@@ -809,7 +809,7 @@ const fieldInput = (k, v, { err = '', warn = '', conf = null, note = '', req = f
   if (DATE_FIELDS.has(k)) inp = `<input type="date" ${attrs} value="${val}">`;
   else if (k === 'address' || k === 'note') inp = `<textarea ${attrs} rows="2" maxlength="${k === 'note' ? 500 : 300}">${val}</textarea>`;
   else {
-    const extra = { phone: 'inputmode="tel" dir="ltr" autocomplete="tel"', idNo: 'inputmode="numeric" dir="ltr"', year: 'inputmode="numeric" maxlength="4"', coverage: 'inputmode="decimal"', premium: 'inputmode="decimal"', vin: 'dir="ltr" autocapitalize="characters"', engineNo: 'dir="ltr" autocapitalize="characters"', policyNo: 'dir="ltr"', province: 'list="dl-prov"', policyType: 'list="dl-ptype"', name: 'required maxlength="120"', plate: 'maxlength="40"' }[k] || '';
+    const extra = { phone: 'inputmode="tel" dir="ltr" autocomplete="tel"', idNo: 'inputmode="numeric" dir="ltr"', year: 'inputmode="numeric" maxlength="4"', coverage: 'inputmode="decimal"', carValue: 'inputmode="decimal"', premium: 'inputmode="decimal"', vin: 'dir="ltr" autocapitalize="characters"', engineNo: 'dir="ltr" autocapitalize="characters"', policyNo: 'dir="ltr"', province: 'list="dl-prov"', policyType: 'list="dl-ptype"', name: 'required maxlength="120"', plate: 'maxlength="40"' }[k] || '';
     inp = `<input ${attrs} ${extra} value="${val}" autocomplete="off">`;
   }
   const level = conf == null ? '' : conf >= 0.85 ? 'hi' : conf >= 0.6 ? 'mid' : 'lo';
@@ -1011,6 +1011,14 @@ function placeRow(it) {
     const m = findCustomer(v, S.customers, allVehicles(S.customers, S.vehicles));
     if (m) { it.cid = m.cid; it.cconf = m.conf; it.how = m.how; }
     else if (v.name || v.insuredName) { it.cid = newCustFor(v); it.cconf = 'new'; it.how = 'new'; }
+    // v4.4.1: found by plate / chassis, but the document names someone else (e.g. a พ.ร.บ. of a company): never silently
+    it.nameDiff = '';
+    const dn = v.insuredName || v.name || '', mc = m && cust(m.cid);
+    if (mc && m.how !== 'name' && nameKey(dn).length >= 3 && ![mc.name, mc.nameEn, mc.nick].some(x => x && nameKey(x) === nameKey(dn))) { it.cconf = 'low'; it.nameDiff = dn; }
+  } else if (U.fixedCid && !it.picked.cid) {
+    // uploading from inside a customer: the files go to that customer, but a different printed name is still shown
+    const dn = v.insuredName || v.name || '', fc = cust(U.fixedCid);
+    it.nameDiff = fc && nameKey(dn).length >= 3 && ![fc.name, fc.nameEn, fc.nick].some(x => x && nameKey(x) === nameKey(dn)) ? dn : '';
   }
   if (!it.picked.veh && it.cid) {
     const f = findVehicle(v, it.slot, vehChoices(it.cid));
@@ -1098,7 +1106,9 @@ function aiLine(it) {
   if (it.ai === 'wait' || it.ai === 'busy') return `<p class="ai-line busy"><span class="spin sm"></span>${t('ai.reading')} <span class="elapsed" data-since="${it.since || ''}"></span><span class="slow-hint">${t('ai.slowHint')}</span></p>`;
   if (it.ai === 'err') return `<p class="ai-line err">${icon('alert', 14)}${esc(it.err)} · ${t('su.manual')} <button type="button" class="link" data-act="up-ai-retry">${t('ai.retry')}</button></p>`;
   const why = it.how ? ` · ${t('su.by.' + it.how)}` : '';
-  return `<p class="hint">${icon('sparkle', 13)} ${t('ai.found', { x: t('dt.' + (it.n?.docType || 'other')) })}${why}</p>`;
+  const nd = it.nameDiff && !it.picked.cid ? `<p class="ai-line err">${icon('alert', 14)}${esc(t('su.nameDiff', { x: it.nameDiff }))}</p>` : '';
+  const pc = it.n?.prb?.check, pb = pc && pc.ok === false ? `<p class="ai-line err">${icon('alert', 14)}${esc(t('su.prbBad', { v: pc.vatExpected.toFixed(2), t: pc.totalExpected.toFixed(2) }))}</p>` : '';
+  return `<p class="hint">${icon('sparkle', 13)} ${t('ai.found', { x: t('dt.' + (it.n?.docType || 'other')) })}${why}</p>${nd}${pb}`;
 }
 const confChip = c => `<em class="conf ${{ high: 'c-hi', mid: 'c-mid', low: 'c-lo', hint: 'c-mid', none: 'c-lo' }[c] || 'c-lo'}">${t('su.conf.' + c)}</em>`;
 const fmtVal = (k, v) => !v ? '' : DATE_FIELDS.has(k) ? fmtDay(v) : v;
@@ -1224,8 +1234,13 @@ async function doUpload(btn) {
       if (blob.size > MAX) { toast(t('u.tooBig', { x: it.file.name, n: MAX_UPLOAD_MB }), 'err'); continue; }
       btn.textContent = t('u.saving');
       const vals = it.n?.values || {};
+      // v4.4.1: the file's expiry is the date the user saw and corrected on the review card (same as the vehicle header);
+      // a doubtful AI date (end not after start, or years later: BE/CE mix-up) is not used for the file
+      const nv = it.vkey.startsWith('N:') ? u.newVeh[it.vkey.slice(2)] : null;
+      let exp = it.n?.notes?.policyExpiry ? '' : vals.policyExpiry || '';
+      if (nv && nv.data.policyExpiry && (!vals.policyStart || nv.data.policyStart === vals.policyStart || !exp)) exp = nv.data.policyExpiry;
       const meta = { name: saveName(it.name, it.file, blob), orig: it.file.name, customerId: cid, vehicleId: vid, slot: it.slot, type: VSLOT[it.slot].type,
-        expiry: ['1', '2', '3'].includes(it.slot) ? vals.policyExpiry || '' : '', note: it.n ? fileNote(it.n, it.slot === '5.4' ? 'pay' : it.slot === '5.2' ? 'prev' : 'policy') : '' };
+        expiry: ['1', '2', '3'].includes(it.slot) ? exp : '', note: it.n ? fileNote(it.n, it.slot === '5.4' ? 'pay' : it.slot === '5.2' ? 'prev' : 'policy') : '' };
       const thumb = await makeThumb(blob);
       if (S.store.kind === 'local') meta.thumb = thumb;
       const bar = $(`.up-row[data-i="${i}"] .prog i`);

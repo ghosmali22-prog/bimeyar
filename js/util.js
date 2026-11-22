@@ -1,4 +1,5 @@
 import { lang, t, num, LOCALE } from './i18n.js';
+import { daysLeft as dLeft, fmtDMY } from './dates.js';
 export const $ = (s, r = document) => r.querySelector(s);
 export const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
@@ -80,10 +81,8 @@ export function jDate(iso, withYear = true) {
   const [y, m, d] = toJ(localDate(iso));
   return faDigits(`${d} ${J_MONTHS[m - 1]}${withYear ? ' ' + y : ''}`);
 }
-export function daysLeft(iso) {
-  const t = new Date(); t.setHours(12, 0, 0, 0);
-  return Math.round((localDate(iso) - t) / 864e5);
-}
+/** days from today (v4.4.1: the shared helper in js/dates.js) */
+export const daysLeft = iso => dLeft(iso);
 /** یک سال شمسی بعد از امروز، به‌صورت متن قابل ویرایش */
 export function nextYearJ() {
   const [y, m, d] = toJ(new Date());
@@ -109,15 +108,15 @@ export function fmtDate(iso, withYear = true) {
 /* ---------- DD/MM/YYYY display, chosen in Settings: 'ce' (2026), 'be' (2569) or 'fa' (Jalali) ---------- */
 let dfmt = null;
 try { dfmt = localStorage.getItem('by_datefmt'); } catch { }
-export const dateFmt = () => (['ce', 'be', 'fa'].includes(dfmt) ? dfmt : lang === 'fa' ? 'fa' : 'ce');
+// v4.4.1: Thai shows the Buddhist year by default (19/10/2570); the Settings choice always wins
+export const dateFmt = () => (['ce', 'be', 'fa'].includes(dfmt) ? dfmt : lang === 'fa' ? 'fa' : lang === 'th' ? 'be' : 'ce');
 export const setDateFmt = f => { dfmt = f; try { localStorage.setItem('by_datefmt', f); } catch { } };
 /** "17/11/2026", "17/11/2569" or "۱۴۰۵/۰۸/۲۶" */
 export function fmtDay(iso) {
   if (!iso || !/^\d{4}-\d{2}-\d{2}/.test(iso)) return '';
   const f = dateFmt();
   if (f === 'fa') return fmtJ(iso.slice(0, 10));
-  const [y, m, d] = iso.slice(0, 10).split('-');
-  return `${d}/${m}/${f === 'be' ? +y + 543 : y}`;
+  return fmtDMY(iso, f === 'be' ? 'be' : 'ce');
 }
 export const todayIso = () => isoDay(new Date());
 export const addDays = (iso, n) => { const d = localDate(iso); d.setDate(d.getDate() + n); return isoDay(d); };

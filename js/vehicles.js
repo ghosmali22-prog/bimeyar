@@ -30,10 +30,10 @@ export const VSLOT = Object.fromEntries(VSLOTS.map(s => [s.id, s]));
 /** Folders that hold files (never 5 itself) */
 export const FILE_SLOTS = VSLOTS.filter(s => !s.group).map(s => s.id);
 /** Vehicle fields. All optional except the plate. Must match VFIELDS in backend/Code.gs. */
-export const VFIELDS = ['plate', 'province', 'brand', 'model', 'year', 'color', 'body', 'vin', 'engineNo',
+export const VFIELDS = ['plate', 'province', 'brand', 'model', 'year', 'color', 'body', 'vin', 'engineNo', 'carValue',
   'insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'contractDate', 'policyStart', 'policyExpiry', 'note'];
 export const VGROUPS = {
-  vehicle: ['plate', 'province', 'brand', 'model', 'year', 'color', 'body', 'vin', 'engineNo'],
+  vehicle: ['plate', 'province', 'brand', 'model', 'year', 'color', 'body', 'vin', 'engineNo', 'carValue'],
   policy: ['insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'contractDate', 'policyStart', 'policyExpiry'],
 };
 
@@ -115,7 +115,7 @@ const CMI = /พ\s*\.?\s*ร\s*\.?\s*บ|ภาคบังคับ|compulsory|
 export function slotFromAi(n, today = new Date().toISOString().slice(0, 10)) {
   if (!n) return '';
   let s = FILE_SLOTS.includes(n.slot) ? n.slot : '';
-  if (!s) s = { registration: '5.1', id_card: '5.5', receipt: '5.4' }[n.docType] || '';
+  if (!s) s = { registration: '5.1', id_card: '5.5', receipt: '5.4', prb: '3' }[n.docType] || '';
   if (!s && n.docType === 'policy') s = '1';
   if ((s === '1' || s === '2') && CMI.test(`${n.values?.policyType || ''} ${n.docName || ''}`)) s = '3';
   if (['1', '2', '3'].includes(s) && n.values?.policyExpiry && n.values.policyExpiry < today) s = '5.2';

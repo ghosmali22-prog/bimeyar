@@ -90,7 +90,7 @@ const VFILE_SLOTS = ['1', '2', '3', '4', '5.1', '5.2', '5.3', '5.4', '5.5'];
 const MONTHS_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 /** Vehicle fields (v4), stored as JSON in the description of the plate folder. All optional except the plate. */
 const VFIELDS = {
-  plate: 40, province: 60, brand: 40, model: 60, year: 4, color: 30, body: 60, vin: 40, engineNo: 40,
+  plate: 40, province: 60, brand: 40, model: 60, year: 4, color: 30, body: 60, vin: 40, engineNo: 40, carValue: 20,   // carValue: v4.4.1
   insurer: 80, policyNo: 60, policyType: 60, coverage: 20, premium: 20,
   contractDate: 'date', policyStart: 'date', policyExpiry: 'date', note: 500,
 };
@@ -1879,7 +1879,7 @@ function claudeParse(text) {
 
 /** Claude's parsed reply -> { docType, docName, slot, fields: { key: { value: string|null, confidence: 0-1 } } } */
 function claudeNormalize(o) {
-  const DOC_TYPES = ['policy', 'registration', 'id_card', 'receipt', 'other'];
+  const DOC_TYPES = ['policy', 'prb', 'registration', 'id_card', 'receipt', 'other'];
   const docType = DOC_TYPES.indexOf(String(o.docType || '')) >= 0 ? String(o.docType) : 'other';
   const slot = VFILE_SLOTS.indexOf(String(o.slot == null ? '' : o.slot)) >= 0 ? String(o.slot) : 'unknown';
   const src = o.fields && typeof o.fields === 'object' ? o.fields : {};
@@ -1913,16 +1913,37 @@ const AI_FIELDS = {
   address: 'Customer address',
   dob: 'Date of birth, YYYY-MM-DD with the year exactly as printed (do not convert Buddhist years)',
   brand: 'Vehicle brand, e.g. Toyota', model: 'Vehicle model, e.g. Yaris', year: 'Vehicle model/registration year as printed',
-  color: 'Vehicle colour', plate: 'Licence plate number without the province', province: 'Province of the licence plate',
-  vin: 'Chassis number / VIN', engineNo: 'Engine number',
-  insurer: 'Insurance company name', policyNo: 'Policy number', policyType: 'Policy type or class, e.g. ชั้น 1, 2+, 3, พ.ร.บ.',
+  color: 'Vehicle colour', plate: 'Licence plate number without the province (e.g. "71 7895" -> "71-7895")', province: 'Province of the licence plate',
+  vin: 'Chassis number / VIN (line 1 of เลขตัวถัง / Chassis No., never the engine number on line 2)', engineNo: 'Engine number (เลขเครื่องยนต์, or line 2 of the Chassis No. cell when two lines are printed)',
+  insurer: 'Insurance company name', policyNo: 'Policy number', policyType: 'Policy class as printed (ชั้น 1, 2, 2+, 3, 3+), "พ.ร.บ." for compulsory insurance, or null if no class is printed',
   coverage: 'Sum insured / coverage amount, digits only', premium: 'Total premium, digits only, with decimals if printed',
   policyStart: 'Coverage start date, YYYY-MM-DD with the year exactly as printed', policyExpiry: 'Coverage end date, YYYY-MM-DD with the year exactly as printed',
-  contractDate: 'Contract date of the insurance (วันทำสัญญาประกันภัย / วันที่ทำสัญญา), YYYY-MM-DD with the year exactly as printed',
+  contractDate: 'Contract date of the insurance (วันทำสัญญาประกันภัย / วันที่ทำสัญญา, not coverage start), YYYY-MM-DD with the year exactly as printed',
   receiptAmount: 'For a payment receipt or slip: amount paid, digits only', receiptDate: 'For a payment receipt: payment date, YYYY-MM-DD with the year exactly as printed',
   payer: 'For a payment receipt: name of the payer',
-  insuredName: 'Name of the insured person or company (ผู้เอาประกันภัย) or the vehicle owner, exactly as printed',   // v4
-  bodyType: 'Vehicle body type as printed, e.g. รถเก๋ง, รถกระบะ, รถบรรทุก, หัวลาก',                                    // v4
+  insuredName: 'Name of the insured person or company (ผู้เอาประกันภัย / ชื่อ : on พ.ร.บ.) or the vehicle owner, exactly as printed',   // v4
+  bodyType: 'Vehicle body type as printed (แบบตัวถัง, e.g. รถเก๋ง, รถกระบะ, รถบรรทุก, ตู้บรรทุก, หัวลาก)',                                    // v4
+  carValue: 'Vehicle value (ราคารถยนต์ / ทุนประกันภัยรถยนต์), digits only',
+  odCover: 'Own damage coverage (ความเสียหายต่อตัวรถยนต์): the amount, or "ไม่คุ้มครอง" when printed as not covered',
+  tfCover: 'Theft / fire coverage (รถยนต์สูญหาย ไฟไหม้): the amount, or "ไม่คุ้มครอง" when printed as not covered',
+  companyCode: 'For พ.ร.บ.: insurer short code printed with the number, e.g. VIB',
+  prbNo: 'For พ.ร.บ.: the last segment of the policy number to the right of the company code, e.g. 9620656',
+  barcode: 'For พ.ร.บ.: long barcode number at the top right, e.g. 3710496206565',
+  receiptNo: 'For พ.ร.บ.: เลขที่ of the receipt',
+  vehicleCode: 'For พ.ร.บ.: รหัสรถ, e.g. 2.40D',
+  cc: 'For พ.ร.บ.: engine displacement (cc) as printed',
+  seats: 'For พ.ร.บ.: seats as printed',
+  weight: 'For พ.ร.บ.: weight as printed',
+  taxId: 'For พ.ร.บ.: insured tax ID, digits only',
+  periodTime: 'For พ.ร.บ.: start/end time as printed, e.g. 16.30',
+  issueDate: 'For พ.ร.บ.: วันที่ออกกรมธรรม์/วันทำ, YYYY-MM-DD with the year as printed',
+  netPremium: 'For พ.ร.บ.: เบี้ยประกันภัยสุทธิ, digits only with decimals',
+  discount: 'For พ.ร.บ.: ส่วนลด, digits only with decimals',
+  stamps: 'For พ.ร.บ.: อากรแสตมป์, digits only with decimals',
+  vat: 'For พ.ร.บ.: ภาษีมูลค่าเพิ่ม, digits only with decimals',
+  total: 'For พ.ร.บ.: เบี้ยประกันภัยรวม, digits only with decimals',
+  brokerName: 'For พ.ร.บ.: broker or agent name as printed',
+  brokerLicense: 'For พ.ร.บ.: broker or agent licence number as printed',
 };
 
 /** v4: the folder of the vehicle file a document belongs to (see VSLOTS). */
@@ -1943,7 +1964,7 @@ function aiSchema() {
   return {
     type: 'object',
     properties: {
-      docType: { type: 'string', enum: ['policy', 'registration', 'id_card', 'receipt', 'other'], description: 'policy = insurance policy or schedule; registration = vehicle registration book; id_card = ID card, passport or driving licence; receipt = payment receipt, transfer slip or invoice' },
+      docType: { type: 'string', enum: ['policy', 'prb', 'registration', 'id_card', 'receipt', 'other'], description: 'policy = insurance policy or schedule; prb = Thai compulsory motor insurance (พ.ร.บ.), recognised when the title is "ตารางกรมธรรม์ประกันภัยคุ้มครองผู้ประสบภัยจากรถ" (THE SCHEDULE / RECEIPT / TAX INVOICE); registration = vehicle registration book; id_card = ID card, passport or driving licence; receipt = payment receipt, transfer slip or invoice' },
       docName: { type: 'string', description: 'Short Thai name of this document. Use one of: ' + AI_DOC_NAMES.join(', ') + '. If none fits, a short Thai name of the document as it calls itself.' },
       slot: { type: 'string', enum: VFILE_SLOTS.concat(['unknown']), description: AI_SLOT_HELP },
       fields: { type: 'object', properties: props, required: Object.keys(AI_FIELDS) },
@@ -1964,6 +1985,13 @@ const AI_PROMPT = [
   '6. docName: the Thai name of what this document is (for example กรมธรรม์ for any insurance policy or schedule, ภาพถ่ายรถ for a photo of a car, สลิปโอนเงิน for a bank transfer slip).',
   '7. slot: the folder of this document (see its description). A พ.ร.บ. (compulsory insurance) is 3, not 1. Use unknown when you cannot tell.',
   '8. plate and vin: read them from the document itself (a photo may show the plate on the car). Never guess them.',
+  '9. policyType: if a class is printed (ชั้น 1, 2, 2+, 3, 3+) return it exactly; if none is printed return null and fill odCover and tfCover from the coverage table (never guess the class). A พ.ร.บ. has no class: policyType = "พ.ร.บ.".',
+  '10. Always fill bodyType (แบบตัวถัง, e.g. ตู้บรรทุก, รถบรรทุก) and carValue when printed.',
+  '11. The "เลขตัวถัง / Chassis No." cell often has TWO lines: line 1 = chassis/VIN (e.g. FG8JRLA12653), line 2 = ENGINE number (e.g. J08E0EH12419). vin = line 1 only, engineNo = line 2. Never return an engine number as vin.',
+  '12. plate: registration number only, written NN-NNNN for e.g. "71 7895" -> "71-7895"; the province (e.g. อย) goes in province.',
+  '13. On a พ.ร.บ. the insured (insuredName and nameTh) is exactly the text after "ชื่อ :" (e.g. ห้างหุ้นส่วนจำกัด พี พี เอส ทรานสปอร์ต). Never return a name that is not printed on THIS document; never the broker, agent or insurer.',
+  '14. contractDate = วันทำสัญญาประกันภัย (not the coverage start). policyNo = full number as printed (e.g. "00283 69100/กธ/9620656").',
+  '15. For a พ.ร.บ.: docType prb, slot 3, fill the พ.ร.บ. keys (companyCode … brokerLicense) and premium = total.',
 ].join('\n');
 /** Claude has no response schema (see claudeParse), so the JSON shape is in the prompt. Built from AI_FIELDS. */
 const AI_PROMPT_CLAUDE = [
@@ -1971,8 +1999,9 @@ const AI_PROMPT_CLAUDE = [
   '',
   'ANSWER FORMAT: Reply with ONLY one JSON object, no markdown, no code fences, no text before or after it. Shape:',
   '{"docType": "...", "docName": "...", "slot": "...", "fields": {"<key>": {"value": "..." or null, "confidence": 0.0-1.0}, ...}}',
-  '- docType: one of policy, registration, id_card, receipt, other (policy = insurance policy or schedule; registration = vehicle registration book; ' +
-  'id_card = ID card, passport or driving licence; receipt = payment receipt, transfer slip or invoice).',
+  '- docType: one of policy, prb, registration, id_card, receipt, other (policy = insurance policy or schedule; ' +
+  'prb = Thai compulsory motor insurance (พ.ร.บ.), recognised when the title is "ตารางกรมธรรม์ประกันภัยคุ้มครองผู้ประสบภัยจากรถ" (THE SCHEDULE / RECEIPT / TAX INVOICE); ' +
+  'registration = vehicle registration book; id_card = ID card, passport or driving licence; receipt = payment receipt, transfer slip or invoice).',
   '- docName: short Thai name of this document. Use one of: ' + AI_DOC_NAMES.join(', ') + '. If none fits, a short Thai name of the document as it calls itself.',
   '- slot: one of ' + VFILE_SLOTS.concat(['unknown']).join(', ') + '. ' + AI_SLOT_HELP,
   '- fields: include EVERY key below; value null when not clearly printed:',
@@ -2069,7 +2098,7 @@ function aiExtract(req) {
 /** Cache key for a set of files: SHA-256 of their types and contents (the hash is not logged). */
 function aiCacheKey(files) {
   const d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, files.map(f => f.mime + ':' + f.data).join('|'));
-  return 'ai3_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');   // ai3: v4 answers (with slot); never mixed with older cached answers
+  return 'ai4_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');   // ai4: v4.4.1 answers (prb + extra fields); never mixed with older cached answers
 }
 function aiCached(cache, ck) {
   try { const v = cache.get(ck + ':res'); return v ? JSON.parse(v) : null; } catch (e) { return null; }
