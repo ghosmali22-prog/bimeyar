@@ -12,7 +12,7 @@ import { prepare, normalize, diff, fileNote, FIELD_GROUPS, DATE_FIELDS } from '.
 import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './validate.js';
 import { buildName, docNameFromOld, plateOnly, plateFromName, followsPattern, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
 import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey, needsAiRead, detectVehicles, aiEditSuggest } from './vehicles.js';
-import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup } from './prb.js';
+import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup, prbSanity, suggestInsured, groupInsured } from './prb.js';
 import { parseDate } from './dates.js';
 
 /*
@@ -1323,7 +1323,9 @@ async function openFile(id) {
   if (cur?.f.id !== id) return;
   const pv = $('#preview'); if (!pv) return;
   if (!blob) { pv.innerHTML = `<p class="sh-text">${t('fl.noContent')}</p>`; return; }
-  cur.blob = blob; cur.url = objUrl(blob);
+  // v4.5.1 security: a "PDF" is always shown from a blob typed as PDF, so a file of another type renamed to .pdf
+  // (e.g. HTML) can never run inside the app; download / share still use the original blob
+  cur.blob = blob; cur.url = objUrl(isPdf(f) && !isImage(f) ? new Blob([blob], { type: 'application/pdf' }) : blob);
   pv.innerHTML = isImage(f) ? `<img src="${cur.url}" alt="${esc(f.name)}">`
     : isPdf(f) ? `<iframe src="${cur.url}#toolbar=0" title="${esc(f.name)}"></iframe><button class="btn dark open-full" data-act="open-link" data-url="${cur.url}">${icon('external', 16)}<span>${t('fl.full')}</span></button>`
       : `<div class="nopv">${ftBadge(f, 30)}<p>${t('fl.noPreview')}</p></div>`;
@@ -2335,8 +2337,16 @@ async function prbStart(items) {
   if (!canEdit() || !S.store || !items.length) return;
   if (!P.data) await loadPrb();
   if (!P.data) return;
-  PR = { items, index: 0, store: S.store, busy: false };
-  prbReview();
+  PR = { items, index: 0, store: S.store, busy: false, batch: items.length > 1 && !items.some(x => x.existing) };
+  if (!PR.batch) return prbReview();
+  // v4.5.1: one table for many files. Every file is read by the AI on its own (prepare([file]) per file).
+  for (const it of items) {
+    it.insured ||= { name: '', taxId: '', address: '' }; it.row ||= {};
+    it.ai = it.n || Object.values(it.row).some(Boolean) ? 'done' : aiOn() ? 'wait' : 'skip';
+    it.state = ''; it.err = ''; it.skip = false;
+  }
+  prbBatch();
+  prbAiQueue(PR);
 }
 function prbCurrent() { return PR?.items[PR.index]; }
 const PRB_DATES = new Set(['contractDate', 'issueDate', 'start', 'end']);
@@ -2347,10 +2357,22 @@ function prbReview() {
   it.row ||= {};
   const source = it.file || it.source;
   sheet({ title: t('prb.review'), sub: `${PR.index + 1} / ${PR.items.length} · ${esc(source?.name || it.existing?.name || '')}`, cls: 'xwide',
-    body: `<form id="prbForm" class="form" data-form="prb"><div class="prb-toolbar">${!it.existing && aiOn() ? prbButton('prb-ai', 'prb.readAi') : ''}${!it.existing ? `<p>${t('prb.reviewHint')}</p>` : ''}${source || it.existing ? prbButton('prb-source', 'prb.preview') : ''}</div><p id="prbMessage" role="status">${esc(it.message || '')}</p><div class="prb-form">${['name', 'taxId', 'address'].map(k => `<label class="field"><span>${t('prb.ins.' + k)}</span><input name="ins_${k}" value="${esc(it.insured[k] || '')}" ${k === 'name' ? 'required' : ''} ${it.existing ? 'readonly' : ''}></label>`).join('')}${PRB_FIELDS.map(k => `<label class="field"><span>${t('prb.' + k)}</span><input name="${k}" value="${esc(it.row[k] ?? '')}" ${PRB_DATES.has(k) ? `placeholder="${esc(t('prb.dateHint'))}"` : ''} ${PRB_MONEY.has(k) ? 'inputmode="decimal"' : ['prbNo', 'barcode'].includes(k) ? 'inputmode="numeric"' : ''}></label>`).join('')}</div><p id="prbWarning" class="prb-warn" hidden></p><p id="prbFilename" class="prb-filename"></p><div id="prbPreview"></div></form>`,
-    foot: `${prbButton('prb-skip', PR.items.length > 1 ? 'prb.skip' : 'btn.cancel')}<span class="sp"></span><button class="btn primary" type="submit" form="prbForm">${t('btn.save')}</button>` });
+    body: `<form id="prbForm" class="form" data-form="prb"><div class="prb-toolbar">${!it.existing && aiOn() ? prbButton('prb-ai', 'prb.readAi') : ''}${!it.existing ? `<p>${t('prb.reviewHint')}</p>` : ''}${source || it.existing ? prbButton('prb-source', 'prb.preview') : ''}</div><p id="prbMessage" role="status">${esc(it.message || '')}</p><div class="prb-form">${['name', 'taxId', 'address'].map(k => `<label class="field"><span>${t('prb.ins.' + k)}</span><input name="ins_${k}" value="${esc(it.insured[k] || '')}" ${k === 'name' ? 'required' : ''} ${it.existing ? 'readonly' : ''}></label>`).join('')}${PRB_FIELDS.map(k => `<label class="field"><span>${t('prb.' + k)}</span><input name="${k}" value="${esc(it.row[k] ?? '')}" ${PRB_DATES.has(k) ? `placeholder="${esc(t('prb.dateHint'))}"` : ''} ${PRB_MONEY.has(k) ? 'inputmode="decimal"' : ['prbNo', 'barcode'].includes(k) ? 'inputmode="numeric"' : ''}></label>`).join('')}</div><div id="prbSuggest"></div><p id="prbWarning" class="prb-warn" hidden></p><p id="prbFilename" class="prb-filename"></p><div id="prbPreview"></div></form>`,
+    foot: PR.batch ? `${prbButton('prb-prev', 'prb.prev')}${prbButton('prb-next', 'prb.next')}<span class="sp"></span>${prbButton('prb-table', 'prb.backTable', '', 'primary')}`
+      : `${prbButton('prb-skip', PR.items.length > 1 ? 'prb.skip' : 'btn.cancel')}<span class="sp"></span><button class="btn primary" type="submit" form="prbForm">${t('btn.save')}</button>` });
   sheetClose = () => { PR = null; };
   prbReviewHint();
+}
+/** Errors (block saving) and warnings (red, do not block) of one review item; the other items of the batch count for duplicates */
+function prbChecks(it, i = PR?.items.indexOf(it)) {
+  const batch = PR?.batch ? PR.items.map(x => x.skip || x.state === 'saved' ? {} : x) : [];
+  return prbSanity(it.row, { insuredName: it.insured.name, rows: P.data?.rows || [], batch, selfIndex: i, exceptId: it.existing?.id });
+}
+const prbChkText = c => t(c.key, c.key === 'prb.chk.vat' ? { v: baht(c.x?.v || 0), t: baht(c.x?.t || 0) } : { x: c.x && typeof c.x === 'object' ? '' : String(c.x ?? '') });
+/** "use existing: ..." buttons for an insured name (fuzzy: spaces, company words, brackets and "/" ignored) */
+function prbSuggestHtml(it, i) {
+  const s = suggestInsured(it.insured.name, P.data?.insured || []).filter(x => x.name !== it.insured.name).slice(0, 3);
+  return s.map(x => `<button type="button" class="link prb-sug" data-act="prb-use-name" data-i="${i}" data-name="${esc(x.name)}">${esc(t('prb.useExisting', { x: x.name }))}</button>`).join('');
 }
 function prbReadForm() {
   const it = prbCurrent(), form = $('#prbForm'); if (!it || !form) return;
@@ -2361,10 +2383,10 @@ function prbReadForm() {
 }
 function prbReviewHint() {
   const it = prbReadForm(); if (!it) return;
-  const check = vatCheck(it.row), warning = $('#prbWarning');
-  const duplicate = findDup(it.row, P.data.rows, it.existing?.id);
-  warning.hidden = check.ok !== false && !duplicate;
-  warning.textContent = [check.ok === false ? t('su.prbBad', { v: baht(check.vatExpected), t: baht(check.totalExpected) }) : '', duplicate ? t('prb.duplicate', { x: duplicate.name }) : ''].filter(Boolean).join(' ');
+  const warning = $('#prbWarning'), chk = prbChecks(it), all = [...chk.errors, ...chk.warns];
+  warning.hidden = !all.length;
+  warning.textContent = all.map(prbChkText).join(' · ');
+  const sug = $('#prbSuggest'); if (sug && !it.existing) sug.innerHTML = prbSuggestHtml(it, PR.items.indexOf(it));
   $('#prbFilename').textContent = it.existing?.name || prbFileName(it.row, it.insured.name, extOf((it.file || it.source)?.name || 'document.pdf'));
 }
 function prbBusy(on) {
@@ -2409,34 +2431,141 @@ function prbValidate(it) {
 async function prbSave() {
   const session = PR, it = prbReadForm();
   if (!it || session.busy || !canEdit() || session.store !== S.store) return;
+  if (session.batch) return;   // in a batch the table's "Save all" saves
+  const c = prbChecks(it); if (c.errors.length) throw new Error(prbChkText(c.errors[0]));
+  prbBusy(true);
+  try {
+    const result = await prbSaveOne(it, session);
+    if (session.store !== S.store) return;
+    // Advance before refreshing: a failed refresh must never upload the same file twice.
+    session.index++; P.insured = result.row.insuredId; P.selected.clear();
+    await loadPrb();
+    toast(t('t.saved')); if (PR === session) prbReview();
+  } finally { if (PR === session) prbBusy(false); }
+}
+/* ---------- v4.5.1: many files in one review table ---------- */
+const PRB_COLS = ['prbNo', 'policyNo', 'receiptNo', 'barcode', 'plate', 'province', 'model', 'body', 'vin', 'engineNo', 'cc', 'seats', 'weight', 'start', 'end', 'netPremium', 'stamps', 'vat', 'total'];
+function prbBatch() {
+  const ok = PR.items.filter(x => x.state === 'saved').length, bad = PR.items.filter(x => x.state === 'failed').length;
+  sheet({ title: t('prb.review'), sub: `${num(PR.items.length)} · ${esc(t('prb.batchHint'))}`, cls: 'xwide',
+    body: `<datalist id="prbInsList">${(P.data?.insured || []).map(x => `<option value="${esc(x.name)}">`).join('')}</datalist>
+      <div id="prbGroups"></div>
+      <div class="prb-wrap prb-batch"><table class="prb-table"><thead><tr><th>#</th><th>${t('prb.skipRow')}</th><th>${t('prb.file')}</th><th>${t('prb.ins.name')}</th>${PRB_COLS.map(k => `<th>${esc(t('prb.' + k))}</th>`).join('')}<th>${t('prb.status')}</th><th></th></tr></thead>
+      <tbody>${PR.items.map((it, i) => prbBatchRow(it, i)).join('')}</tbody></table></div>
+      <p id="prbBatchSum" class="sh-text">${ok || bad ? esc(t('prb.saveSummary', { ok, bad })) : ''}</p>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">${t('btn.close')}</button><span class="sp"></span><button class="btn primary" data-act="prb-save-all" ${PR.busy ? 'disabled' : ''}>${t('prb.saveAll')}</button>` });
+  sheetClose = () => { PR = null; };
+  prbBatchChecks();
+}
+function prbBatchRow(it, i) {
+  const ro = it.state === 'saved' || it.ai === 'busy' || it.ai === 'wait' ? 'readonly' : '';
+  const cell = k => `<td><input class="prb-cell" data-pi="${i}" data-pk="${k}" value="${esc(it.row[k] ?? '')}" ${PRB_DATES.has(k) ? 'type="date"' : PRB_MONEY.has(k) ? 'inputmode="decimal"' : ['prbNo', 'barcode', 'receiptNo'].includes(k) ? 'inputmode="numeric"' : ''} ${['plate', 'vin', 'engineNo', 'prbNo', 'barcode', 'policyNo', 'receiptNo'].includes(k) ? 'dir="ltr"' : ''} ${ro} aria-label="${esc(t('prb.' + k))}"></td>`;
+  const aiTxt = it.ai === 'busy' || it.ai === 'wait' ? `<span class="spin sm"></span> ${t('prb.reading')}` : it.ai === 'err' ? esc(t('prb.aiFailed')) : '';
+  return `<tr data-row="${i}" class="${it.state ? 'st-' + it.state : ''} ${it.skip ? 'skip' : ''}">
+    <td>${i + 1}</td><td><input type="checkbox" data-pskip="${i}" ${it.skip ? 'checked' : ''} ${it.state === 'saved' ? 'disabled' : ''} aria-label="${esc(t('prb.skipRow'))}"></td>
+    <td class="prb-fname"><small>${esc((it.file || it.source)?.name || '')}</small><small class="prb-ai">${aiTxt}</small></td>
+    <td><input class="prb-cell wide" list="prbInsList" data-pi="${i}" data-pk="ins_name" value="${esc(it.insured.name || '')}" ${ro} aria-label="${esc(t('prb.ins.name'))}"><span class="prb-sugs" data-sug="${i}"></span></td>
+    ${PRB_COLS.map(cell).join('')}
+    <td class="prb-chk" data-chk="${i}"></td>
+    <td><button type="button" class="btn ghost sm" data-act="prb-more" data-i="${i}">${t('prb.more')}</button></td></tr>`;
+}
+/** Re-checks every row (duplicates and plate/chassis depend on the other rows) without redrawing the inputs, so focus stays */
+function prbBatchChecks() {
+  if (!PR?.batch) return;
+  PR.items.forEach((it, i) => {
+    const el = $(`[data-chk="${i}"]`), sg = $(`[data-sug="${i}"]`); if (!el) return;
+    if (it.state === 'saved') { el.innerHTML = `<span class="prb-st ok">✓ ${esc(t('prb.savedRow'))}</span>`; if (sg) sg.innerHTML = ''; return; }
+    const c = it.skip ? { errors: [], warns: [] } : prbChecks(it, i);
+    el.innerHTML = (it.state === 'failed' ? `<div class="prb-bad">${esc(t('prb.failedRow', { x: it.err }))}</div>` : '')
+      + c.errors.map(x => `<div class="prb-bad">✕ ${esc(prbChkText(x))}</div>`).join('')
+      + c.warns.map(x => `<div class="prb-bad warn">! ${esc(prbChkText(x))}</div>`).join('')
+      + (!c.errors.length && !c.warns.length && it.state !== 'failed' && it.ai !== 'busy' && it.ai !== 'wait' ? '<span class="prb-st ok">OK</span>' : '');
+    if (sg) sg.innerHTML = prbSuggestHtml(it, i);
+  });
+  // rows of this batch that look like the same insured but are spelled differently: pick one spelling for all of them
+  const live = PR.items.map((x, i) => ({ x, i })).filter(o => !o.x.skip && o.x.state !== 'saved' && o.x.insured.name);
+  const groups = groupInsured(live.map(o => o.x.insured.name)).map(g => g.map(j => live[j].i));
+  const gEl = $('#prbGroups');
+  if (gEl) gEl.innerHTML = groups.map(g => {
+    const names = [...new Set([...g.map(i => PR.items[i].insured.name), ...suggestInsured(PR.items[g[0]].insured.name, P.data?.insured || []).map(x => x.name)])];
+    return `<div class="prb-warn prb-group"><b>${esc(t('prb.sameInsured', { x: g.map(i => '#' + (i + 1)).join(', ') }))}</b> ${esc(t('prb.pickSpelling'))}
+      ${names.map(n => `<button type="button" class="btn ghost sm" data-act="prb-spell" data-g="${g.join(',')}" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>`;
+  }).join('');
+}
+function prbBatchRedrawRow(i) {
+  const tr = $(`tr[data-row="${i}"]`); if (!tr || !PR) return;
+  tr.outerHTML = prbBatchRow(PR.items[i], i);
+  prbBatchChecks();
+}
+/** The AI reads the files two at a time, each file on its own; a failed read leaves the row editable */
+async function prbAiQueue(session) {
+  const worker = async () => {
+    for (;;) {
+      if (PR !== session) return;
+      const it = session.items.find(x => x.ai === 'wait'); if (!it) return;
+      it.ai = 'busy'; const i = session.items.indexOf(it);
+      if (!session.cardOpen) prbBatchRedrawRow(i);
+      try {
+        const blob = it.file || await session.store.getBlob(it.source.id);
+        const file = it.file || new File([blob], it.source.name, { type: it.source.mime || blob.type });
+        const n = normalize(await session.store.aiExtract(await prepare([file])));
+        if (PR !== session) return;
+        const m = rowFromAi(n);   // a new object for this file only; values typed meanwhile are kept
+        for (const [k, v] of Object.entries(m.insured)) if (v && !it.insured[k]) it.insured[k] = v;
+        for (const [k, v] of Object.entries(m.row)) if (v && !it.row[k]) it.row[k] = v;
+        it.n = n; it.ai = 'done';
+      } catch (e) { it.ai = 'err'; }
+      if (PR === session && !session.cardOpen) prbBatchRedrawRow(i);
+    }
+  };
+  await Promise.all([worker(), worker()]);
+}
+/** Saves one item (upload, import copy or update of an existing row). Throws with the reason. */
+async function prbSaveOne(it, session) {
   prbValidate(it);
   const source = it.file || it.source;
   if (it.file && it.file.size > MAX_UPLOAD_MB * 1048576) throw new Error(t('err.tooBig'));
   const name = source && prbFileName(it.row, it.insured.name, extOf(source.name));
-  prbBusy(true);
-  try {
-    let result;
-    if (it.existing) result = { row: await session.store.prbUpdate(it.existing.id, it.row) };
-    else if (it.source) {
-      if (!isAdmin()) throw new Error(t('err.role'));
-      const imported = await session.store.prbImport([{ id: it.source.id, insured: it.insured, row: it.row, name }]);
-      if (!imported.done.length) throw new Error(t('prb.importSkipped', { x: imported.skipped[0]?.why || '' }));
-      result = imported.done[0];
-    } else {
-      // photos compressed like normal uploads; a PDF without a browser type is still sent as a PDF
-      const blob = compressible(it.file) ? await compressImage(it.file) : it.file;
-      const mime = blob.type || (/\.pdf$/i.test(it.file.name) ? 'application/pdf' : '');
-      result = await session.store.prbUpload(blob, it.insured, it.row, { name: saveName(name, it.file, blob), orig: it.file.name, mime });
-    }
-    if (session.store !== S.store) return;
-    // Advance before refreshing: a failed refresh must never upload the same file twice.
-    session.index++; P.insured = result.row.insuredId; P.selected.clear();
-    const previous = P.data.rows.findIndex(r => r.id === result.row.id);
-    if (previous >= 0) P.data.rows[previous] = result.row; else P.data.rows.push(result.row);
-    if (!P.data.insured.some(i => i.id === result.row.insuredId)) P.data.insured.push(result.insured || { ...it.insured, id: result.row.insuredId });
-    await loadPrb();
-    toast(t('t.saved')); if (PR === session) prbReview();
-  } finally { if (PR === session) prbBusy(false); }
+  let result;
+  if (it.existing) result = { row: await session.store.prbUpdate(it.existing.id, it.row) };
+  else if (it.source) {
+    if (!isAdmin()) throw new Error(t('err.role'));
+    const imported = await session.store.prbImport([{ id: it.source.id, insured: it.insured, row: it.row, name }]);
+    if (!imported.done.length) throw new Error(t('prb.importSkipped', { x: imported.skipped[0]?.why || '' }));
+    result = imported.done[0];
+  } else {
+    // photos compressed like normal uploads; a PDF without a browser type is still sent as a PDF
+    const blob = compressible(it.file) ? await compressImage(it.file) : it.file;
+    const mime = blob.type || (/\.pdf$/i.test(it.file.name) ? 'application/pdf' : '');
+    result = await session.store.prbUpload(blob, it.insured, it.row, { name: saveName(name, it.file, blob), orig: it.file.name, mime });
+  }
+  const previous = P.data.rows.findIndex(r => r.id === result.row.id);
+  if (previous >= 0) P.data.rows[previous] = result.row; else P.data.rows.push(result.row);
+  if (!P.data.insured.some(i => i.id === result.row.insuredId)) P.data.insured.push(result.insured || { ...it.insured, id: result.row.insuredId });
+  return result;
+}
+/** "Save all": only rows without errors, one by one; one failure never stops the others; saved rows are never sent again */
+async function prbSaveAll() {
+  const session = PR; if (!session?.batch || session.busy || !canEdit()) return;
+  if (session.items.some(x => x.ai === 'busy' || x.ai === 'wait')) return toast(t('ai.reading'));
+  session.busy = true; $('[data-act="prb-save-all"]')?.setAttribute('disabled', '');
+  let ok = 0, bad = 0, last = '';
+  for (const [i, it] of session.items.entries()) {
+    if (PR !== session) return;
+    if (it.skip || it.state === 'saved') continue;
+    const c = prbChecks(it, i);
+    if (c.errors.length) { it.state = 'failed'; it.err = prbChkText(c.errors[0]); bad++; prbBatchRedrawRow(i); continue; }
+    try { const r = await prbSaveOne(it, session); it.state = 'saved'; it.err = ''; ok++; last = r.row.insuredId; }
+    catch (e) { it.state = 'failed'; it.err = e?.message || String(e); bad++; }
+    if (PR === session) prbBatchRedrawRow(i);
+  }
+  session.busy = false;
+  if (last) { P.insured = last; P.selected.clear(); }
+  await loadPrb();
+  if (PR !== session) return;
+  toast(t('prb.saveSummary', { ok, bad }), bad ? 'err' : '');
+  if (!bad && session.items.every(x => x.skip || x.state === 'saved')) { PR = null; closeSheet(); drawPrb(); return; }
+  prbBatch();
 }
 async function prbPreviewSource() {
   const session = PR, it = prbReadForm(); if (!it) return;
@@ -2507,6 +2636,27 @@ async function prbDownload(id, share = false) {
 /* ================= actions ================= */
 const EDIT_ACTS = new Set(['ae-file', 'ae-cust', 'ae-save', 'ae-undo', 'smart', 'veh-add', 'veh-edit', 'del-vehicle', 'mv-slot', 'share-link', 'share-stop', 'upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
 const ACT = {
+  'prb-save-all': () => prbSaveAll(),
+  'prb-more'(el) { if (!PR) return; PR.index = +el.dataset.i; PR.cardOpen = true; prbReview(); },
+  'prb-prev'() { if (!PR) return; prbReadForm(); PR.index = (PR.index - 1 + PR.items.length) % PR.items.length; prbReview(); },
+  'prb-next'() { if (!PR) return; prbReadForm(); PR.index = (PR.index + 1) % PR.items.length; prbReview(); },
+  'prb-table'() { if (!PR) return; prbReadForm(); PR.cardOpen = false; prbBatch(); },
+  'prb-use-name'(el) {
+    if (!PR) return;
+    const it = PR.items[+el.dataset.i]; if (!it) return;
+    it.insured.name = el.dataset.name;
+    if (PR.batch && !PR.cardOpen) { const inp = $(`[data-pi="${el.dataset.i}"][data-pk="ins_name"]`); if (inp) inp.value = it.insured.name; prbBatchChecks(); }
+    else { const inp = $('#prbForm [name="ins_name"]'); if (inp) inp.value = it.insured.name; prbReviewHint(); }
+  },
+  'prb-spell'(el) {
+    if (!PR) return;
+    for (const i of el.dataset.g.split(',').map(Number)) {
+      const it = PR.items[i]; if (!it || it.state === 'saved') continue;
+      it.insured.name = el.dataset.name;
+      const inp = $(`[data-pi="${i}"][data-pk="ins_name"]`); if (inp) inp.value = el.dataset.name;
+    }
+    prbBatchChecks();
+  },
   'prb-refresh': async () => { await loadPrb(); },
   'prb-insured'(el) { P.insured = el.dataset.id; P.selected.clear(); drawPrb(); },
   'prb-clear'() { P.selected.clear(); drawPrb(); },
@@ -2843,6 +2993,12 @@ let qT;
 document.addEventListener('input', e => {
   const el = e.target;
   if (el.closest('#prbForm')) { prbReviewHint(); return; }
+  if (el.dataset.pi !== undefined && PR?.batch) {
+    const it = PR.items[+el.dataset.pi]; if (!it || it.state === 'saved') return;
+    if (el.dataset.pk === 'ins_name') it.insured.name = el.value.trim(); else it.row[el.dataset.pk] = el.value.trim();
+    if (it.state === 'failed') it.state = '';
+    prbBatchChecks(); return;
+  }
   if (el.id === 'prbSearch') {
     P.q = el.value; $('#prbRows').innerHTML = prbTable(prbRows(), canEdit()); return;
   }
@@ -2898,6 +3054,11 @@ document.addEventListener('input', e => {
 });
 // checkboxes fire "change" (not always "input") in older Safari
 document.addEventListener('change', e => {
+  if (e.target.hasAttribute('data-pskip') && PR?.batch) {
+    const it = PR.items[+e.target.dataset.pskip];
+    if (it && it.state !== 'saved') { it.skip = e.target.checked; e.target.closest('tr')?.classList.toggle('skip', it.skip); prbBatchChecks(); }
+    return;
+  }
   if (e.target.hasAttribute('data-prb-route') && U && !U.busy) {
     const it = U.items[+e.target.dataset.prbRoute];
     it.prbRoute = e.target.checked; if (!it.prbRoute) placeRow(it);

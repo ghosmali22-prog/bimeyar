@@ -1,5 +1,25 @@
 # Changelog
 
+## v4.5.1 (2026-11-23)
+
+- **Fix: data of one พ.ร.บ. appearing on another** (e.g. a policy number of the previous truck). Root cause: the AI prompt
+  contained real example numbers (policy no., PRB no., barcode, chassis, company name); documents of one customer look
+  alike and differ in single digits, so the model copied the example. The prompt now has patterns only and says to read
+  every number from THIS document. Each file was already read on its own (cache key = SHA-256 of that file's bytes);
+  cache prefix `ai5_`. Test `tests/prb-batch.test.mjs`: 8 files in one batch, no field leaks, 8 distinct cache keys.
+- **Checks per พ.ร.บ.** (`prbSanity`): errors block saving (no insured name, duplicate PRB no./barcode also within the
+  batch, invalid date); red warnings: PRB no. ≠ last part of the policy no., ≠ receipt no. (Viriyah), barcode without the
+  PRB no., VAT/total, plate/chassis that do not match another row, end not after start.
+- **Many files: one review table** (one editable row per file, warnings per row, "All fields" with Previous/Next).
+  "Save all" saves only rows without errors, one by one; a failing row never stops the others; the reasons are shown.
+- **Field mapping**: "C.C./No. of Seats/Weight" `0/3/15` → cc 0, seats 3, weight 15; body type exactly as printed;
+  insurer name in Thai as printed.
+- **Insured name**: suggestions of existing names (spaces, company words, brackets and "/" ignored), and rows of one batch
+  that look like the same insured get a "pick one spelling" choice, so one company never gets two folders.
+- **Security (old code)**: file preview shows a "PDF" only as a PDF-typed blob (an HTML file renamed .pdf cannot run);
+  `thumbs` checks the file before a cached thumbnail is returned; `unshareFile` reads all permission pages.
+- Repo is public: test data is synthetic only (real numbers/names removed from prompt, tests and docs).
+
 ## v4.5.0 (2026-11-23)
 
 - **New "พ.ร.บ." section** (compulsory motor insurance), separate from Customers (see `backend/PRB.md`).
