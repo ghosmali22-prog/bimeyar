@@ -990,3 +990,10 @@ img.fadein { animation: fade .5s ease both; }
 .prb-batch tr.st-failed { background: #fff3f5; }
 .prb-sug { display: block; font-size: 12px; margin-top: 4px; text-align: start; }
 .prb-group { flex-wrap: wrap; margin-bottom: 10px; }
+
+/* v4.5.2 auto-corrected cells and suggestions */
+.prb-cell.prb-auto { border-color: #8b6cf6; background: #f3efff; }
+.prb-cell.prb-diff { border-color: var(--warn); background: #fff6e8; }
+.prb-autonote { color: #6a4df5; font-weight: 600; margin-block: 2px; }
+.prb-cell[data-pk="policyNo"] { min-width: 200px; }
+.prb-cell[data-pk="barcode"], .prb-cell[data-pk="vin"], .prb-cell[data-pk="engineNo"] { min-width: 140px; }

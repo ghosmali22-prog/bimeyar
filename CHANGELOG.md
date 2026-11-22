@@ -1,5 +1,19 @@
 # Changelog
 
+## v4.5.2 (2026-11-23)
+
+พ.ร.บ. reading accuracy: code post-processing after the AI (`prbPost` in `js/prb.js`), not only prompt wording.
+- **Policy number** (Viriyah, companyCode VIB or insurer วิริยะ): a near-miss of `กธ` (กซ, กษ, กช, กฐ, …) is corrected
+  automatically and the cell is marked "auto-corrected (was: …)". A number without its first group, a 13-digit barcode
+  in the policy field, or a number that does not end with the PRB number gets a one-click suggestion built from the batch
+  consensus prefix (`AAAAA BBBBB/กธ/`) + this row's PRB number. Prompt: keep all groups.
+- **Names in one batch**: a name that differs from the majority by 1–4 characters (or only in spacing, e.g. a space after
+  บริษัท) is highlighted with a one-click "use the spelling of the other rows". Prompt: same spacing as printed.
+- **cc**: integer only, from the "C.C./No. of Seats/Weight" triple; the vehicle code (e.g. 2.40D) is never kept as cc.
+- **Province**: only from the plate cell (new AI field `plateText`, text after the number); never from the address.
+  Cache prefix `ai6_`.
+- Test `tests/prb-accuracy.test.mjs`: 8 synthetic cases with the real error patterns and the expected output.
+
 ## v4.5.1 (2026-11-23)
 
 - **Fix: data of one พ.ร.บ. appearing on another** (e.g. a policy number of the previous truck). Root cause: the AI prompt

@@ -320,3 +320,74 @@ export function prbSanity(row, ctx = {}) {
 
   return { errors, warns };
 }
+
+/* ---------- v4.5.2: reading accuracy (code post-processing of the AI answer) ---------- */
+/** Two-letter codes that are misreads of "กธ" on Viriyah policy numbers */
+export const THAI_NEAR = new Set(['ซ', 'ษ', 'ช', 'ฐ', 'ร', 'ฮ', 'ท', 'ถ', 'ฒ'].map(x => 'ก' + x));
+export const isViriyah = row => String(row?.companyCode || '').trim().toUpperCase() === 'VIB' || /วิริยะ|viriyah/i.test(String(row?.insurer || ''));
+const digitsOf = s => latinDigits(String(s ?? '')).replace(/\D/g, '');
+/** "AAAAA BBBBB/XX/NNNN" or "BBBBB/XX/NNNN" -> parts; null for any other shape */
+export function parsePolicyNo(s) {
+  const m = latinDigits(String(s ?? '')).trim().match(/^(?:(\d{5})\s*)?(\d{5})\s*\/\s*([ก-ฮ]{2})\s*\/\s*(\d+)$/);
+  return m ? { a: m[1] || '', b: m[2], code: m[3], no: m[4] } : null;
+}
+const fmtPolicy = p => `${p.a ? p.a + ' ' : ''}${p.b}/${p.code}/${p.no}`;
+/** Viriyah: a near-miss of กธ (กซ, กษ, กช, กฐ…) is corrected; { value, fixed, was } */
+export function fixPolicyNo(row) {
+  const was = String(row?.policyNo ?? ''), p = isViriyah(row) ? parsePolicyNo(was) : null;
+  if (!p || !THAI_NEAR.has(p.code)) return { value: was, fixed: false, was };
+  return { value: fmtPolicy({ ...p, code: 'กธ' }), fixed: true, was };
+}
+/** The most common full prefix "AAAAA BBBBB/กธ/" (both groups) among Viriyah rows; '' when none */
+export function policyConsensus(rows) {
+  const count = {};
+  for (const r of rows || []) {
+    if (!isViriyah(r)) continue;
+    const p = parsePolicyNo(fixPolicyNo(r).value);
+    if (p && p.a && p.code === 'กธ') { const k = `${p.a} ${p.b}/กธ/`; count[k] = (count[k] || 0) + 1; }
+  }
+  return Object.entries(count).sort((x, y) => y[1] - x[1])[0]?.[0] || '';
+}
+/** A full policy number to OFFER (never applied by itself): missing first group, a barcode, or not ending with the PRB number */
+export function suggestPolicyNo(row, peers) {
+  const no = digitsOf(row?.prbNo), cur = String(row?.policyNo ?? '').trim(), pre = policyConsensus(peers);
+  if (!no || !pre || !isViriyah(row)) return null;
+  const value = pre + no, p = parsePolicyNo(cur);
+  let why = '';
+  if (/^\d{13}$/.test(digitsOf(cur)) && !/\//.test(cur)) why = 'barcode';
+  else if (p && !p.a && pre.includes(' ' + p.b + '/')) why = 'prefix';
+  else if (!digitsOf(cur).endsWith(no)) why = 'noPrb';
+  return why && value !== cur ? { value, why } : null;
+}
+/** The majority spelling of a name in one batch when this one differs by 1-4 characters (or only in spacing) */
+export function majorityName(names, i) {
+  const me = String(names?.[i] ?? '').trim(); if (!me) return '';
+  const count = {};
+  for (const n of names) { const k = String(n ?? '').trim(); if (k) count[k] = (count[k] || 0) + 1; }
+  const best = Object.entries(count).filter(([k, c]) => k !== me && c >= 2 && c > (count[me] || 0)).sort((a, b) => b[1] - a[1]);
+  for (const [k] of best) {
+    const d = lev(me, k);
+    if ((d >= 1 && d <= 4) || me.replace(/\s+/g, '') === k.replace(/\s+/g, '')) return k;
+  }
+  return '';
+}
+/**
+ * One batch after the AI: fixes กธ IN PLACE (recorded in auto) and returns suggestions to accept with one click
+ * (full policy number from the batch consensus, majority insured spelling). Nothing else is changed.
+ * items = [{ row, insured }] -> [{ auto: { policyNo?: was }, suggest: { policyNo?: { value, why }, insuredName?: value } }]
+ */
+export function prbPost(items) {
+  const out = (items || []).map(() => ({ auto: {}, suggest: {} }));
+  (items || []).forEach((it, i) => {
+    const f = fixPolicyNo(it.row || {});
+    if (f.fixed) { it.row.policyNo = f.value; out[i].auto.policyNo = f.was; }
+  });
+  const rows = (items || []).map(it => it.row || {}), names = (items || []).map(it => it.insured?.name || '');
+  (items || []).forEach((it, i) => {
+    const s = suggestPolicyNo(it.row || {}, rows.filter((_, j) => j !== i));
+    if (s) out[i].suggest.policyNo = s;
+    const m = majorityName(names, i);
+    if (m) out[i].suggest.insuredName = m;
+  });
+  return out;
+}

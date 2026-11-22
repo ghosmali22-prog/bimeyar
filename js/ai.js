@@ -122,6 +122,15 @@ export function normalize(r) {
   [v, c] = get('insuredName'); put('insuredName', v, c);
   [v, c] = get('bodyType'); put('body', v, c);
 
+  // v4.5.2: the province comes ONLY from the plate cell (text after the number), never from the address
+  [v, c] = get('plateText');
+  if (v) {
+    values.plateText = latinDigits(v);
+    const m = values.plateText.match(/[0-9][\s.,]*([฀-๿][฀-๿.\s]*)$/);
+    if (m) { values.province = m[1].replace(/\s+/g, ' ').trim(); conf.province = c; delete notes.province; }
+    else { delete values.province; delete conf.province; notes.province = 'v.provNoPlate'; }
+  }
+
   // v4.4.1: vehicle value, policy class rule, พ.ร.บ. details
   [v, c] = get('carValue'); if (v) { const m = money(v); put('carValue', m != null ? String(m) : v, c, m != null ? '' : 'v.money'); }
   const docType = r?.docType || 'other';
@@ -132,7 +141,9 @@ export function normalize(r) {
   }
   const prb = {};
   for (const k of PRB_TEXT) { [v] = get(k); if (v) prb[k] = latinDigits(v); }
-  if (prb.cc) { const csw = splitCSW(prb.cc); if (csw) Object.assign(prb, csw); }
+  for (const k of ['cc', 'seats', 'weight']) { if (prb[k]) { const csw = splitCSW(prb[k]); if (csw) { Object.assign(prb, csw); break; } } }
+  // v4.5.2: cc is an integer from the C.C./Seats/Weight triple only; never the vehicle code (e.g. 2.40D)
+  if (prb.cc && (!/^\d+$/.test(prb.cc.trim()) || prb.cc === prb.vehicleCode)) { delete prb.cc; prb.notes = { ...(prb.notes || {}), cc: 'v.ccBad' }; }
   for (const k of PRB_DIGITS) { [v] = get(k); const d = latinDigits(v).replace(/\D/g, ''); if (d) prb[k] = d; }
   for (const k of PRB_MONEY) { [v] = get(k); const m = v ? money(v) : null; if (m != null) prb[k] = m; }
   [v] = get('issueDate'); if (v) { const d = toIsoDate(v); if (d) prb.issueDate = d; }
