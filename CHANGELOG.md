@@ -1,5 +1,17 @@
 # Changelog
 
+## v4.5.3 (2026-11-23)
+
+- **Branch prefix of Viriyah policy numbers** (the 5-digit number under "VIB"): new AI field `branchCode`, and the prompt says
+  the first group is that number. When it is still missing, the suggestion uses the batch consensus, else the branch number
+  the AI read, else the known branch of the code part (`VIB_BRANCH`: 69100 -> 00283). Always a suggestion (one click).
+- **cc / seats / weight** are split in code from the raw "C.C./No. of Seats/Weight" text (new AI field `cswText`);
+  separately read values are not trusted ("0/0/21" -> 0 / 0 / 21). Raw text that is not a triple: no cc at all.
+- **Name consensus by sub-part** (`consensusName`): names are also compared by their parts after "/", "(" and "โดย",
+  across all rows of the batch and the insured names already saved; a misread or cut part (e.g. "หจก.เพ") gets the
+  spelling used elsewhere (allowed difference relative to the length, so different short names are never merged).
+- Cache prefix `ai7_`. More synthetic cases in `tests/prb-accuracy.test.mjs`.
+
 ## v4.5.2 (2026-11-23)
 
 พ.ร.บ. reading accuracy: code post-processing after the AI (`prbPost` in `js/prb.js`), not only prompt wording.

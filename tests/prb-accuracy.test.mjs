@@ -67,5 +67,32 @@ eq([n2.values.province, n2.notes.province], [undefined, 'v.provNoPlate'], 'plate
 const n3 = normalize({ docType: 'prb', fields: F({ cc: '1500', vehicleCode: '1.10' }) });
 eq(n3.prb.cc, '1500', 'a real cc stays');
 
+// ---------- v4.5.3 ----------
+const { consensusName } = await import('../js/prb.js');
+const VIB = { companyCode: 'VIB', insurer: INSURER };
+// 1) branch prefix dropped in EVERY row: no consensus, but code part 69100 on VIB -> 00283; or the branch the AI read under VIB
+eq(suggestPolicyNo({ ...VIB, policyNo: '69100/กธ/1000001', prbNo: '1000001' }, [{ ...VIB, policyNo: '69100/กธ/1000002' }]),
+  { value: '00283 69100/กธ/1000001', why: 'prefix' }, '00283 suggested for 69100 when every row lost it');
+eq(suggestPolicyNo({ ...VIB, policyNo: '12345/กธ/1000001', prbNo: '1000001' }, [], { branchCode: '54321' }),
+  { value: '54321 12345/กธ/1000001', why: 'prefix' }, 'branch number read under VIB is used');
+eq(suggestPolicyNo({ ...VIB, policyNo: '12345/กธ/1000001', prbNo: '1000001' }, []), null, 'unknown code part, no branch read: no guess');
+eq(suggestPolicyNo({ ...VIB, policyNo: '00283 69100/กธ/1000001', prbNo: '1000001' }, []), null, 'full number: no suggestion');
+eq(suggestPolicyNo({ companyCode: 'XYZ', insurer: 'บริษัท อื่น จำกัด', policyNo: '69100/กธ/1000001', prbNo: '1000001' }, []), null, '00283 only for Viriyah');
+// 2) cc only from the raw C.C./Seats/Weight text
+const csw = (raw, extra = {}) => normalize({ docType: 'prb', fields: F({ cswText: raw, ...extra }) }).prb;
+eq(['cc', 'seats', 'weight'].map(k => csw('0/0/21', { cc: '2' })[k]), ['0', '0', '21'], '"0/0/21" -> 0 / 0 / 21 even when cc was read as 2');
+eq(['cc', 'seats', 'weight'].map(k => csw('0/3/21')[k]), ['0', '3', '21'], '"0/3/21" -> 0 / 3 / 21 when cc was read empty');
+eq(csw('๐ / ๓ / ๒๑').cc, '0', 'Thai digits and spaces');
+eq([csw('unreadable', { cc: '2' }).cc, csw('unreadable', { cc: '2' }).notes?.cc], [undefined, 'v.ccBad'], 'raw text not a triple: no cc at all');
+eq(rowFromAi(normalize({ docType: 'prb', fields: F({ cswText: '0/3/21', vehicleCode: '2.40D' }) })).row.cc, '0', 'row cc from the raw text');
+// 3) sub-part consensus ("/", "(", "โดย") across the batch and the saved insured names
+const PART = 'หจก.เค พี พี เอส ทดสอบขนส่ง';
+const batchNames = [`บริษัท ทดสอบ เซอร์วิส จำกัด /${PART}`, `บริษัท ทดสอบ เซอร์วิส จำกัด /${PART}`, `ห้างหุ้นส่วนจำกัด อื่น โดย ${PART}`, 'บริษัท ทดสอบ เซอร์วิส จำกัด /หจก.เพ'];
+eq(consensusName(batchNames, 3), `บริษัท ทดสอบ เซอร์วิส จำกัด /${PART}`, 'cut sub-part "หจก.เพ" gets the batch spelling');
+eq(consensusName(batchNames, 0), '', 'majority rows get no suggestion');
+eq(consensusName(['บริษัท ใหม่ (หจก.เค พี ที เอส ทดสอบขนส่ง)'], 0, [`บริษัท เก่า /${PART}`]), `บริษัท ใหม่ (${PART})`, 'sub-part corrected against a saved insured name');
+eq(consensusName(['บริษัท ใหม่ โดย หจก.เค พี ที เอส ทดสอบขนส่ง'], 0, [`บริษัท เก่า /${PART}`]), `บริษัท ใหม่ โดย ${PART}`, 'split on โดย');
+eq(consensusName(['บริษัท ไก่ทอด จำกัด', 'บริษัท ปลาทู จำกัด', 'บริษัท ปลาทู จำกัด'], 0), '', 'different companies are not merged');
+
 console.log(`prb-accuracy: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
