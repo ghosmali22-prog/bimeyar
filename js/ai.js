@@ -27,7 +27,7 @@ const UPDATES = {
 };
 
 /* ---------- v4.4.1 helpers ---------- */
-/** "71 7895" / "71-7895" -> "71-7895" (2 digits + 4 digits); anything else unchanged */
+/** "00 0002" / "00-0002" -> "00-0002" (2 digits + 4 digits); anything else unchanged */
 export function normPlate(s) {
   const v = latinDigits(s).trim();
   const m = v.match(/^(\d{1,2})\s*[- ]\s*(\d{4})$/);
@@ -60,6 +60,11 @@ export function prbCheck({ netPremium, stamps, vat, total } = {}) {
 const PRB_TEXT = ['companyCode', 'receiptNo', 'vehicleCode', 'cc', 'seats', 'weight', 'periodTime', 'brokerName', 'brokerLicense'];
 const PRB_DIGITS = ['prbNo', 'barcode', 'taxId'];
 const PRB_MONEY = ['netPremium', 'discount', 'stamps', 'vat', 'total'];
+const splitCSW = s => {
+  if (s == null) return null;
+  const p = latinDigits(s).trim().split(/\s*\/\s*/);
+  return p.length === 3 && p.every(x => /^\d+(?:\.\d+)?$/.test(x)) ? { cc: p[0], seats: p[1], weight: p[2] } : null;
+};
 
 const b64 = blob => new Promise((res, rej) => {
   const r = new FileReader();
@@ -127,6 +132,7 @@ export function normalize(r) {
   }
   const prb = {};
   for (const k of PRB_TEXT) { [v] = get(k); if (v) prb[k] = latinDigits(v); }
+  if (prb.cc) { const csw = splitCSW(prb.cc); if (csw) Object.assign(prb, csw); }
   for (const k of PRB_DIGITS) { [v] = get(k); const d = latinDigits(v).replace(/\D/g, ''); if (d) prb[k] = d; }
   for (const k of PRB_MONEY) { [v] = get(k); const m = v ? money(v) : null; if (m != null) prb[k] = m; }
   [v] = get('issueDate'); if (v) { const d = toIsoDate(v); if (d) prb.issueDate = d; }

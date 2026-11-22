@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 export const FOLDER = 'application/vnd.google-apps.folder';
 export function fakeDrive() {
   let n = 0;
-  const files = {};
+  const files = {}, perms = {};
   const pick = f => JSON.parse(JSON.stringify(f));
   const one = (f, q) => {
     q = q.trim();
@@ -21,6 +21,8 @@ export function fakeDrive() {
   const trashedUp = f => { for (let x = f; x; x = files[(x.parents || [])[0]]) if (x.trashed) return true; return false; };
   const Drive = {
     files,
+    perms,
+    permPageSize: 0,
     Files: {
       get: id => { if (!files[id]) throw new Error('404'); const f = pick(files[id]); f.trashed = trashedUp(files[id]); return f; },
       list: o => ({ files: Object.values(files).filter(f => split(o.q).every(x => one({ ...f, trashed: trashedUp(f) }, x))).map(pick) }),
@@ -33,22 +35,50 @@ export function fakeDrive() {
         return Drive.Files.get(id);
       },
     },
-    Permissions: { list: () => ({ permissions: [] }), create() { }, update() { }, remove() { } },
+    Permissions: {
+      list: (id, o = {}) => {
+        const all = perms[id] || [], size = Drive.permPageSize || o.pageSize || 100;
+        const start = +(o.pageToken || 0), end = start + size;
+        return { permissions: all.slice(start, end).map(pick), nextPageToken: end < all.length ? String(end) : undefined };
+      },
+      create: (res, id) => { (perms[id] ||= []).push({ id: 'p' + (++n), ...res }); },
+      update: (res, id, pid) => { Object.assign((perms[id] || []).find(p => p.id === pid) || {}, res); },
+      remove: (id, pid) => { perms[id] = (perms[id] || []).filter(p => p.id !== pid); },
+    },
     About: { get: () => ({ storageQuota: {} }) },
   };
   return Drive;
 }
-/** Loads backend/Code.gs against a fresh fake Drive. Returns { B (ACTIONS + helpers), Drive, props, root }. */
+/** Loads backend/Code.gs against a fresh fake Drive. Returns { B (ACTIONS + helpers), Drive, props, cache, thumbs, root }. */
 export function loadBackend(extra = 'ACTIONS, descSplit') {
-  const props = {};
+  const props = {}, cache = {}, thumbs = {};
   const PropertiesService = { getScriptProperties: () => ({ getProperty: k => props[k] ?? null, setProperty: (k, v) => { props[k] = v; }, deleteProperty: k => { delete props[k]; } }) };
+  const CacheService = {
+    getScriptCache: () => ({
+      get: k => cache[k] ?? null,
+      getAll: ks => Object.fromEntries((ks || []).filter(k => k in cache).map(k => [k, cache[k]])),
+      put: (k, v) => { cache[k] = String(v); },
+      remove: k => { delete cache[k]; },
+    }),
+  };
   const LockService = { getScriptLock: () => ({ waitLock() { }, releaseLock() { } }) };
-  const Utilities = { base64Decode: s => [...Buffer.from(s, 'base64')], newBlob: (b, mime, name) => ({ b, mime, name }), formatDate: (d, tz, f) => f === 'yyyy-MM' ? '2026-11' : '2026-11-21' };
+  const Utilities = {
+    base64Decode: s => [...Buffer.from(s, 'base64')],
+    base64Encode: b => Buffer.from(b).toString('base64'),
+    newBlob: (b, mime, name) => ({ b, mime, name, getBytes: () => b, getContentType: () => mime }),
+    formatDate: (d, tz, f) => f === 'yyyy-MM' ? '2026-11' : '2026-11-21',
+  };
   const Session = { getEffectiveUser: () => ({ getEmail: () => 'owner@example.com' }) };
   const Drive = fakeDrive();
+  const DriveApp = {
+    getFileById: id => ({
+      getBlob: () => Utilities.newBlob([1, 2, 3], Drive.files[id]?.mimeType || 'application/pdf', Drive.files[id]?.name || ''),
+      getThumbnail: () => (thumbs[id] === null ? null : Utilities.newBlob(thumbs[id] || [137, 80, 78, 71], 'image/png', 'thumb.png')),
+    }),
+  };
   const gs = readFileSync(new URL('../backend/Code.gs', import.meta.url), 'utf8');
-  const B = new Function('Drive', 'PropertiesService', 'LockService', 'Utilities', 'Session', `${gs}\nreturn { ${extra} };`)(Drive, PropertiesService, LockService, Utilities, Session);
+  const B = new Function('Drive', 'PropertiesService', 'CacheService', 'DriveApp', 'LockService', 'Utilities', 'Session', `${gs}\nreturn { ${extra} };`)(Drive, PropertiesService, CacheService, DriveApp, LockService, Utilities, Session);
   const root = Drive.Files.create({ name: 'RICH INSURANSE', mimeType: FOLDER, appProperties: { bimeyar: 'root' } }).id;
   props.ROOT_ID = root;
-  return { B, Drive, props, root };
+  return { B, Drive, props, cache, thumbs, root };
 }
