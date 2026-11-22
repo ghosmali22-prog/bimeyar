@@ -1,5 +1,26 @@
 # Changelog
 
+## v4.5.0 (2026-11-23)
+
+- **New "พ.ร.บ." section** (compulsory motor insurance), separate from Customers (see `backend/PRB.md`).
+  Drive: `RICH INSURANSE / พ.ร.บ. / {insured name, exact} / files + PRB invoices`, with its own tags
+  (`prbroot`, `prbins`, `prb`), so no existing tool (list, rename, move, restore names, Edit with AI, migration)
+  sees or changes these items. The "พ.ร.บ." folder is made at the first upload or import.
+- One row per พ.ร.บ.: PRB no., barcode, plate, model, chassis, engine no., dates, net premium, stamps, VAT, total…
+  (JSON in the file description). Rows sorted by PRB no.; status active / expiring / expired; open file;
+  copy share link (one file only, as before). Duplicates (PRB no. or barcode) are refused.
+- Upload with a review screen (AI fills, you check; VAT and duplicate warnings; nothing saved before Save).
+  Smart upload sends documents detected as พ.ร.บ. to this review instead of the customer folder (can be turned off per file).
+- File names with the existing `buildName`: `{plate} - {insured}({purchase month}) - พ.ร.บ.` (company words removed as
+  for the main files; the insured folder keeps the full name).
+- Separate PRB invoice: number `PRB-YYYY-NNNN` (Script property `PRB_SEQ`, under the lock; `INV_SEQ` and RI invoices
+  unchanged), several rows of one insured, per-vehicle net / stamps / VAT / total and grand total (integer satang,
+  `prbTotals` in backend and `js/prb.js`), PDF in the insured's folder.
+- Import tool (admin): preview of the พ.ร.บ. files already in the vehicles' folder 3, then a COPY into the section after
+  confirmation. Originals are never moved, renamed or changed.
+- `assertCustomer` also refuses พ.ร.บ.-tagged folders (they are never customers).
+- Tests: `node tests/prb.test.mjs` (backend, fake Drive), `node tests/prb-front.test.mjs`.
+
 ## v4.4.1 (2026-11-22)
 
 - **One shared date helper** `js/dates.js` (parse / compare / format, Buddhist Era <-> CE). `validate.js`

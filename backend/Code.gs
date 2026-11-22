@@ -23,6 +23,8 @@
  *   GEMINI_API_KEY  Google AI Studio key for document reading, the automatic fallback (set by the owner, never in the repo)
  *   COMPANY         company info for invoices (set from the app, admin only)
  *   INV_SEQ         last invoice number per year (set automatically, under a lock)
+ *   PRB_ROOT_ID     separate compulsory-insurance folder (created on first upload/import)
+ *   PRB_SEQ         PRB invoice numbers per CE year, independent of INV_SEQ (under a lock)
  *   AI_LOG          last 200 AI calls: time, ms, size, tokens, result. No customer data.
  *   RENAME_LAST     id of the last batch of the "Rename files" tool, for "Undo last rename" (admin)
  *   MOVE_LAST       id of the last batch of the "Move to new folders" tool (v4), for "Undo last move" (admin)
@@ -186,6 +188,29 @@ function doPost(e) {
 /* ============================ actions ============================ */
 
 const ACTIONS = {
+  /* ---------- separate compulsory insurance (v4.5) ---------- */
+  prbList: { need: 'viewer', run: () => prbList() },
+  prbUpload: { need: 'editor', run: (req, user) => prbUpload(req, user) },
+  prbUpdate: { need: 'editor', run: req => withLock(() => {
+    const f = prbAssertFile(req.id, 'prb');
+    const row = Object.assign({}, parseObj(f.description), prbFields(req.row || {}));
+    prbDuplicate(row, f.id);
+    return prbToRow(Drive.Files.update({ description: JSON.stringify(row), appProperties: prbRowProps(row) }, f.id, null, { fields: FIELDS }));
+  }) },
+  prbGetFile: { need: 'viewer', run: req => {
+    prbAssertFile(req.id);
+    const blob = DriveApp.getFileById(req.id).getBlob();
+    return { mime: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) };
+  } },
+  prbShare: { need: 'editor', run: req => prbSharing(req.id, true) },
+  prbUnshare: { need: 'editor', run: req => prbSharing(req.id, false) },
+  prbDelete: { need: 'editor', run: req => withLock(() => {
+    prbAssertFile(req.id); Drive.Files.update({ trashed: true }, req.id); return true;
+  }) },
+  prbImportPlan: { need: 'admin', run: () => prbImportPlan() },
+  prbImport: { need: 'admin', run: (req, user) => prbImport(req, user) },
+  prbInvoice: { need: 'editor', run: (req, user) => prbInvoice(req, user) },
+
   me: { need: 'viewer', run: (req, user, role) => ({ email: user.email, name: user.name, role, owner: ownerEmail() === user.email, root: role === 'admin' ? rootId() : '', ai: !!(claudeKey() || aiKey()), v: 4, dev: !!user.sid }) },
 
   /* ---------- device sign-in (v3.3) ---------- */
@@ -1012,6 +1037,8 @@ function meta(id) {
 function assertCustomer(id) {
   if (!id) throw err('bad_request', 'Missing id');
   const f = meta(id);
+  // PRB folders are never customer records, even when directly inside the app root.
+  if (/^prb/.test(tagOf(f, 'bimeyar'))) throw err('not_found', 'Customer not found');
   if (f.trashed || f.mimeType !== FOLDER || (f.parents || []).indexOf(rootId()) < 0) throw err('not_found', 'Customer not found');
   return f;
 }
@@ -1573,6 +1600,362 @@ function renameOne(id, newName, batch) {
     Drive.Files.update({ name, description: descJoin(d.note, d.meta.concat([RENAMED + cur.name + ARROW + name])), appProperties: { rnb: batch } }, id);
     return { id, status: 'ok', old: cur.name, name };
   });
+}
+
+/* ============================ compulsory insurance (v4.5) ============================ */
+
+const PRB_FIELDS = {
+  prbNo: 20, barcode: 30, plate: 40, province: 60, brand: 40, model: 60, body: 60, vin: 40, engineNo: 40,
+  vehicleCode: 20, cc: 20, seats: 20, weight: 20, companyCode: 20, insurer: 80, policyNo: 80, receiptNo: 40,
+  contractDate: 'date', issueDate: 'date', start: 'date', end: 'date', periodTime: 20,
+  netPremium: 'money', discount: 'money', stamps: 'money', vat: 'money', total: 'money',
+  brokerName: 120, brokerLicense: 60, note: 500,
+};
+
+/** Only supplied fields: an absent total must remain absent so totals can be derived. */
+function prbFields(x) {
+  const out = {};
+  Object.keys(PRB_FIELDS).forEach(k => {
+    if (!Object.prototype.hasOwnProperty.call(x, k)) return;
+    const v = x[k], t = PRB_FIELDS[k];
+    if (t === 'date') out[k] = date(ceDate(String(v || '')));
+    else if (t === 'money') out[k] = v == null || String(v).trim() === '' ? '' : prbSatang(v) / 100;
+    else if (k === 'prbNo' || k === 'barcode') out[k] = String(v == null ? '' : v).replace(/\D/g, '').slice(0, t);
+    else out[k] = clean(v, t);
+  });
+  return out;
+}
+function prbSatang(v) {
+  const n = satang(v);
+  if (!Number.isSafeInteger(n)) throw err('bad_request', 'Amount is too large');
+  return n;
+}
+/** Same integer-satang algorithm as the PRB preview; a supplied zero total is authoritative. */
+function prbTotals(rows) {
+  const sums = { net: 0, stamps: 0, vat: 0, total: 0 };
+  const lines = rows.map(r => {
+    const net = prbSatang(r.netPremium), stamps = prbSatang(r.stamps), vat = prbSatang(r.vat);
+    const total = r.total != null && String(r.total).trim() !== '' ? prbSatang(r.total) : net + stamps + vat;
+    const line = { net, stamps, vat, total };
+    Object.keys(sums).forEach(k => {
+      sums[k] += line[k];
+      if (!Number.isSafeInteger(sums[k])) throw err('bad_request', 'Amount is too large');
+      line[k] /= 100;
+    });
+    return line;
+  });
+  Object.keys(sums).forEach(k => { sums[k] /= 100; });
+  return Object.assign({ lines }, sums);
+}
+
+/** Read paths never call rootId(): listing must not create folders or write Script properties. */
+function prbAppRoot() {
+  const id = PropertiesService.getScriptProperties().getProperty('ROOT_ID');
+  if (!id) return '';
+  const f = meta(id);
+  if (f.trashed || f.mimeType !== FOLDER || tagOf(f, 'bimeyar') !== 'root') throw err('not_found', 'App root not found');
+  return id;
+}
+/** create=true is called only inside the upload/import script lock. Never adopts a differently tagged folder. */
+function prbRoot(create) {
+  const root = prbAppRoot();
+  if (!root) {
+    if (create) throw err('not_found', 'App root not configured');
+    return '';
+  }
+  const props = PropertiesService.getScriptProperties(), cached = props.getProperty('PRB_ROOT_ID');
+  const valid = f => !f.trashed && f.mimeType === FOLDER && tagOf(f, 'bimeyar') === 'prbroot' && (f.parents || []).length === 1 && f.parents[0] === root;
+  if (cached) {
+    try { if (valid(meta(cached))) return cached; } catch (e) { if (e.code !== 'not_found') throw e; }
+  }
+  const folders = listAll("'" + root + "' in parents and mimeType='" + FOLDER + "' and trashed=false");
+  let f = folders.find(valid);
+  if (!create) return f ? f.id : '';
+  if (!f) {
+    f = folders.find(x => x.name === 'พ.ร.บ.' && !tagOf(x, 'bimeyar'));
+    f = f ? Drive.Files.update({ appProperties: { bimeyar: 'prbroot' } }, f.id, null, { fields: FIELDS }) :
+      Drive.Files.create({ name: 'พ.ร.บ.', mimeType: FOLDER, parents: [root], appProperties: { bimeyar: 'prbroot' } }, null, { fields: FIELDS });
+  }
+  props.setProperty('PRB_ROOT_ID', f.id);
+  return f.id;
+}
+function prbRead(id) {
+  if (!id || !/^[\w-]+$/.test(String(id))) throw err('bad_request', 'Missing or invalid id');
+  try { return Drive.Files.get(id, { fields: FIELDS + ',trashed' }); }
+  catch (e) { throw err('not_found', 'PRB item not found'); }
+}
+function prbAssertInsured(id) {
+  const f = prbRead(id), root = prbRoot(false);
+  if (!root || f.trashed || f.mimeType !== FOLDER || tagOf(f, 'bimeyar') !== 'prbins' ||
+      (f.parents || []).length !== 1 || f.parents[0] !== root) throw err('not_found', 'Insured folder not found');
+  return f;
+}
+function prbAssertFile(id, kind) {
+  const f = prbRead(id), k = tagOf(f, 'kind');
+  if (f.trashed || f.mimeType === FOLDER || tagOf(f, 'bimeyar') !== 'prb' ||
+      (kind ? k !== kind : k !== 'prb' && k !== 'prbinv') || (f.parents || []).length !== 1) throw err('not_found', 'PRB file not found');
+  prbAssertInsured(f.parents[0]);
+  return f;
+}
+function prbToInsured(f) {
+  const d = parseObj(f.description);
+  return { id: f.id, name: d.name || f.name, taxId: d.taxId || '', address: d.address || '', createdAt: f.createdTime || '' };
+}
+function prbToRow(f) {
+  const row = prbFields(parseObj(f.description));
+  Object.keys(PRB_FIELDS).forEach(k => { if (!Object.prototype.hasOwnProperty.call(row, k)) row[k] = ''; });
+  return Object.assign(row, { id: f.id, insuredId: (f.parents || [])[0], name: f.name, mime: f.mimeType,
+    size: +f.size || 0, createdAt: f.createdTime || '', by: tagOf(f, 'by'), shared: tagOf(f, 'link') === '1', src: tagOf(f, 'src') });
+}
+function prbToInvoice(f) {
+  return Object.assign({}, parseObj(f.description), { id: f.id, fileName: f.name, createdTime: f.createdTime || '' });
+}
+function prbList() {
+  const root = prbRoot(false), out = { root, insured: [], rows: [], invoices: [] };
+  if (!root) return out;
+  const ids = new Set();
+  listAll("'" + root + "' in parents and " + tagQuery('prbins')).forEach(f => {
+    if (f.mimeType !== FOLDER || (f.parents || []).length !== 1) return;
+    ids.add(f.id); out.insured.push(prbToInsured(f));
+  });
+  listAll(tagQuery('prb')).forEach(f => {
+    if (f.mimeType === FOLDER || (f.parents || []).length !== 1 || !ids.has(f.parents[0])) return;
+    if (tagOf(f, 'kind') === 'prb') out.rows.push(prbToRow(f));
+    else if (tagOf(f, 'kind') === 'prbinv') out.invoices.push(prbToInvoice(f));
+  });
+  return out;
+}
+function prbInsuredFields(x) {
+  // Unlike fileName, no truncation: the insured's full printed name is the identity.
+  const name = String(x.name == null ? '' : x.name).replace(/[\/\\:*?"<>|\u0000-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim();
+  if (!name) throw err('bad_request', 'Insured name is required');
+  const d = { name };
+  ['taxId', 'address'].forEach(k => { if (Object.prototype.hasOwnProperty.call(x, k)) d[k] = clean(x[k], k === 'taxId' ? 40 : 500); });
+  return d;
+}
+function prbInsured(d, user) {
+  const root = prbRoot(true);
+  const ik = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, d.name, Utilities.Charset.UTF_8)
+    .map(b => ('0' + ((b + 256) % 256).toString(16)).slice(-2)).join('').slice(0, 32);
+  const found = listAll("'" + root + "' in parents and " + tagQuery('prbins') + " and appProperties has { key='ik' and value='" + ik + "' }")
+    .find(f => f.mimeType === FOLDER && (f.parents || []).length === 1);
+  const merged = Object.assign({ taxId: '', address: '', by: user.email, at: new Date().toISOString() }, found ? parseObj(found.description) : {}, d);
+  const res = { description: JSON.stringify(merged) };
+  return found ? Drive.Files.update(res, found.id, null, { fields: FIELDS }) : Drive.Files.create(Object.assign(res, {
+    name: d.name, mimeType: FOLDER, parents: [root], appProperties: { bimeyar: 'prbins', ik },
+  }), null, { fields: FIELDS });
+}
+/** Call under the script lock, including the subsequent create/update/copy. */
+function prbDuplicate(row, exceptId) {
+  if (!row.prbNo && !row.barcode) return;
+  const files = listAll(tagQuery('prb') + " and appProperties has { key='kind' and value='prb' }");
+  const dup = files.find(f => {
+    if (f.id === exceptId || f.mimeType === FOLDER) return false;
+    const d = parseObj(f.description);
+    return (row.prbNo && row.prbNo === (d.prbNo || tagOf(f, 'prbNo'))) || (row.barcode && row.barcode === (d.barcode || tagOf(f, 'barcode')));
+  });
+  if (dup) throw err('duplicate', 'Already used by ' + dup.name);
+}
+function prbRowProps(row) {
+  return { bimeyar: 'prb', kind: 'prb', prbNo: row.prbNo || '', barcode: row.barcode || '', plate: tagVal(row.plate), end: row.end || '' };
+}
+function prbUpload(req, user) {
+  const insured = prbInsuredFields(req.insured || {}), row = prbFields(req.row || {}), m = req.meta || {};
+  if (!req.data || typeof req.data !== 'string') throw err('bad_request', 'No file data');
+  const bytes = Utilities.base64Decode(req.data);
+  if (bytes.length > MAX_BYTES) throw err('too_big', 'File is larger than 25 MB');
+  if (!bytes.length) throw err('bad_request', 'No file data');
+  const mime = clean(m.mime, 120) || 'application/octet-stream';
+  // พ.ร.บ. files are PDFs or photos only (never HTML or other types that a browser could run)
+  if (!/^(application\/pdf|image\/(jpeg|png|webp|heic|heif))$/.test(mime)) throw err('bad_request', 'Upload a PDF or a photo');
+  let name = fileName(m.name) || fileName(m.orig) || 'file';
+  if (!extOf(name) && extOf(m.orig)) name = fileName(name + extOf(m.orig));
+  return withLock(() => {
+    prbDuplicate(row);
+    const folder = prbInsured(insured, user);
+    name = uniqueName(name, siblingNames(folder.id));
+    const f = Drive.Files.create({ name, mimeType: mime, parents: [folder.id], description: JSON.stringify(row),
+      appProperties: Object.assign(prbRowProps(row), { by: tagVal(user.email), at: new Date().toISOString() }),
+    }, Utilities.newBlob(bytes, mime, name), { fields: FIELDS });
+    return { insured: prbToInsured(folder), row: prbToRow(f) };
+  });
+}
+function prbSharing(id, share) {
+  return withLock(() => {
+    prbAssertFile(id);
+    // collect first (removing while paging would skip permissions)
+    const anyone = [];
+    let page;
+    do {
+      const r = Drive.Permissions.list(id, { fields: 'nextPageToken,permissions(id,type,role,allowFileDiscovery)', pageSize: 100, pageToken: page });
+      (r.permissions || []).forEach(p => { if (p.type === 'anyone') anyone.push(p); });
+      page = r.nextPageToken;
+    } while (page);
+    // share: one link-only viewer permission. A searchable "anyone" permission is removed and made again link-only
+    // (allowFileDiscovery cannot be changed by update); the role is lowered to viewer, as in shareFile.
+    let keep = share ? anyone.filter(p => p.allowFileDiscovery !== true)[0] : null;
+    anyone.forEach(p => { if (p !== keep) Drive.Permissions.remove(id, p.id); });
+    if (keep && keep.role !== 'reader') Drive.Permissions.update({ role: 'reader' }, id, keep.id);
+    if (share && !keep) Drive.Permissions.create({ type: 'anyone', role: 'reader', allowFileDiscovery: false }, id);
+    const f = Drive.Files.update({ appProperties: { link: share ? '1' : null } }, id, null, { fields: FIELDS + ',webViewLink' });
+    const row = tagOf(f, 'kind') === 'prbinv' ? prbToInvoice(f) : prbToRow(f);
+    return share ? { row, link: f.webViewLink || ('https://drive.google.com/file/d/' + id + '/view?usp=sharing') } : row;
+  });
+}
+function prbImportSource(id) {
+  const f = assertFile(id), own = ownerOf(f);
+  if (!own.vehicle || own.vslot !== '3') throw err('bad_request', 'Source must be in vehicle folder 3');
+  return { f: Drive.Files.get(id, { fields: FIELDS }), own, vehicle: assertVehicle(own.vehicle) };
+}
+function prbImportPlan() {
+  const root = prbAppRoot();
+  if (!root) return [];
+  const copies = {};
+  prbList().rows.forEach(r => { if (r.src) copies[r.src] = r.id; });
+  const out = [], all = listAll(tagQuery('item')), customers = {};
+  all.forEach(f => { if (f.mimeType === FOLDER && (f.parents || [])[0] === root) customers[f.id] = f; });
+  const tree = vehicleTree(customers);
+  all.forEach(f => {
+    const slot = tree.slotOf[(f.parents || [])[0]];
+    if (f.mimeType === FOLDER || !slot || slot.slot !== '3') return;
+    // the vehicle tree already checked the chain (as list does); prbImport checks each chosen file again
+    const v = slot.v, c = customers[v.customerId];
+    if (!c) return;
+    out.push({ id: f.id, name: f.name, mime: f.mimeType, size: +f.size || 0, customerId: c.id,
+      customer: c.name, vehicleId: v.id, plate: v.plate || '', ym: v.ym || '', imported: copies[f.id] || '' });
+  });
+  return out;
+}
+function prbImport(req, user) {
+  if (!Array.isArray(req.items) || req.items.length > 20) throw err('bad_request', 'Import at most 20 files');
+  const out = { done: [], skipped: [] };
+  req.items.forEach(item => {
+    const id = item && item.id;
+    try {
+      const result = withLock(() => {
+        const src = prbImportSource(id), row = prbFields(item.row || {}), insured = prbInsuredFields(item.insured || {});
+        const existing = prbList().rows.find(r => r.src === id);
+        if (existing) throw err('duplicate', 'Already imported as ' + existing.name);
+        prbDuplicate(row);
+        const folder = prbInsured(insured, user);
+        let name = fileName(item.name) || fileName(src.f.name) || 'file';
+        if (!extOf(name) && extOf(src.f.name)) name = fileName(name + extOf(src.f.name));
+        name = uniqueName(name, siblingNames(folder.id));
+        // Null out source tags: Drive copies appProperties unless explicitly replaced/removed.
+        const ap = {};
+        Object.keys(src.f.appProperties || {}).forEach(k => { ap[k] = null; });
+        Object.assign(ap, prbRowProps(row), { src: id, by: tagVal(user.email), at: new Date().toISOString() });
+        const f = Drive.Files.copy({ name, parents: [folder.id], description: JSON.stringify(row), appProperties: ap }, id, { fields: FIELDS });
+        return { id, row: prbToRow(f) };
+      });
+      out.done.push(result);
+    } catch (e) { out.skipped.push({ id: id || '', why: (e.code || 'server') + ': ' + String(e.message || e) }); }
+  });
+  return out;
+}
+/** Only called under the script lock; never wraps at 9999 and never touches INV_SEQ. */
+function nextPrbInvoiceNo(issue) {
+  const props = PropertiesService.getScriptProperties(), year = issue.slice(0, 4);
+  const seq = parseObj(props.getProperty('PRB_SEQ')), used = new Set();
+  listAll("appProperties has { key='bimeyar' and value='prb' } and appProperties has { key='kind' and value='prbinv' }")
+    .forEach(f => { used.add(tagOf(f, 'invNo')); used.add(parseObj(f.description).no); });
+  let n = Number(seq[year]) || 0, no;
+  do {
+    n++;
+    if (!Number.isSafeInteger(n) || n < 1) throw err('bad_request', 'Invalid PRB sequence');
+    no = 'PRB-' + year + '-' + String(n).padStart(4, '0');
+  } while (used.has(no));
+  seq[year] = n;
+  props.setProperty('PRB_SEQ', JSON.stringify(seq));
+  return no;
+}
+function prbInvoice(req, user) {
+  const inv = withLock(() => {
+    const folder = prbAssertInsured(req.insuredId), cust = prbToInsured(folder);
+    if (!Array.isArray(req.rowIds) || !req.rowIds.length || new Set(req.rowIds).size !== req.rowIds.length) throw err('bad_request', 'Select distinct PRB rows');
+    const rows = req.rowIds.map(id => {
+      const f = prbAssertFile(id, 'prb');
+      if (f.parents[0] !== folder.id) throw err('bad_request', 'Rows must belong to this insured');
+      return prbToRow(f);
+    });
+    const issue = date(ceDate(String(req.issue || ''))) || Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyy-MM-dd');
+    const due = date(ceDate(String(req.due || '')));
+    if ((req.issue && !date(ceDate(String(req.issue)))) || (req.due && !due)) throw err('bad_request', 'Invalid invoice date');
+    if (due && due < issue) throw err('bad_request', 'Due date is before the issue date');
+    const t = prbTotals(rows), lines = rows.map((r, i) => Object.assign({ rowId: r.id, prbNo: r.prbNo, plate: r.plate, model: r.model }, t.lines[i]));
+    delete t.lines;
+    return { v: 1, no: nextPrbInvoiceNo(issue), insuredId: folder.id, issue, due,
+      lang: ['th', 'en', 'both'].indexOf(req.lang) >= 0 ? req.lang : 'both', notes: clean(req.notes, 500),
+      cust: { name: cust.name, taxId: cust.taxId, address: cust.address }, lines, t, status: 'unpaid', createdBy: user.email, createdAt: new Date().toISOString() };
+  });
+  const pdf = prbInvoicePdf(inv, req.dateFmt);
+  // Rendering is outside the lock; recheck the destination before saving the snapshot.
+  prbAssertInsured(inv.insuredId);
+  const f = Drive.Files.create({ name: inv.no + '.pdf', mimeType: 'application/pdf', parents: [inv.insuredId], description: JSON.stringify(inv),
+    appProperties: { bimeyar: 'prb', kind: 'prbinv', invNo: inv.no, status: inv.status, total: String(inv.t.total), by: tagVal(user.email), at: inv.createdAt },
+  }, pdf, { fields: FIELDS });
+  return prbToInvoice(f);
+}
+
+/** Separate PRB layout: no changes to RI invoice rendering or calculation. */
+function prbInvoicePdf(inv, dateFmt) {
+  const co = companyGet(), A = DocumentApp.Attribute, H = DocumentApp.HorizontalAlignment;
+  const text = (th, en) => inv.lang === 'th' ? th : inv.lang === 'en' ? en : th + ' / ' + en;
+  const doc = DocumentApp.create('tmp-' + inv.no), id = doc.getId();
+  try {
+    const body = doc.getBody();
+    body.setPageWidth(595.28).setPageHeight(841.89).setMarginTop(36).setMarginBottom(36).setMarginLeft(32).setMarginRight(32);
+    const base = {};
+    base[A.FONT_FAMILY] = 'Sarabun'; base[A.FONT_SIZE] = 9; base[A.FOREGROUND_COLOR] = '#1f2430';
+    body.setAttributes(base);
+    const style = (p, bold, size) => {
+      const a = Object.assign({}, base); a[A.BOLD] = !!bold; a[A.FONT_SIZE] = size || 9; a[A.SPACING_AFTER] = 3;
+      p.setAttributes(a); return p;
+    };
+    const para = (s, bold, size) => style(body.appendParagraph(String(s || '')), bold, size);
+    if (co.logoId) {
+      try {
+        const img = para('').appendInlineImage(DriveApp.getFileById(co.logoId).getBlob());
+        const k = Math.min(1, 150 / img.getWidth(), 55 / img.getHeight());
+        img.setWidth(Math.round(img.getWidth() * k)).setHeight(Math.round(img.getHeight() * k));
+      } catch (e) { /* Company text remains visible when the optional logo is unavailable. */ }
+    }
+    para(co.name || 'RICH INSURANS', true, 16);
+    if (co.nameEn) para(co.nameEn);
+    if (co.address) para(co.address);
+    if (co.phone || co.email) para([co.phone, co.email].filter(String).join(' · '));
+    if (co.taxId) para(lbl('tax', inv.lang) + ': ' + co.taxId);
+    para(text('ใบแจ้งหนี้ พ.ร.บ.', 'PRB INVOICE'), true, 18);
+    para(lbl('unpaid', inv.lang), true);
+    para(lbl('no', inv.lang) + ': ' + inv.no, true);
+    para(lbl('issue', inv.lang) + ': ' + dmy(inv.issue, dateFmt) + (inv.due ? '   ' + lbl('due', inv.lang) + ': ' + dmy(inv.due, dateFmt) : ''));
+    para(lbl('billTo', inv.lang) + ': ' + inv.cust.name, true, 11);
+    if (inv.cust.taxId) para(lbl('tax', inv.lang) + ': ' + inv.cust.taxId);
+    if (inv.cust.address) para(inv.cust.address);
+    para('');
+    const rows = [[text('เลข พ.ร.บ.', 'PRB no.'), lbl('plate', inv.lang), text('รุ่น', 'Model'),
+      text('เบี้ยสุทธิ', 'Net premium'), text('อากร', 'Stamps'), text('ภาษี', 'VAT'), lbl('total', inv.lang)]];
+    inv.lines.forEach(l => rows.push([l.prbNo, l.plate, l.model, baht(l.net), baht(l.stamps), baht(l.vat), baht(l.total)]));
+    rows.push([lbl('total', inv.lang), '', '', baht(inv.t.net), baht(inv.t.stamps), baht(inv.t.vat), baht(inv.t.total)]);
+    const table = body.appendTable(rows);
+    table.setBorderColor('#e5e7eb').setBorderWidth(0.5);
+    [85, 75, 75, 78, 65, 65, 88].forEach((w, i) => table.setColumnWidth(i, w));
+    for (let r = 0; r < table.getNumRows(); r++) {
+      for (let c = 0; c < rows[r].length; c++) {
+        const cell = table.getCell(r, c), bold = r === 0 || r === rows.length - 1;
+        cell.setPaddingTop(5).setPaddingBottom(5).setPaddingLeft(4).setPaddingRight(4);
+        if (bold) cell.setBackgroundColor('#f3f5f9');
+        style(cell.getChild(0).asParagraph(), bold, 8).setAlignment(c >= 3 ? H.RIGHT : H.LEFT);
+      }
+    }
+    if (inv.notes) { para(lbl('notes', inv.lang), true); para(inv.notes); }
+    if (co.bank) { para(lbl('pay', inv.lang), true); para(co.bank); }
+    if (co.footer) para(co.footer);
+    doc.saveAndClose();
+    return DriveApp.getFileById(id).getAs('application/pdf').setName(inv.no + '.pdf');
+  } finally {
+    try { Drive.Files.update({ trashed: true }, id); } catch (e) { }
+  }
 }
 
 /* ============================ company settings ============================ */
