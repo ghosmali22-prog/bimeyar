@@ -10,33 +10,8 @@ export const latinDigits = s => String(s ?? '').replace(/[๐-๙۰-۹٠-٩]/g, 
 
 const pad = n => String(n).padStart(2, '0');
 
-/** Buddhist Era -> Common Era. Years 2400+ are treated as BE (2569 BE = 2026 CE). */
-export const beToCe = y => (y >= 2400 ? y - 543 : y);
-
-/** true when y-m-d is a real calendar date */
-export function realDate(y, m, d) {
-  const x = new Date(Date.UTC(y, m - 1, d));
-  return x.getUTCFullYear() === y && x.getUTCMonth() === m - 1 && x.getUTCDate() === d;
-}
-
-/**
- * Reads a date in many shapes and returns ISO (CE) or null:
- * 2026-03-01, 2569-03-01 (BE), 01/03/2569, 1.3.2026, 1-3-26 (2-digit years: <=50 -> 20xx CE, else 25xx BE).
- */
-export function toIsoDate(v) {
-  if (v == null) return null;
-  const s = latinDigits(v).trim();
-  if (!s) return null;
-  let y, m, d, x;
-  if ((x = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/))) [y, m, d] = [+x[1], +x[2], +x[3]];
-  else if ((x = s.match(/^(\d{1,2})[-/. ](\d{1,2})[-/. ](\d{2,4})$/))) {
-    [d, m, y] = [+x[1], +x[2], +x[3]];
-    if (x[3].length === 2) y = y <= 50 ? 2000 + y : 2500 + y;
-  } else return null;
-  y = beToCe(y);
-  if (y < 1900 || y > 2200 || !realDate(y, m, d)) return null;
-  return `${y}-${pad(m)}-${pad(d)}`;
-}
+// v4.4.1: one date implementation for the whole app (js/dates.js); these names stay for the old imports.
+export { beToCe, realDate, parseDate as toIsoDate } from './dates.js';
 
 /** Thai phone: returns 0XXXXXXXX(X) or null. Accepts +66 / 66 prefixes, spaces and dashes. */
 export function thaiPhone(v) {
