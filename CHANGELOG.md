@@ -1,5 +1,26 @@
 # Changelog
 
+## v4.4.1 (2026-11-22)
+
+- **One shared date helper** `js/dates.js` (parse / compare / format, Buddhist Era <-> CE). `validate.js`
+  (`toIsoDate`, `beToCe`, `realDate`) and `util.js` (`daysLeft`, `fmtDay`) now use it; their names did not change.
+  Thai shows DD/MM/YYYY with the Buddhist year by default (the Settings choice still wins).
+- **Fix "Expired" on a file tile while the vehicle is Active**: Smart upload took the file's expiry from the raw AI
+  value, not from the reviewed (corrected) value of the new vehicle record. Now the file gets the reviewed date, and a
+  doubtful AI date (end not after start, or more than 3 years later: BE/CE mix-up) is flagged and not used for the file.
+- **Policy class rule** when no class is printed: own damage covered -> ชั้น 1; only theft/fire -> ชั้น 2; neither ->
+  ชั้น 3 (new AI fields `odCover`, `tfCover`); a printed class always wins.
+- **Body type and vehicle value**: new optional vehicle field `carValue` (VFIELDS, backend + app); body type always read.
+- **พ.ร.บ. (compulsory) documents**: new AI docType `prb` (title "ตารางกรมธรรม์ประกันภัยคุ้มครองผู้ประสบภัยจากรถ"), no class;
+  two-line chassis cell = VIN + engine number (an engine number is never kept as VIN); plate as NN-NNNN; insured name
+  only as printed after "ชื่อ :"; new optional fields (PRB no., barcode, receipt no., vehicle code, cc/seats/weight,
+  tax ID, period time, issue date, net premium, discount, stamps, VAT, total, broker + licence). The review screen
+  warns when (net + stamps) x 7% != VAT (±0.01) or net + stamps + VAT != total. A พ.ร.บ. never changes a customer's name.
+- **Wrong customer name on พ.ร.บ.**: a document found by plate / chassis but naming someone else is no longer attached
+  silently: the row gets low confidence and a warning "the name on the document is …".
+- AI cache key prefix `ai4_` (new answer shape). `ai.slowHint` no longer mentions Google.
+- Test: `node tests/dates.test.mjs`.
+
 ## v4.4.0 (2026-11-22)
 
 - **AI now runs on Claude** (`claude-haiku-5-5`, constant `CLAUDE_MODEL` in `backend/Code.gs`) for every AI feature:

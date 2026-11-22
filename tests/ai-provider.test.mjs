@@ -68,7 +68,7 @@ const tryErr = fn => { try { fn(); return null; } catch (e) { return e; } };
   ok(c.body.output_config.effort === 'low' && !('format' in c.body.output_config), '1 effort low, no json_schema format', c.body.output_config);
   ok(/ONLY one JSON object, no markdown/.test(blocks[2].text), '1 prompt asks for one JSON object');
   ok(Object.keys(t.B.AI_FIELDS).every(k => blocks[2].text.includes('  ' + k + ': ' + t.B.AI_FIELDS[k])), '1 prompt lists every AI_FIELDS key + description');
-  ok(/policy, registration, id_card, receipt, other/.test(blocks[2].text) && /1, 2, 3, 4, 5\.1, 5\.2, 5\.3, 5\.4, 5\.5, unknown/.test(blocks[2].text), '1 prompt lists docType + slot values');
+  ok(/policy, prb, registration, id_card, receipt, other/.test(blocks[2].text) && /1, 2, 3, 4, 5\.1, 5\.2, 5\.3, 5\.4, 5\.5, unknown/.test(blocks[2].text), '1 prompt lists docType + slot values');
   ok(Object.keys(r.fields).length === Object.keys(t.B.AI_FIELDS).length && r.fields.vin.value === null && r.fields.vin.confidence === 0, '1 missing fields filled as null / 0');
   const L = log(t.props);
   ok(L.length === 1 && L[0].prov === 'claude' && L[0].model === 'claude-haiku-5-5' && L[0].status === 'ok', '1 AI_LOG has provider + model', L);
