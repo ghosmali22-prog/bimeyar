@@ -349,10 +349,15 @@ export function policyConsensus(rows) {
   return Object.entries(count).sort((x, y) => y[1] - x[1])[0]?.[0] || '';
 }
 /** A full policy number to OFFER (never applied by itself): missing first group, a barcode, or not ending with the PRB number */
-export function suggestPolicyNo(row, peers) {
-  const no = digitsOf(row?.prbNo), cur = String(row?.policyNo ?? '').trim(), pre = policyConsensus(peers);
+/** v4.5.3: Viriyah branch number of a policy code part, used when the AI dropped the first group */
+export const VIB_BRANCH = { 69100: '00283' };
+export function suggestPolicyNo(row, peers, hint = {}) {
+  const no = digitsOf(row?.prbNo), cur = String(row?.policyNo ?? '').trim(), p = parsePolicyNo(cur);
+  // prefix: batch consensus, else the branch number the AI read under VIB, else the known branch of this code part
+  const branch = digitsOf(hint.branchCode).length === 5 ? digitsOf(hint.branchCode) : p && VIB_BRANCH[p.b] || '';
+  const pre = policyConsensus(peers) || (p && !p.a && branch ? `${branch} ${p.b}/กธ/` : '');
   if (!no || !pre || !isViriyah(row)) return null;
-  const value = pre + no, p = parsePolicyNo(cur);
+  const value = pre + no;
   let why = '';
   if (/^\d{13}$/.test(digitsOf(cur)) && !/\//.test(cur)) why = 'barcode';
   else if (p && !p.a && pre.includes(' ' + p.b + '/')) why = 'prefix';
@@ -370,6 +375,38 @@ export function majorityName(names, i) {
     if ((d >= 1 && d <= 4) || me.replace(/\s+/g, '') === k.replace(/\s+/g, '')) return k;
   }
   return '';
+}
+/* v4.5.3: names are compared by their sub-parts too (split on "/", "(", ")" and "โดย"), across all rows of the batch
+   and the insured names already saved, so a misread or cut part ("หจก.เท") gets the spelling used elsewhere */
+const SUB_SPLIT = /(\s*\/\s*|\s*\(\s*|\s*\)\s*|\s+โดย\s+)/;
+const subParts = name => String(name ?? '').split(SUB_SPLIT);
+const isSep = (x, k) => k % 2 === 1;
+function subNear(p, q) {
+  if (!p || !q || p === q) return false;
+  if (p.replace(/\s+/g, '') === q.replace(/\s+/g, '')) return true;
+  const d = lev(p, q);
+  // a few misread letters, relative to the length ("หจก.เอ" ~ "หจก.เค"; never two short different names)
+  if (d >= 1 && d <= Math.min(4, Math.max(1, Math.floor(Math.min(p.length, q.length) * 0.15))) && Math.min(p.length, q.length) >= 5) return true;
+  // a cut or misread start of the same part: "หจก.เท" ~ "หจก.เค ที ที เอส ..."
+  return p.length >= 5 && p.length < q.length && lev(p, q.slice(0, p.length)) <= 1;
+}
+export function consensusName(names, i, existing = []) {
+  const whole = majorityName(names, i);
+  if (whole) return whole;
+  const me = String(names?.[i] ?? '').trim(); if (!me) return '';
+  const count = {};
+  const add = (n, w) => subParts(n).forEach((x, k) => { const v = x.trim(); if (!isSep(x, k) && v) count[v] = (count[v] || 0) + w; });
+  (names || []).forEach(n => add(n, 1));
+  (existing || []).forEach(n => add(n, 2));   // a name already saved in Drive counts more
+  const parts = subParts(me);
+  let changed = false;
+  const out = parts.map((x, k) => {
+    const v = x.trim(); if (isSep(x, k) || !v) return x;
+    const best = Object.entries(count).filter(([q, c]) => q !== v && c >= 2 && c > (count[v] || 0) && subNear(v, q)).sort((a, b) => b[1] - a[1])[0];
+    if (!best) return x;
+    changed = true; return x.replace(v, best[0]);
+  });
+  return changed ? out.join('') : '';
 }
 /**
  * One batch after the AI: fixes กธ IN PLACE (recorded in auto) and returns suggestions to accept with one click
