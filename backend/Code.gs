@@ -2320,7 +2320,7 @@ const AI_FIELDS = {
   barcode: 'For พ.ร.บ.: the long number printed under/next to the barcode at the top right of THIS document, digits only',
   receiptNo: 'For พ.ร.บ.: เลขที่ of the receipt',
   vehicleCode: 'For พ.ร.บ.: รหัสรถ as printed',
-  cc: 'For พ.ร.บ.: engine size in C.C. only (the FIRST number of the cell "C.C./No. of Seats/Weight", e.g. A/B/C -> A)',
+  cc: 'For พ.ร.บ.: engine size in C.C. only: the FIRST number of the cell "C.C./No. of Seats/Weight" (A/B/C -> A), digits only; never the vehicle code (รหัสรถ)',
   seats: 'For พ.ร.บ.: number of seats only (the SECOND number of that cell)',
   weight: 'For พ.ร.บ.: total weight only (the THIRD number of that cell, tons)',
   taxId: 'For พ.ร.บ.: insured tax ID, digits only',
@@ -2333,6 +2333,7 @@ const AI_FIELDS = {
   total: 'For พ.ร.บ.: เบี้ยประกันภัยรวม, digits only with decimals',
   brokerName: 'For พ.ร.บ.: broker or agent name as printed',
   brokerLicense: 'For พ.ร.บ.: broker or agent licence number as printed',
+  plateText: 'The licence plate cell exactly as printed, including the province text after the number',   // v4.5.2
 };
 
 /** v4: the folder of the vehicle file a document belongs to (see VSLOTS). */
@@ -2377,9 +2378,9 @@ const AI_PROMPT = [
   '9. policyType: if a class is printed (ชั้น 1, 2, 2+, 3, 3+) return it exactly; if none is printed return null and fill odCover and tfCover from the coverage table (never guess the class). A พ.ร.บ. has no class: policyType = "พ.ร.บ.".',
   '10. Always fill bodyType (แบบตัวถัง) exactly as printed (never a synonym) and carValue when printed. insurer: the name as printed, in Thai when printed in Thai.',
   '11. The "เลขตัวถัง / Chassis No." cell often has TWO lines: line 1 = chassis/VIN, line 2 = ENGINE number. vin = line 1 only, engineNo = line 2. Never return an engine number as vin.',
-  '12. plate: registration number only, written NN-NNNN when it is 2 + 4 digits; the province (or its short form) goes in province.',
-  '13. On a พ.ร.บ. the insured (insuredName and nameTh) is exactly the text after "ชื่อ :" on THIS document. Never return a name that is not printed on THIS document; never the broker, agent or insurer.',
-  '14. contractDate = วันทำสัญญาประกันภัย (not the coverage start). policyNo = the full number as printed. Every number (policyNo, prbNo, receiptNo, barcode) must be read from THIS document only: documents of one customer look alike and differ in single digits, so read each digit; never reuse a number from another document or from these rules.',
+  '12. plate: registration number only, written NN-NNNN when it is 2 + 4 digits. plateText: the plate cell exactly as printed (number AND the province text after it). province: ONLY the text after the number in that cell (or its short form as printed); never take it from the address.',
+  '13. On a พ.ร.บ. the insured (insuredName and nameTh) is exactly the text after "ชื่อ :" on THIS document, with the same spacing (no space after บริษัท when none is printed). Never return a name that is not printed on THIS document; never the broker, agent or insurer.',
+  '14. contractDate = วันทำสัญญาประกันภัย (not the coverage start). policyNo = the full number as printed with ALL its groups (on Viriyah: two groups of 5 digits, then /กธ/, then the PRB number); keep every group and the Thai letters exactly. Every number (policyNo, prbNo, receiptNo, barcode) must be read from THIS document only: documents of one customer look alike and differ in single digits, so read each digit; never reuse a number from another document or from these rules.',
   '15. For a พ.ร.บ.: docType prb, slot 3, fill the พ.ร.บ. keys (companyCode … brokerLicense) and premium = total. The cell "ขนาดเครื่องยนต์/จำนวนที่นั่ง/น้ำหนักรวม (C.C./No. of Seats/Weight)" holds 3 numbers A/B/C: cc = A, seats = B, weight = C; never the whole text in one field.',
 ].join('\n');
 /** Claude has no response schema (see claudeParse), so the JSON shape is in the prompt. Built from AI_FIELDS. */
@@ -2487,7 +2488,7 @@ function aiExtract(req) {
 /** Cache key for a set of files: SHA-256 of their types and contents (the hash is not logged). */
 function aiCacheKey(files) {
   const d = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, files.map(f => f.mime + ':' + f.data).join('|'));
-  return 'ai5_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');   // ai5: v4.5.1 prompt (no example numbers); never mixed with older cached answers
+  return 'ai6_' + Utilities.base64EncodeWebSafe(d).replace(/=+$/, '');   // ai6: v4.5.2 prompt (plateText, full policy number); never mixed with older cached answers
 }
 function aiCached(cache, ck) {
   try { const v = cache.get(ck + ':res'); return v ? JSON.parse(v) : null; } catch (e) { return null; }

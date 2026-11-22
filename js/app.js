@@ -12,7 +12,7 @@ import { prepare, normalize, diff, fileNote, FIELD_GROUPS, DATE_FIELDS } from '.
 import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './validate.js';
 import { buildName, docNameFromOld, plateOnly, plateFromName, followsPattern, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
 import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey, needsAiRead, detectVehicles, aiEditSuggest } from './vehicles.js';
-import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup, prbSanity, suggestInsured, groupInsured } from './prb.js';
+import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup, prbSanity, suggestInsured, groupInsured, prbPost, suggestPolicyNo, majorityName } from './prb.js';
 import { parseDate } from './dates.js';
 
 /*
@@ -2345,8 +2345,14 @@ async function prbStart(items) {
     it.ai = it.n || Object.values(it.row).some(Boolean) ? 'done' : aiOn() ? 'wait' : 'skip';
     it.state = ''; it.err = ''; it.skip = false;
   }
+  prbAutoFix(PR);
   prbBatch();
   prbAiQueue(PR);
+}
+/** v4.5.2: code corrections after the AI (e.g. กซ -> กธ on Viriyah); the old value is kept to show "auto-corrected" */
+function prbAutoFix(session) {
+  const res = prbPost(session.items.map(x => x.state === 'saved' ? { row: {}, insured: {} } : x));
+  session.items.forEach((it, i) => { if (res[i].auto.policyNo && !it.auto?.policyNo) it.auto = { ...it.auto, policyNo: res[i].auto.policyNo }; });
 }
 function prbCurrent() { return PR?.items[PR.index]; }
 const PRB_DATES = new Set(['contractDate', 'issueDate', 'start', 'end']);
@@ -2404,6 +2410,7 @@ async function prbReadAi() {
     const mapped = rowFromAi(n);
     for (const [k, v] of Object.entries(mapped.insured)) if (v) it.insured[k] = v;
     for (const [k, v] of Object.entries(mapped.row)) if (v) it.row[k] = v;
+    const fx = prbPost([it])[0]; if (fx.auto.policyNo) it.auto = { ...it.auto, policyNo: fx.auto.policyNo };
     it.message = t(isPrbDoc(n) ? 'prb.aiReview' : 'prb.notPrb');
   } catch (e) { if (PR === session) it.message = t('prb.aiFailed'); handleError(e); }
   finally { if (PR === session) { session.busy = false; prbReview(); } }
@@ -2459,7 +2466,7 @@ function prbBatch() {
 }
 function prbBatchRow(it, i) {
   const ro = it.state === 'saved' || it.ai === 'busy' || it.ai === 'wait' ? 'readonly' : '';
-  const cell = k => `<td><input class="prb-cell" data-pi="${i}" data-pk="${k}" value="${esc(it.row[k] ?? '')}" ${PRB_DATES.has(k) ? 'type="date"' : PRB_MONEY.has(k) ? 'inputmode="decimal"' : ['prbNo', 'barcode', 'receiptNo'].includes(k) ? 'inputmode="numeric"' : ''} ${['plate', 'vin', 'engineNo', 'prbNo', 'barcode', 'policyNo', 'receiptNo'].includes(k) ? 'dir="ltr"' : ''} ${ro} aria-label="${esc(t('prb.' + k))}"></td>`;
+  const cell = k => `<td><input class="prb-cell${it.auto?.[k] && it.auto[k] !== it.row[k] ? ' prb-auto' : ''}" ${it.auto?.[k] && it.auto[k] !== it.row[k] ? `title="${esc(t('prb.autoFixed', { x: it.auto[k] }))}"` : ''} data-pi="${i}" data-pk="${k}" value="${esc(it.row[k] ?? '')}" ${PRB_DATES.has(k) ? 'type="date"' : PRB_MONEY.has(k) ? 'inputmode="decimal"' : ['prbNo', 'barcode', 'receiptNo'].includes(k) ? 'inputmode="numeric"' : ''} ${['plate', 'vin', 'engineNo', 'prbNo', 'barcode', 'policyNo', 'receiptNo'].includes(k) ? 'dir="ltr"' : ''} ${ro} aria-label="${esc(t('prb.' + k))}"></td>`;
   const aiTxt = it.ai === 'busy' || it.ai === 'wait' ? `<span class="spin sm"></span> ${t('prb.reading')}` : it.ai === 'err' ? esc(t('prb.aiFailed')) : '';
   return `<tr data-row="${i}" class="${it.state ? 'st-' + it.state : ''} ${it.skip ? 'skip' : ''}">
     <td>${i + 1}</td><td><input type="checkbox" data-pskip="${i}" ${it.skip ? 'checked' : ''} ${it.state === 'saved' ? 'disabled' : ''} aria-label="${esc(t('prb.skipRow'))}"></td>
@@ -2480,6 +2487,13 @@ function prbBatchChecks() {
       + c.errors.map(x => `<div class="prb-bad">✕ ${esc(prbChkText(x))}</div>`).join('')
       + c.warns.map(x => `<div class="prb-bad warn">! ${esc(prbChkText(x))}</div>`).join('')
       + (!c.errors.length && !c.warns.length && it.state !== 'failed' && it.ai !== 'busy' && it.ai !== 'wait' ? '<span class="prb-st ok">OK</span>' : '');
+    // v4.5.2: one-click suggestions: full policy number from the batch consensus, majority spelling of the insured
+    const others = PR.items.filter((x, j) => j !== i && !x.skip).map(x => x.row);
+    const sp = suggestPolicyNo(it.row, others), mn = majorityName(PR.items.map(x => x.skip ? '' : x.insured.name), i);
+    el.innerHTML += (it.auto?.policyNo && it.auto.policyNo !== it.row.policyNo ? `<div class="prb-autonote">${esc(t('prb.autoFixed', { x: it.auto.policyNo }))}</div>` : '')
+      + (sp ? `<button type="button" class="link prb-sug" data-act="prb-accept" data-i="${i}" data-k="policyNo" data-v="${esc(sp.value)}">${esc(t('prb.sugPolicy', { x: sp.value }))}</button>` : '')
+      + (mn ? `<button type="button" class="link prb-sug" data-act="prb-use-name" data-i="${i}" data-name="${esc(mn)}">${esc(t('prb.sugName', { x: mn }))}</button>` : '');
+    $(`[data-pi="${i}"][data-pk="ins_name"]`)?.classList.toggle('prb-diff', !!mn);
     if (sg) sg.innerHTML = prbSuggestHtml(it, i);
   });
   // rows of this batch that look like the same insured but are spelled differently: pick one spelling for all of them
@@ -2514,6 +2528,7 @@ async function prbAiQueue(session) {
         for (const [k, v] of Object.entries(m.insured)) if (v && !it.insured[k]) it.insured[k] = v;
         for (const [k, v] of Object.entries(m.row)) if (v && !it.row[k]) it.row[k] = v;
         it.n = n; it.ai = 'done';
+        prbAutoFix(session);
       } catch (e) { it.ai = 'err'; }
       if (PR === session && !session.cardOpen) prbBatchRedrawRow(i);
     }
@@ -2637,6 +2652,13 @@ async function prbDownload(id, share = false) {
 const EDIT_ACTS = new Set(['ae-file', 'ae-cust', 'ae-save', 'ae-undo', 'smart', 'veh-add', 'veh-edit', 'del-vehicle', 'mv-slot', 'share-link', 'share-stop', 'upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
 const ACT = {
   'prb-save-all': () => prbSaveAll(),
+  'prb-accept'(el) {
+    if (!PR) return;
+    const it = PR.items[+el.dataset.i]; if (!it || it.state === 'saved') return;
+    it.row[el.dataset.k] = el.dataset.v;
+    const inp = $(`[data-pi="${el.dataset.i}"][data-pk="${el.dataset.k}"]`); if (inp) inp.value = el.dataset.v;
+    prbBatchChecks();
+  },
   'prb-more'(el) { if (!PR) return; PR.index = +el.dataset.i; PR.cardOpen = true; prbReview(); },
   'prb-prev'() { if (!PR) return; prbReadForm(); PR.index = (PR.index - 1 + PR.items.length) % PR.items.length; prbReview(); },
   'prb-next'() { if (!PR) return; prbReadForm(); PR.index = (PR.index + 1) % PR.items.length; prbReview(); },
