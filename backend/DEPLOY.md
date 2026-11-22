@@ -171,7 +171,7 @@ and the existing backend regression tests.
 After deployment, use synthetic test documents to verify: upload/update, duplicate rejection, download,
 share/unshare, import preview and copy, and a PRB invoice with Thai text and saved-row totals. Check the rendered
 PDF in Drive; the local Docs mock checks content and cleanup but cannot verify Google's font/layout rendering.
-Trash only the test files when finished. Roll back the backend by selecting **Version 10** in the existing
+Trash only the test files when finished. Roll back the backend by selecting **Version 11** (v4.4.1) in the existing
 deployment; saved PRB files remain in Drive, while PRB actions require the v4.5 backend.
 
 ## AI usage log

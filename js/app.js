@@ -12,6 +12,8 @@ import { prepare, normalize, diff, fileNote, FIELD_GROUPS, DATE_FIELDS } from '.
 import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './validate.js';
 import { buildName, docNameFromOld, plateOnly, plateFromName, followsPattern, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
 import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey, needsAiRead, detectVehicles, aiEditSuggest } from './vehicles.js';
+import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup } from './prb.js';
+import { parseDate } from './dates.js';
 
 /*
  * Layout = the v2 design (dashboard with stat cards, dark customer panel with the purple case file,
@@ -55,6 +57,7 @@ const POLICY_TYPES = ['ชั้น 1', 'ชั้น 2+', 'ชั้น 2', '�
 
 /* ================= connect & load ================= */
 async function connect() {
+  resetPrb();
   S.store = null; S.gate = null;
   if (S.mode === 'local') {
     const l = new LocalStore();
@@ -228,6 +231,7 @@ const noFilters = () => ({ customer: '', type: '', period: '', q: '', status: ''
 const titleRow = (k, actions = '', sub = '') => `<section class="title-row"><div><h1>${t(k + '.title')}</h1><p>${sub || t(k + '.sub')}</p></div>${actions ? `<div class="title-actions" data-need="edit">${actions}</div>` : ''}</section>`;
 const addBtn = () => `<button class="btn primary" data-act="upload">${icon('plus')}<span>${t('btn.addFile')}</span></button>`;
 const VIEWS = {
+  prb: () => `${titleRow('prb', `<button class="btn ghost" data-act="prb-camera">${icon('camera')} ${t('btn.camera')}</button><button class="btn primary" data-act="prb-upload">${icon('plus')} ${t('btn.addFile')}</button>${isAdmin() ? `<button class="btn ghost" data-act="prb-import">${t('prb.import')}</button>` : ''}`)}<section id="prbView" aria-live="polite"></section>`,
   dash: () => `${titleRow('dash', `<button class="btn ghost" data-act="smart">${icon('wand')}<span>${t('su.btn')}</span></button><button class="btn ghost" data-act="new-customer">${icon('userplus')}<span>${t('btn.newCustomer')}</span></button>${addBtn()}`)}
     <section class="stats" id="stats"></section>
     <section class="filters" id="filters"></section>
@@ -266,6 +270,7 @@ function drawAll(anim) {
   syncChrome();
 }
 function drawResults(anim) {
+  if (S.view === 'prb') drawPrb();
   if (S.view === 'dash') drawPanel(anim);
   if (S.view === 'files') drawGrid();
   if (S.view === 'exp') drawExp();
@@ -769,6 +774,7 @@ const DOC_ACCEPT = 'image/*,application/pdf';
 
 /* ---------- "+" sheet ---------- */
 function addSheet() {
+  if (S.view === 'prb') return run(() => prbPick(false));
   const c = S.view === 'dash' ? cust(S.sel) : null;
   sheet({ title: t('add.title'), cls: 'small', body: `
     <div class="set-card"><div class="set-h">${icon('wand', 22)}<div><b>${t('su.btn')}</b><small>${aiOn() ? t('su.addSub') : (S.mode === 'local' ? t('ai.localOnly') : t('ai.off')) + ' ' + t('su.byHand')}</small></div></div>
@@ -1005,6 +1011,8 @@ function newVehFor(cid, v, ym) {
 }
 /** Customer, vehicle and folder of a row from the AI answer (only what the user did not choose) */
 function placeRow(it) {
+  if (U.smart && isPrbDoc(it.n) && it.prbRoute === undefined) it.prbRoute = true;
+  if (it.prbRoute) return;
   const v = it.n?.values || {};
   if (!it.picked.slot) { const s = slotFromAi(it.n); if (s) { it.slot = s; it.sconf = FILE_SLOTS.includes(it.n?.slot) ? 'high' : 'mid'; } }
   if (!it.picked.cid && !U.fixedCid) {
@@ -1031,7 +1039,7 @@ function placeRow(it) {
 /** Files dropped together usually belong to the same vehicle */
 function hintRows() {
   if (!U) return;
-  batchHint(U.items.map(it => { it.conf = rowConf(it); return it; }));
+  batchHint(U.items.filter(it => !it.prbRoute).map(it => { it.conf = rowConf(it); return it; }));
   for (const it of U.items) if (it.conf === 'hint') autoName(it);
 }
 
@@ -1086,7 +1094,7 @@ function aiErr(e) {
 function uploadDiff() {
   const best = {};
   for (const it of U.items) {
-    if (!it.n || !it.slot || it.done) continue;
+    if (!it.n || !it.slot || it.done || it.prbRoute) continue;
     const folder = it.slot === '5.2' ? 'prev' : it.slot === '5.4' ? 'pay' : 'policy';
     const v = rowVeh(it);
     if (v && !v.isNew) for (const d of diff(v, it.n, folder)) if (VFIELDS.includes(d.key) && d.key !== 'plate') {
@@ -1121,7 +1129,7 @@ const opt = (v, l, cur, extra = '') => `<option value="${esc(v)}" ${String(cur) 
 /** New customers / vehicles this upload would make: shown on top, each with its own "make it" box */
 function drawPending() {
   const el = $('#upNew'); if (!el) return;
-  const used = new Set(U.items.filter(x => !x.done).flatMap(x => [x.cid, x.vkey]));
+  const used = new Set(U.items.filter(x => !x.done && !x.prbRoute).flatMap(x => [x.cid, x.vkey]));
   const cs = Object.values(U.newCust).filter(n => used.has('C:' + n.key));
   const vs = Object.values(U.newVeh).filter(n => used.has('N:' + n.key));
   el.innerHTML = cs.length || vs.length ? `<section class="su-new">
@@ -1141,6 +1149,8 @@ function drawUpload() {
   const el = $('#upList'); if (!el || !U) return;
   drawPending();
   el.innerHTML = U.items.map((it, i) => {
+    const route = U.smart && isPrbDoc(it.n) ? `<label class="prb-route"><input type="checkbox" data-prb-route="${i}" ${it.prbRoute ? 'checked' : ''}>${t('prb.route')}</label>` : '';
+    if (it.prbRoute) return `<div class="up-row" data-i="${i}"><div class="up-main"><b>${esc(it.file.name)}</b>${route}<p>${t('prb.routeHint')}</p><p>${esc(rowFromAi(it.n).insured.name)}</p></div><button class="icon-btn" data-act="up-remove" aria-label="${t('u.remove')}">${icon('x')}</button></div>`;
     const c = rowCust(it), v = rowVeh(it), list = vehChoices(it.cid);
     const missing = !it.cid || !it.vkey || !it.slot;
     return `
@@ -1150,6 +1160,7 @@ function drawUpload() {
         <div class="up-top"><small class="su-file" title="${esc(it.file.name)}">${esc(it.file.name)} · ${fmtSize(it.file.size)}</small>${it.ai === 'done' || it.ai === 'err' || it.ai === 'skip' ? confChip(missing ? 'none' : it.conf) : ''}
           <button class="icon-btn sm" data-act="up-remove" aria-label="${t('u.remove')}">${icon('x', 15)}</button></div>
         ${aiLine(it)}
+        ${route}
         <div class="su-grid">
           ${U.fixedCid ? '' : `<label>${t('u.customer')}<select data-u="cid">${opt('', t('su.choose'), it.cid)}${S.customers.map(x => opt(x.id, x.name + (x.nick ? ` (${x.nick})` : ''), it.cid)).join('')}
             ${Object.values(U.newCust).map(n => opt('C:' + n.key, `${t('su.newCust')}: ${n.data.name}`, it.cid)).join('')}${opt('__new', '+ ' + t('su.newCust') + '…', '')}</select></label>`}
@@ -1190,7 +1201,9 @@ function rowPick(it, k, val) {
 
 async function doUpload(btn) {
   if (!U || U.busy) return;
-  const todo = U.items.filter(it => !it.done);
+  if (U.items.some(it => it.ai === 'busy' || it.ai === 'wait')) return toast(t('ai.reading'));
+  const prbItems = U.items.filter(it => !it.done && it.prbRoute).map(it => ({ file: it.file, ...rowFromAi(it.n) }));
+  const todo = U.items.filter(it => !it.done && !it.prbRoute);
   const missing = todo.find(it => !it.cid || !it.vkey || !it.slot);
   if (missing) { toast(t('su.pickAll'), 'err'); $(`.up-row[data-i="${U.items.indexOf(missing)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
   const nc = [...new Set(todo.map(it => it.cid).filter(x => x.startsWith('C:')))].map(k => U.newCust[k.slice(2)]);
@@ -1226,7 +1239,7 @@ async function doUpload(btn) {
       return v.id;
     };
     for (const [i, it] of u.items.entries()) {
-      if (it.done) continue;
+      if (it.done || it.prbRoute) continue;
       btn.textContent = t('su.making');
       const vid = await vehOfRow(it), cid = realCid(it.cid);
       let blob = it.file;
@@ -1265,6 +1278,7 @@ async function doUpload(btn) {
   }
   if (failed) throw failed;
   closeSheet();
+  if (prbItems.length) { S.view = 'prb'; mount(); return prbStart(prbItems); }
   toast(t('u.done', { n: done }));
   if (firstCid) openCustomer(firstCid, firstVid);
 }
@@ -2264,9 +2278,289 @@ const uploadSpot = cid => {
   return { cid, vid: v ? v.id : '', slot: v && FILE_SLOTS.includes(S.openSlot) ? S.openSlot : '' };
 };
 
+/* ================= compulsory motor insurance ================= */
+let P = null, PR = null;
+function resetPrb() {
+  P = { store: null, data: null, loading: false, error: false, insured: '', q: '', status: '', selected: new Set() };
+  PR = null;
+}
+resetPrb();
+async function loadPrb() {
+  const state = P, store = S.store;
+  if (!store) return;
+  if (state.loading) return state.pending;
+  state.loading = true; state.error = false;
+  state.pending = (async () => {
+    try {
+      const data = await store.prbList();
+      if (state !== P || store !== S.store) return;
+      state.data = data; state.store = store;
+      if (!data.insured.some(i => i.id === state.insured)) state.insured = data.insured[0]?.id || '';
+      state.selected = new Set([...state.selected].filter(id => data.rows.some(r => r.id === id && r.insuredId === state.insured)));
+    } catch (e) { if (state === P) { state.error = true; handleError(e); } }
+    finally { state.loading = false; if (state === P && S.view === 'prb' && !S.gate) drawPrb(); }
+  })();
+  return state.pending;
+}
+const prbButton = (act, label, id = '', cls = 'ghost') => `<button type="button" class="btn ${cls}" data-act="${act}" data-id="${esc(id)}">${esc(t(label))}</button>`;
+function prbRows() {
+  return sortRows((P.data?.rows || []).filter(r => r.insuredId === P.insured && (!P.status || prbStatus(r) === P.status) &&
+    (!P.q || norm([r.name, ...PRB_FIELDS.map(k => r[k])].join(' ')).includes(norm(P.q)))));
+}
+function prbTable(rows, selectable = false) {
+  const totals = prbTotals(rows), cols = ['prbNo', 'plate', 'model', 'vin', 'start', 'end', 'netPremium', 'stamps', 'vat', 'total'];
+  return `<div class="prb-wrap" tabindex="0" role="region" aria-label="${esc(t('prb.records'))}"><table class="prb-table"><thead><tr>${selectable ? `<th><input type="checkbox" data-prb-all aria-label="${esc(t('prb.selectAll'))}" ${rows.length && rows.every(r => P.selected.has(r.id)) ? 'checked' : ''} ${rows.length ? '' : 'disabled'}></th>` : ''}${cols.map(k => `<th scope="col">${esc(t('prb.' + k))}</th>`).join('')}<th scope="col">${t('prb.status')}</th></tr></thead><tbody>${rows.map((r, i) => `<tr>${selectable ? `<td><input type="checkbox" data-prb-select="${esc(r.id)}" aria-label="${esc(t('prb.select') + ' ' + (r.prbNo || r.plate || r.name))}" ${P.selected.has(r.id) ? 'checked' : ''}></td>` : ''}<td>${r.id ? `<button class="link prb-open" data-act="prb-open" data-id="${esc(r.id)}">${esc(r.prbNo || '—')}</button>` : esc(r.prbNo || '—')}</td><td>${esc(r.plate || '—')}</td><td>${esc(r.model || r.brand || '—')}</td><td><bdi dir="ltr">${esc(r.vin || '—')}</bdi></td><td>${esc(fmtDay(r.start))}</td><td>${esc(fmtDay(r.end))}</td>${['net', 'stamps', 'vat', 'total'].map(k => `<td class="r">${baht(totals.lines[i][k])}</td>`).join('')}<td>${stPill(prbStatus(r))}</td></tr>`).join('')}</tbody><tfoot><tr><td colspan="${selectable ? 7 : 6}">${t('prb.total')} (${num(rows.length)})</td>${['net', 'stamps', 'vat', 'total'].map(k => `<td class="r">${baht(totals[k])}</td>`).join('')}<td></td></tr></tfoot></table></div>`;
+}
+function drawPrb() {
+  const el = $('#prbView'); if (!el) return;
+  if (P.store && P.store !== S.store) resetPrb();
+  if (!P.data) {
+    el.innerHTML = `<div class="set-card">${P.error ? `${t('prb.loadError')} ${prbButton('prb-refresh', 'prb.retry')}` : `<span class="spin sm"></span> ${t('team.loading')}`}</div>`;
+    if (!P.loading && !P.error) loadPrb();
+    return;
+  }
+  const d = P.data, ins = d.insured.find(i => i.id === P.insured), rows = prbRows();
+  const invoices = d.invoices.filter(i => i.insuredId === P.insured);
+  el.innerHTML = `<div class="prb-layout"><aside class="panel prb-insured"><h2>${t('prb.insured')}</h2>${d.insured.map(i => `<button class="prb-ins ${P.insured === i.id ? 'on' : ''}" data-act="prb-insured" data-id="${esc(i.id)}" aria-pressed="${P.insured === i.id}"><span>${esc(i.name)}</span><small>${num(d.rows.filter(r => r.insuredId === i.id).length)}</small></button>`).join('') || `<p>${t('prb.empty')}</p>`}</aside><section class="prb-detail"><div class="prb-toolbar"><div><h2>${esc(ins?.name || t('prb.title'))}</h2><p>${esc([ins?.taxId, ins?.address].filter(Boolean).join(' · '))}</p></div>${prbButton('prb-refresh', 'prb.refresh')}</div><div class="prb-toolbar"><label class="f grow"><span class="sr-only">${t('prb.search')}</span><input type="search" id="prbSearch" value="${esc(P.q)}" placeholder="${esc(t('prb.search'))}"></label><label class="f"><span class="sr-only">${t('prb.status')}</span><select id="prbStatus"><option value="">${t('f.allStatus')}</option>${['active', 'soon', 'expired', 'none'].map(st => `<option value="${st}" ${P.status === st ? 'selected' : ''}>${t('st.' + st)}</option>`).join('')}</select></label></div><div id="prbRows">${prbTable(rows, canEdit())}</div><div class="prb-toolbar" id="prbSelection">${prbSelection()}</div>${!rows.length ? `<p class="set-card">${t(d.rows.length ? 'prb.noMatch' : 'prb.empty')}</p>` : ''}<h3>${t('nav.invoices')}</h3><div class="prb-invoices">${invoices.map(i => `<button class="btn ghost" data-act="prb-invoice-open" data-id="${esc(i.id)}">${esc(i.no)} · ${baht(i.t?.total || 0)}</button>`).join('') || `<p>${t('prb.noInvoices')}</p>`}</div></section></div>`;
+}
+function prbSelection() {
+  return canEdit() ? `<span>${t('prb.selected', { n: P.selected.size })}</span><button class="btn primary" data-act="prb-invoice" ${P.selected.size ? '' : 'disabled'}>${t('inv.create')}</button>${prbButton('prb-clear', 'f.clear')}` : '';
+}
+async function prbPick(camera) {
+  if (!canEdit() || !S.store) return;
+  const files = await pickFiles({ capture: camera, accept: DOC_ACCEPT, multiple: !camera });
+  if (files.length) await prbStart(files.map(file => ({ file })));
+}
+async function prbStart(items) {
+  if (!canEdit() || !S.store || !items.length) return;
+  if (!P.data) await loadPrb();
+  if (!P.data) return;
+  PR = { items, index: 0, store: S.store, busy: false };
+  prbReview();
+}
+function prbCurrent() { return PR?.items[PR.index]; }
+const PRB_DATES = new Set(['contractDate', 'issueDate', 'start', 'end']);
+const PRB_MONEY = new Set(['netPremium', 'discount', 'stamps', 'vat', 'total']);
+function prbReview() {
+  const it = prbCurrent(); if (!it) { PR = null; closeSheet(); drawPrb(); return; }
+  it.insured ||= { name: '', taxId: '', address: '' };
+  it.row ||= {};
+  const source = it.file || it.source;
+  sheet({ title: t('prb.review'), sub: `${PR.index + 1} / ${PR.items.length} · ${esc(source?.name || it.existing?.name || '')}`, cls: 'xwide',
+    body: `<form id="prbForm" class="form" data-form="prb"><div class="prb-toolbar">${!it.existing && aiOn() ? prbButton('prb-ai', 'prb.readAi') : ''}${!it.existing ? `<p>${t('prb.reviewHint')}</p>` : ''}${source || it.existing ? prbButton('prb-source', 'prb.preview') : ''}</div><p id="prbMessage" role="status">${esc(it.message || '')}</p><div class="prb-form">${['name', 'taxId', 'address'].map(k => `<label class="field"><span>${t('prb.ins.' + k)}</span><input name="ins_${k}" value="${esc(it.insured[k] || '')}" ${k === 'name' ? 'required' : ''} ${it.existing ? 'readonly' : ''}></label>`).join('')}${PRB_FIELDS.map(k => `<label class="field"><span>${t('prb.' + k)}</span><input name="${k}" value="${esc(it.row[k] ?? '')}" ${PRB_DATES.has(k) ? `placeholder="${esc(t('prb.dateHint'))}"` : ''} ${PRB_MONEY.has(k) ? 'inputmode="decimal"' : ['prbNo', 'barcode'].includes(k) ? 'inputmode="numeric"' : ''}></label>`).join('')}</div><p id="prbWarning" class="prb-warn" hidden></p><p id="prbFilename" class="prb-filename"></p><div id="prbPreview"></div></form>`,
+    foot: `${prbButton('prb-skip', PR.items.length > 1 ? 'prb.skip' : 'btn.cancel')}<span class="sp"></span><button class="btn primary" type="submit" form="prbForm">${t('btn.save')}</button>` });
+  sheetClose = () => { PR = null; };
+  prbReviewHint();
+}
+function prbReadForm() {
+  const it = prbCurrent(), form = $('#prbForm'); if (!it || !form) return;
+  const fields = new FormData(form);
+  for (const k of ['name', 'taxId', 'address']) it.insured[k] = String(fields.get('ins_' + k) || '').trim();
+  for (const k of PRB_FIELDS) it.row[k] = String(fields.get(k) || '').trim();
+  return it;
+}
+function prbReviewHint() {
+  const it = prbReadForm(); if (!it) return;
+  const check = vatCheck(it.row), warning = $('#prbWarning');
+  const duplicate = findDup(it.row, P.data.rows, it.existing?.id);
+  warning.hidden = check.ok !== false && !duplicate;
+  warning.textContent = [check.ok === false ? t('su.prbBad', { v: baht(check.vatExpected), t: baht(check.totalExpected) }) : '', duplicate ? t('prb.duplicate', { x: duplicate.name }) : ''].filter(Boolean).join(' ');
+  $('#prbFilename').textContent = it.existing?.name || prbFileName(it.row, it.insured.name, extOf((it.file || it.source)?.name || 'document.pdf'));
+}
+function prbBusy(on) {
+  if (PR) PR.busy = on;
+  for (const el of $$('#sheet-root button, #prbForm input')) el.disabled = on;
+}
+async function prbReadAi() {
+  const session = PR, it = prbReadForm(); if (!it || session.busy || !aiOn()) return;
+  prbBusy(true); $('#prbMessage').textContent = t('team.loading');
+  try {
+    const blob = it.file || await session.store.getBlob(it.source.id);
+    const file = it.file || new File([blob], it.source.name, { type: it.source.mime || blob.type });
+    const n = normalize(await session.store.aiExtract(await prepare([file])));
+    if (PR !== session || S.store !== session.store) return;
+    const mapped = rowFromAi(n);
+    for (const [k, v] of Object.entries(mapped.insured)) if (v) it.insured[k] = v;
+    for (const [k, v] of Object.entries(mapped.row)) if (v) it.row[k] = v;
+    it.message = t(isPrbDoc(n) ? 'prb.aiReview' : 'prb.notPrb');
+  } catch (e) { if (PR === session) it.message = t('prb.aiFailed'); handleError(e); }
+  finally { if (PR === session) { session.busy = false; prbReview(); } }
+}
+function prbValidate(it) {
+  if (!it.insured.name.trim()) throw new Error(t('prb.needName'));
+  for (const k of PRB_DATES) if (it.row[k]) {
+    const value = parseDate(it.row[k]); if (!value) throw new Error(t('prb.badField', { x: t('prb.' + k) }));
+    it.row[k] = value;
+  }
+  if (it.row.start && it.row.end && it.row.end <= it.row.start) throw new Error(t('prb.badPeriod'));
+  for (const k of PRB_MONEY) if (it.row[k]) {
+    const value = money(it.row[k]);
+    if (value == null || !Number.isFinite(value) || value < 0) throw new Error(t('prb.badField', { x: t('prb.' + k) }));
+    it.row[k] = String(value);
+  }
+  for (const k of ['prbNo', 'barcode']) if (it.row[k]) {
+    const value = latinDigits(it.row[k]).replace(/\s/g, '');
+    if (!/^\d+$/.test(value)) throw new Error(t('prb.badField', { x: t('prb.' + k) }));
+    it.row[k] = value;
+  }
+  const dup = findDup(it.row, P.data.rows, it.existing?.id);
+  if (dup) throw new Error(t('prb.duplicate', { x: dup.name }));
+}
+async function prbSave() {
+  const session = PR, it = prbReadForm();
+  if (!it || session.busy || !canEdit() || session.store !== S.store) return;
+  prbValidate(it);
+  const source = it.file || it.source;
+  if (it.file && it.file.size > MAX_UPLOAD_MB * 1048576) throw new Error(t('err.tooBig'));
+  const name = source && prbFileName(it.row, it.insured.name, extOf(source.name));
+  prbBusy(true);
+  try {
+    let result;
+    if (it.existing) result = { row: await session.store.prbUpdate(it.existing.id, it.row) };
+    else if (it.source) {
+      if (!isAdmin()) throw new Error(t('err.role'));
+      const imported = await session.store.prbImport([{ id: it.source.id, insured: it.insured, row: it.row, name }]);
+      if (!imported.done.length) throw new Error(t('prb.importSkipped', { x: imported.skipped[0]?.why || '' }));
+      result = imported.done[0];
+    } else {
+      // photos compressed like normal uploads; a PDF without a browser type is still sent as a PDF
+      const blob = compressible(it.file) ? await compressImage(it.file) : it.file;
+      const mime = blob.type || (/\.pdf$/i.test(it.file.name) ? 'application/pdf' : '');
+      result = await session.store.prbUpload(blob, it.insured, it.row, { name: saveName(name, it.file, blob), orig: it.file.name, mime });
+    }
+    if (session.store !== S.store) return;
+    // Advance before refreshing: a failed refresh must never upload the same file twice.
+    session.index++; P.insured = result.row.insuredId; P.selected.clear();
+    const previous = P.data.rows.findIndex(r => r.id === result.row.id);
+    if (previous >= 0) P.data.rows[previous] = result.row; else P.data.rows.push(result.row);
+    if (!P.data.insured.some(i => i.id === result.row.insuredId)) P.data.insured.push(result.insured || { ...it.insured, id: result.row.insuredId });
+    await loadPrb();
+    toast(t('t.saved')); if (PR === session) prbReview();
+  } finally { if (PR === session) prbBusy(false); }
+}
+async function prbPreviewSource() {
+  const session = PR, it = prbReadForm(); if (!it) return;
+  const blob = it.file || (it.source ? await session.store.getBlob(it.source.id) : await session.store.prbGetBlob(it.existing.id));
+  if (PR !== session || !$('#prbPreview')) return;
+  prbPreviewHtml(blob, $('#prbPreview'));
+}
+function prbPreviewHtml(blob, el) {
+  if (!blob) { el.textContent = t('fl.noContent'); return; }
+  const url = objUrl(blob);
+  el.innerHTML = blob.type === 'application/pdf' ? `<iframe class="prb-preview" title="${esc(t('prb.preview'))}" src="${url}"></iframe>` : /^image\/(png|jpeg|webp|gif|avif|bmp)$/.test(blob.type) ? `<img class="prb-preview" alt="${esc(t('prb.preview'))}" src="${url}">` : `<p>${t('fl.noPreview')}</p>`;
+}
+async function prbOpen(id) {
+  const row = P.data.rows.find(r => r.id === id); if (!row) return;
+  const ins = P.data.insured.find(i => i.id === row.insuredId);
+  sheet({ title: esc(row.name), sub: esc(ins?.name || ''), cls: 'xwide', body: `${prbTable([row])}<dl class="prb-facts">${PRB_FIELDS.filter(k => row[k]).map(k => `<div><dt>${t('prb.' + k)}</dt><dd>${esc(PRB_DATES.has(k) ? fmtDay(row[k]) : row[k])}</dd></div>`).join('')}</dl><div id="prbFilePreview"><span class="spin sm"></span></div>`, foot: `${prbButton('prb-download', 'fl.download', id)}${prbButton('prb-send', 'fl.share', id)}${canEdit() ? `${prbButton('prb-edit', 'prb.edit', id)}${S.mode === 'cloud' ? prbButton(row.shared ? 'prb-unshare' : 'prb-share', row.shared ? 'prb.unshare' : 'prb.share', id) : ''}${prbButton('prb-delete', 'btn.delete', id, 'danger')}` : ''}` });
+  const target = $('#prbFilePreview'), store = S.store;
+  const blob = await store.prbGetBlob(id);
+  if (target.isConnected && store === S.store) prbPreviewHtml(blob, target);
+}
+async function prbImportSheet() {
+  if (!isAdmin()) return toast(t('err.role'), 'err');
+  const store = S.store;
+  sheet({ title: t('prb.import'), body: `<p id="prbImportLoading">${t('team.loading')}</p>` });
+  const marker = $('#prbImportLoading'), list = await store.prbImportPlan();
+  if (!marker.isConnected || store !== S.store) return;
+  sheet({ title: t('prb.import'), sub: t('prb.importHint'), cls: 'wide', body: `<div class="prb-import-list">${list.map((r, i) => `<label class="prb-import-row"><input type="checkbox" data-prb-import="${i}" ${r.imported ? 'disabled' : ''}><span><b>${esc(r.name)}</b><small>${esc(r.customer)} · ${esc(r.plate)} ${r.imported ? '· ' + t('prb.imported') : ''}</small></span></label>`).join('') || `<p>${t('prb.noImport')}</p>`}</div>`, foot: prbButton('prb-import-review', 'prb.review') });
+  P.importPlan = list;
+}
+function prbInvoiceSheet() {
+  const rows = sortRows(P.data.rows.filter(r => r.insuredId === P.insured && P.selected.has(r.id)));
+  if (!canEdit() || !rows.length) return;
+  sheet({ title: t('inv.create'), sub: esc(P.data.insured.find(i => i.id === P.insured)?.name || ''), cls: 'xwide', body: `<form id="prbInvoiceForm" class="form" data-form="prb-invoice">${prbTable(rows)}<div class="prb-form"><label class="field"><span>${t('prb.issueDate')}</span><input name="issue" type="date" value="${todayIso()}" required></label><label class="field"><span>${t('prb.due')}</span><input name="due" type="date"></label><label class="field"><span>${t('set.lang')}</span><select name="lang"><option value="both">ไทย / English</option><option value="th">ไทย</option><option value="en">English</option></select></label><label class="field"><span>${t('prb.note')}</span><input name="notes" maxlength="500"></label></div></form>`, foot: `<button class="btn primary" type="submit" form="prbInvoiceForm">${t('inv.create')}</button>` });
+}
+async function prbCreateInvoice(form) {
+  if (!canEdit() || form.dataset.busy) return;
+  const req = Object.fromEntries(new FormData(form));
+  req.issue = parseDate(req.issue); req.due = req.due ? parseDate(req.due) : '';
+  if (!req.issue || (req.due && req.due < req.issue)) throw new Error(t('prb.badPeriod'));
+  const state = P, store = S.store;
+  req.insuredId = state.insured; req.rowIds = sortRows(state.data.rows.filter(r => r.insuredId === state.insured && state.selected.has(r.id))).map(r => r.id); req.dateFmt = dfmt();
+  if (!req.rowIds.length) return;
+  form.dataset.busy = '1'; const btn = $('[form="prbInvoiceForm"]'); btn.disabled = true;
+  try {
+    const inv = await store.prbInvoice(req);
+    if (state !== P || store !== S.store) return;
+    state.selected.clear(); state.data.invoices.push(inv);
+    closeSheet(); await loadPrb(); prbInvoiceOpen(inv.id);
+  } finally { delete form.dataset.busy; if (btn.isConnected) btn.disabled = false; }
+}
+/** Invoice lines only: PRB no., plate, model, net premium, stamps, VAT, total + grand total (saved invoice values) */
+function prbInvTable(inv) {
+  const m = ['net', 'stamps', 'vat', 'total'], hd = ['prbNo', 'plate', 'model', 'netPremium', 'stamps', 'vat', 'total'];
+  return `<div class="prb-wrap"><table class="prb-table"><thead><tr>${hd.map((k, i) => `<th scope="col" ${i > 2 ? 'class="r"' : ''}>${esc(t('prb.' + k))}</th>`).join('')}</tr></thead><tbody>${(inv.lines || []).map(l => `<tr><td>${esc(l.prbNo || '—')}</td><td><bdi dir="ltr">${esc(l.plate || '—')}</bdi></td><td>${esc(l.model || '—')}</td>${m.map(k => `<td class="r">${baht(l[k] || 0)}</td>`).join('')}</tr>`).join('')}</tbody><tfoot><tr><td colspan="3">${t('prb.total')} (${num((inv.lines || []).length)})</td>${m.map(k => `<td class="r">${baht(inv.t?.[k] || 0)}</td>`).join('')}</tr></tfoot></table></div>`;
+}
+function prbInvoiceOpen(id) {
+  const inv = P.data.invoices.find(i => i.id === id); if (!inv) return;
+  const body = `<div id="prbInvoicePrint"><h2>${esc(S.company?.name || 'RICH INSURANS')}</h2><h3>${esc(inv.no)}</h3><p>${esc(inv.cust.name)}<br>${esc(inv.cust.taxId || '')}<br>${esc(inv.cust.address || '')}</p><p>${t('prb.issueDate')}: ${esc(fmtDay(inv.issue))}${inv.due ? ' · ' + t('prb.due') + ': ' + esc(fmtDay(inv.due)) : ''}</p>${prbInvTable(inv)}<p>${esc(inv.notes || '')}</p></div>`;
+  sheet({ title: esc(inv.no), cls: 'xwide', body, foot: S.mode === 'cloud' ? `${prbButton('prb-download', 'fl.download', id)}${prbButton('prb-send', 'fl.share', id)}` : prbButton('prb-print', 'prb.print') });
+}
+async function prbDownload(id, share = false) {
+  const row = P.data.rows.find(r => r.id === id) || P.data.invoices.find(r => r.id === id); if (!row) return;
+  const blob = await S.store.prbGetBlob(id);
+  if (!blob) throw new Error(t('fl.noContent'));
+  if (share) await shareBlob(blob, row.fileName || row.name); else download(blob, row.fileName || row.name);
+}
+
 /* ================= actions ================= */
 const EDIT_ACTS = new Set(['ae-file', 'ae-cust', 'ae-save', 'ae-undo', 'smart', 'veh-add', 'veh-edit', 'del-vehicle', 'mv-slot', 'share-link', 'share-stop', 'upload', 'camera', 'add-file', 'do-upload', 'up-more', 'new-customer', 'edit-customer', 'del-file', 'del-customer', 'as-new', 'ai-new', 'up-ai-retry', 'new-invoice', 'inv-save', 'inv-paid', 'inv-edit', 'dup-update', 'dup-apply', 'dup-create', 'pick-customer', 'add']);
 const ACT = {
+  'prb-refresh': async () => { await loadPrb(); },
+  'prb-insured'(el) { P.insured = el.dataset.id; P.selected.clear(); drawPrb(); },
+  'prb-clear'() { P.selected.clear(); drawPrb(); },
+  'prb-upload': () => prbPick(false),
+  'prb-camera': () => prbPick(true),
+  'prb-ai': prbReadAi,
+  'prb-source': prbPreviewSource,
+  'prb-skip'() { if (PR && !PR.busy) { PR.index++; prbReview(); } },
+  'prb-open': el => prbOpen(el.dataset.id),
+  'prb-download': el => prbDownload(el.dataset.id),
+  'prb-send': el => prbDownload(el.dataset.id, true),
+  'prb-edit'(el) {
+    if (!canEdit()) return;
+    const row = P.data.rows.find(r => r.id === el.dataset.id); if (!row) return;
+    return prbStart([{ existing: row, row: { ...row }, insured: { ...P.data.insured.find(i => i.id === row.insuredId) } }]);
+  },
+  async 'prb-delete'(el) {
+    if (!canEdit()) return;
+    const state = P, store = S.store, row = state.data.rows.find(r => r.id === el.dataset.id); if (!row) return;
+    if (!await confirmBox(esc(t('del.file', { x: row.name }) + t(S.mode === 'cloud' ? 'del.drive' : 'del.local')))) return;
+    if (store !== S.store || !canEdit()) return;
+    await store.prbDelete(row.id); if (state !== P) return;
+    state.selected.delete(row.id); await loadPrb();
+  },
+  async 'prb-share'(el) {
+    if (!canEdit() || S.mode !== 'cloud') return;
+    const store = S.store, id = el.dataset.id;
+    if (!await confirmBox(esc(t('prb.shareHint')), t('prb.share'), false)) return;
+    if (store !== S.store || !canEdit()) return;
+    const result = await store.prbShare(id); await loadPrb();
+    sheet({ title: t('prb.share'), body: `<div class="form"><label><span>${t('prb.shareHint')}</span><input id="prbShareLink" readonly value="${esc(result.link)}" dir="ltr"></label></div>`, foot: prbButton('prb-copy-link', 'prb.copy') });
+  },
+  async 'prb-copy-link'() {
+    const input = $('#prbShareLink'); if (!input) return;
+    input.select(); input.setSelectionRange(0, input.value.length);
+    try { await navigator.clipboard.writeText(input.value); toast(t('prb.copied')); }
+    catch { toast(t('prb.copyManual')); }
+  },
+  async 'prb-unshare'(el) { if (!canEdit()) return; await S.store.prbUnshare(el.dataset.id); await loadPrb(); await prbOpen(el.dataset.id); },
+  'prb-import': prbImportSheet,
+  'prb-import-review'() {
+    if (!isAdmin()) return;
+    const items = $$('[data-prb-import]:checked').map(el => ({ source: P.importPlan[+el.dataset.prbImport] }));
+    if (items.length) return prbStart(items);
+    toast(t('prb.pickImport'));
+  },
+  'prb-invoice': prbInvoiceSheet,
+  'prb-invoice-open': el => prbInvoiceOpen(el.dataset.id),
+  'prb-print'() {
+    const source = $('#prbInvoicePrint'); if (!source) return;
+    const root = $('#print-root'); root.innerHTML = source.outerHTML;
+    document.body.classList.add('printing');
+    window.print(); document.body.classList.remove('printing'); root.innerHTML = '';
+  },
   go(el) { S.view = el.dataset.view; S.mobileDetail = false; closeSheet(); mount(); scrollTo({ top: 0, behavior: 'smooth' }); },
   'close-sheet': closeSheet,
   'close-overlay'(el, e) { if (e.target === el) closeSheet(); },
@@ -2487,6 +2781,8 @@ document.addEventListener('submit', e => {
   const kind = form.dataset.form;
   const btn = $(`[form="${form.id}"]`) || form.querySelector('.btn.primary');
   run(async () => {
+    if (kind === 'prb') return prbSave();
+    if (kind === 'prb-invoice') return prbCreateInvoice(form);
     if (kind === 'unlock') {
       const pin = form.pin.value;
       if (!pin) return;
@@ -2546,6 +2842,11 @@ document.addEventListener('submit', e => {
 let qT;
 document.addEventListener('input', e => {
   const el = e.target;
+  if (el.closest('#prbForm')) { prbReviewHint(); return; }
+  if (el.id === 'prbSearch') {
+    P.q = el.value; $('#prbRows').innerHTML = prbTable(prbRows(), canEdit()); return;
+  }
+  if (el.id === 'prbStatus') { P.status = el.value; drawPrb(); return; }
   if (el.id === 'langSel') changeLang(el.value);
   else if (el.dataset.teamRole) run(async () => { drawTeam(await S.store.aclSet(el.dataset.teamRole, el.value)); toast(t('team.changed')); });
   else if (el.dataset.f) {
@@ -2597,6 +2898,18 @@ document.addEventListener('input', e => {
 });
 // checkboxes fire "change" (not always "input") in older Safari
 document.addEventListener('change', e => {
+  if (e.target.hasAttribute('data-prb-route') && U && !U.busy) {
+    const it = U.items[+e.target.dataset.prbRoute];
+    it.prbRoute = e.target.checked; if (!it.prbRoute) placeRow(it);
+    hintRows(); drawUpload(); return;
+  }
+  if (e.target.matches('[data-prb-select], [data-prb-all]')) {
+    if (!canEdit()) return;
+    const ids = e.target.hasAttribute('data-prb-all') ? prbRows().map(r => r.id) : [e.target.dataset.prbSelect];
+    for (const id of ids) { if (e.target.checked) P.selected.add(id); else P.selected.delete(id); }
+    $('#prbRows').innerHTML = prbTable(prbRows(), true);
+    $('#prbSelection').innerHTML = prbSelection(); return;
+  }
   const el = e.target;
   if (el.dataset.nvF && U) { drawUpload(); return; }   // a new vehicle's plate or month: month column and names
   if (el.type !== 'checkbox') return;
@@ -2635,6 +2948,7 @@ addEventListener('drop', e => {
   if (!hasFiles(e)) return;
   e.preventDefault(); dragN = 0; $('#drop').classList.remove('on');
   if (U || $('#sheet-root .overlay')) return;
+  if (S.view === 'prb') return run(() => prbStart([...e.dataTransfer.files].map(file => ({ file }))));
   const dc = e.target.closest?.('[data-customer]');
   // dropped on a case file: that customer (and the vehicle / folder it was dropped on); anywhere else: Smart upload
   if (!dc) return run(() => startUpload(e.dataTransfer.files, { smart: true }));
@@ -2645,6 +2959,7 @@ addEventListener('drop', e => {
 addEventListener('paste', e => {
   const f = e.clipboardData?.files;
   if (!f?.length || !canEdit() || S.gate || e.target.closest('input,textarea') || $('#sheet-root .overlay')) return;
+  if (S.view === 'prb') { e.preventDefault(); return run(() => prbStart([...f].map(file => ({ file })))); }
   const cid = uploadTarget();
   e.preventDefault(); run(() => startUpload(f, cust(cid) ? uploadSpot(cid) : { smart: true }));
 });
