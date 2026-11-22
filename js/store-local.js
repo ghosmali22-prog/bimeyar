@@ -4,6 +4,7 @@ import { calcTotals } from './invoice.js';
 import { uniqueIn, extOf, withExt } from './naming.js';
 import { VFIELDS, VSLOTS, plateKey, ymForVehicle } from './vehicles.js';
 import { FOLDERS } from './config.js';
+import { PRB_FIELDS, prbTotals, findDup } from './prb.js';
 
 const ALL_SLOTS = Object.fromEntries(VSLOTS.map(s => [s.id, 1]));
 const nowIso = () => new Date().toISOString();
@@ -302,5 +303,154 @@ export class LocalStore {
     x.t = calcTotals(x.items, x.discount, x.vat, x.paid); x.status = x.t.status; x.updatedAt = new Date().toISOString();
     await rq(this.s('invoices', 'readwrite').put(x));
     return x;
+  }
+
+  /* ---- พ.ร.บ. section (v4.5) in demo mode ---- */
+  _prbLoad() {
+    try {
+      const d = JSON.parse(localStorage.getItem('by_prb') || '{}') || {};
+      return { insured: Array.isArray(d.insured) ? d.insured : [], rows: Array.isArray(d.rows) ? d.rows : [], invoices: Array.isArray(d.invoices) ? d.invoices : [] };
+    } catch { return { insured: [], rows: [], invoices: [] }; }
+  }
+  _prbSave(d) { try { localStorage.setItem('by_prb', JSON.stringify(d)); } catch { } }
+  _prbEnsureInsured(d, insured = {}) {
+    const clean = s => String(s == null ? '' : s).replace(/[\/\\:*?"<>|\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim();
+    const name = clean(insured.name) || 'ลูกค้า';
+    let ins = d.insured.find(x => clean(x.name) === name);
+    if (!ins) { ins = { id: uid(), name, taxId: '', address: '', createdAt: nowIso() }; d.insured.push(ins); }
+    if (insured.taxId) ins.taxId = String(insured.taxId).trim();
+    if (insured.address) ins.address = String(insured.address).trim();
+    return ins;
+  }
+  async prbList() {
+    const d = this._prbLoad();
+    return { root: d.insured.length || d.rows.length ? 'local' : '', insured: d.insured, rows: d.rows, invoices: d.invoices };
+  }
+  async prbUpload(blob, insured, row, meta = {}, onProgress) {
+    const d = this._prbLoad();
+    const dup = findDup(row, d.rows);
+    if (dup) throw Object.assign(new Error(dup.name || 'duplicate'), { code: 'duplicate' });
+    const ins = this._prbEnsureInsured(d, insured);
+    const taken = new Set(d.rows.filter(r => r.insuredId === ins.id).map(r => r.name));
+    const name = uniqueIn(String(meta.name || 'prb.pdf').trim(), taken);
+    const clean = {};
+    for (const k of PRB_FIELDS) clean[k] = String(row?.[k] ?? '').trim();
+    const r = {
+      id: uid(), insuredId: ins.id, name, mime: meta.mime || blob?.type || 'application/octet-stream',
+      size: blob?.size || 0, createdAt: nowIso(), by: 'demo', shared: false, src: '', ...clean,
+    };
+    if (blob && this.db) await rq(this.s('blobs', 'readwrite').put(blob, r.id));
+    d.rows.push(r);
+    this._prbSave(d);
+    onProgress?.(1);
+    return { insured: ins, row: r };
+  }
+  async prbUpdate(id, row) {
+    const d = this._prbLoad(), cur = d.rows.find(x => x.id === id);
+    if (!cur) throw Object.assign(new Error('not_found'), { code: 'not_found' });
+    const next = { ...cur };
+    for (const k of PRB_FIELDS) if (row?.[k] !== undefined) next[k] = String(row[k] ?? '').trim();
+    const dup = findDup(next, d.rows, id);
+    if (dup) throw Object.assign(new Error(dup.name || 'duplicate'), { code: 'duplicate' });
+    Object.assign(cur, next);
+    this._prbSave(d);
+    return cur;
+  }
+  prbGetBlob(id) { return rq(this.s('blobs').get(id)); }
+  async prbShare(id) {
+    const d = this._prbLoad(), r = d.rows.find(x => x.id === id);
+    if (!r) throw Object.assign(new Error('not_found'), { code: 'not_found' });
+    r.shared = true;
+    this._prbSave(d);
+    return { row: r, link: `local://${id}` };
+  }
+  async prbUnshare(id) {
+    const d = this._prbLoad(), r = d.rows.find(x => x.id === id);
+    if (!r) throw Object.assign(new Error('not_found'), { code: 'not_found' });
+    r.shared = false;
+    this._prbSave(d);
+    return r;
+  }
+  async prbDelete(id) {
+    const d = this._prbLoad();
+    d.rows = d.rows.filter(x => x.id !== id);
+    d.invoices = d.invoices.filter(x => x.id !== id);
+    this._prbSave(d);
+    if (this.db) await rq(this.s('blobs', 'readwrite').delete(id));
+    return true;
+  }
+  async prbImportPlan() {
+    const { customers, files, vehicles } = await this.loadAll();
+    const d = this._prbLoad();
+    const cs = Object.fromEntries(customers.map(c => [c.id, c]));
+    const vs = Object.fromEntries(vehicles.map(v => [v.id, v]));
+    const bySrc = Object.fromEntries(d.rows.filter(r => r.src).map(r => [r.src, r.id]));
+    return files.filter(f => f.vslot === '3').map(f => {
+      const c = cs[f.customerId], v = vs[f.vehicleId];
+      return {
+        id: f.id, name: f.name, mime: f.mime || '', size: f.size || 0,
+        customerId: f.customerId || '', customer: c?.name || '',
+        vehicleId: f.vehicleId || '', plate: v?.plate || '', ym: v?.ym || '',
+        imported: bySrc[f.id] || '',
+      };
+    });
+  }
+  async prbImport(items = []) {
+    const d = this._prbLoad(), done = [], skipped = [];
+    for (const it of items.slice(0, 20)) {
+      const f = this.db ? await rq(this.s('files').get(it.id)) : null;
+      if (!f) { skipped.push({ id: it.id, why: 'not_found' }); continue; }
+      if (d.rows.some(r => r.src === it.id)) { skipped.push({ id: it.id, why: 'already_imported' }); continue; }
+      const dup = findDup(it.row, d.rows);
+      if (dup) { skipped.push({ id: it.id, why: 'duplicate' }); continue; }
+      const ins = this._prbEnsureInsured(d, it.insured);
+      const taken = new Set(d.rows.filter(r => r.insuredId === ins.id).map(r => r.name));
+      const name = uniqueIn(withExt(String(it.name || f.name).trim(), extOf(f.name)), taken);
+      const clean = {};
+      for (const k of PRB_FIELDS) clean[k] = String(it.row?.[k] ?? '').trim();
+      const r = {
+        id: uid(), insuredId: ins.id, name, mime: f.mime || 'application/octet-stream',
+        size: f.size || 0, createdAt: nowIso(), by: 'demo', shared: false, src: f.id, ...clean,
+      };
+      if (this.db) {
+        const blob = await rq(this.s('blobs').get(f.id));
+        if (blob) await rq(this.s('blobs', 'readwrite').put(blob.slice(0, blob.size, blob.type), r.id));
+      }
+      d.rows.push(r);
+      done.push({ id: it.id, row: r });
+    }
+    this._prbSave(d);
+    return { done, skipped };
+  }
+  async prbInvoice(req = {}) {
+    const d = this._prbLoad(), ins = d.insured.find(x => x.id === req.insuredId);
+    if (!ins) throw Object.assign(new Error('not_found'), { code: 'not_found' });
+    const picked = (req.rowIds || []).map(id => d.rows.find(r => r.id === id && r.insuredId === ins.id)).filter(Boolean);
+    if (!picked.length || picked.length !== (req.rowIds || []).length) throw Object.assign(new Error('not_found'), { code: 'not_found' });
+    const tot = prbTotals(picked);
+    const lines = picked.map((r, i) => ({
+      rowId: r.id, prbNo: r.prbNo || '', plate: r.plate || '', model: r.model || r.brand || '',
+      net: tot.lines[i].net, stamps: tot.lines[i].stamps, vat: tot.lines[i].vat, total: tot.lines[i].total,
+    }));
+    const issue = req.issue || nowIso().slice(0, 10);
+    const year = /^\d{4}/.test(issue) ? issue.slice(0, 4) : String(new Date().getFullYear());
+    let seq = {};
+    try { seq = JSON.parse(localStorage.getItem('by_prb_seq') || '{}') || {}; } catch { seq = {}; }
+    let n = (+seq[year] || 0) + 1;
+    const takenNos = new Set(d.invoices.map(x => x.no));
+    while (takenNos.has(`PRB-${year}-${String(n).padStart(4, '0')}`)) n++;
+    seq[year] = n;
+    try { localStorage.setItem('by_prb_seq', JSON.stringify(seq)); } catch { }
+    const no = `PRB-${year}-${String(n).padStart(4, '0')}`, now = nowIso();
+    const inv = {
+      v: 1, id: uid(), no, fileName: no + '.pdf', insuredId: ins.id,
+      issue, due: req.due || '', lang: req.lang || 'both', notes: req.notes || '',
+      cust: { name: ins.name || '', taxId: ins.taxId || '', address: ins.address || '' },
+      lines, t: { net: tot.net, stamps: tot.stamps, vat: tot.vat, total: tot.total },
+      status: 'unpaid', createdBy: 'demo', createdAt: now, createdTime: now,
+    };
+    d.invoices.push(inv);
+    this._prbSave(d);
+    return inv;
   }
 }

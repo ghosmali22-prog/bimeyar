@@ -157,6 +157,23 @@ deploy the backend first, then merge the frontend. After merging:
 
 Roll back: Deploy → Manage deployments → ✏️ → choose **Version 7** → Deploy (the v4.1 app does not need the new actions).
 
+## v4.5 update (separate compulsory-insurance / PRB backend)
+
+Paste the updated `Code.gs`, then edit the **existing** deployment: **Version → New version**,
+description `v4.5.0 PRB` → **Deploy**. Keep the same `/exec` URL. `appsscript.json` is unchanged;
+no new scopes, `setup` run, or manual Script properties are needed.
+
+`PRB_ROOT_ID` is set on the first PRB upload/import; listing creates nothing. PRB invoice numbers use
+`PRB_SEQ`, independent of `INV_SEQ`. Existing vehicle-folder documents stay in place: importing makes copies.
+Local checks: `node tests/prb.test.mjs` (synthetic Drive/Docs, including totals parity when `js/prb.js` is present)
+and the existing backend regression tests.
+
+After deployment, use synthetic test documents to verify: upload/update, duplicate rejection, download,
+share/unshare, import preview and copy, and a PRB invoice with Thai text and saved-row totals. Check the rendered
+PDF in Drive; the local Docs mock checks content and cleanup but cannot verify Google's font/layout rendering.
+Trash only the test files when finished. Roll back the backend by selecting **Version 10** in the existing
+deployment; saved PRB files remain in Drive, while PRB actions require the v4.5 backend.
+
 ## AI usage log
 
 Every AI **attempt** is logged without any customer data (time, provider `prov` = `claude` / `gemini` (v4.4), model, status such as `ok` / `http503` /
