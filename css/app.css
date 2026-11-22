@@ -975,3 +975,18 @@ img.fadein { animation: fade .5s ease both; }
   .title-row:has([data-act=prb-upload]) .title-actions .btn { flex: 1 1 auto; min-height: 44px; }
 }
 .prb-table td { white-space: nowrap; }
+
+/* v4.5.1 พ.ร.บ. review table for many files */
+.prb-batch .prb-table td { vertical-align: top; }
+.prb-cell { width: 100%; min-width: 92px; height: 36px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 10px; background: #fff; font: inherit; font-size: 16px; color: var(--ink); }
+.prb-cell.wide { min-width: 220px; }
+.prb-cell[readonly] { background: #f6f5fb; color: var(--muted); }
+.prb-batch .prb-fname small { display: block; max-width: 180px; overflow-wrap: anywhere; }
+.prb-chk { min-width: 200px; font-size: 12px; }
+.prb-bad { color: var(--bad); font-weight: 700; margin-block: 2px; }
+.prb-bad.warn { font-weight: 600; }
+.prb-batch tr.skip { opacity: .45; }
+.prb-batch tr.st-saved { background: #eefaf4; }
+.prb-batch tr.st-failed { background: #fff3f5; }
+.prb-sug { display: block; font-size: 12px; margin-top: 4px; text-align: start; }
+.prb-group { flex-wrap: wrap; margin-bottom: 10px; }
