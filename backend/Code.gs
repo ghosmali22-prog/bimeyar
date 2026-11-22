@@ -486,8 +486,14 @@ const ACTIONS = {
     need: 'editor',
     run: req => {
       const m = assertFile(req.id), own = ownerOf(m);
-      const perms = Drive.Permissions.list(req.id, { fields: 'permissions(id,type)' }).permissions || [];
-      perms.filter(p => p.type === 'anyone').forEach(p => Drive.Permissions.remove(req.id, p.id));
+      const anyone = [];
+      let page;
+      do {
+        const r = Drive.Permissions.list(req.id, { fields: 'nextPageToken,permissions(id,type)', pageSize: 100, pageToken: page }) || {};
+        (r.permissions || []).forEach(p => { if (p.type === 'anyone') anyone.push(p); });
+        page = r.nextPageToken;
+      } while (page);
+      anyone.forEach(p => Drive.Permissions.remove(req.id, p.id));
       const f = Drive.Files.update({ appProperties: { link: null } }, req.id, null, { fields: FIELDS });
       return toFileOf(f, own);
     },
@@ -758,14 +764,14 @@ const ACTIONS = {
     run: req => {
       const cache = CacheService.getScriptCache();
       const ids = (req.ids || []).slice(0, 24).filter(id => /^[\w-]{10,}$/.test(id));
-      const hit = cache.getAll(ids.map(id => 'th:' + id));
+      const hit = cache.getAll(ids.map(id => 'th:' + id)) || {};
       const out = {};
       ids.forEach(id => {
+        try { assertFile(id); } catch (e1) { return; }
         const k = 'th:' + id;
         if (hit[k] !== undefined) { if (hit[k]) out[id] = hit[k]; return; }
         let url = '';
         try {
-          assertFile(id);
           const tb = DriveApp.getFileById(id).getThumbnail();
           if (tb) url = 'data:' + (tb.getContentType() || 'image/png') + ';base64,' + Utilities.base64Encode(tb.getBytes());
         } catch (e2) { }

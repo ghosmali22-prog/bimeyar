@@ -1323,7 +1323,9 @@ async function openFile(id) {
   if (cur?.f.id !== id) return;
   const pv = $('#preview'); if (!pv) return;
   if (!blob) { pv.innerHTML = `<p class="sh-text">${t('fl.noContent')}</p>`; return; }
-  cur.blob = blob; cur.url = objUrl(blob);
+  // v4.5.1 security: a "PDF" is always shown from a blob typed as PDF, so a file of another type renamed to .pdf
+  // (e.g. HTML) can never run inside the app; download / share still use the original blob
+  cur.blob = blob; cur.url = objUrl(isPdf(f) && !isImage(f) ? new Blob([blob], { type: 'application/pdf' }) : blob);
   pv.innerHTML = isImage(f) ? `<img src="${cur.url}" alt="${esc(f.name)}">`
     : isPdf(f) ? `<iframe src="${cur.url}#toolbar=0" title="${esc(f.name)}"></iframe><button class="btn dark open-full" data-act="open-link" data-url="${cur.url}">${icon('external', 16)}<span>${t('fl.full')}</span></button>`
       : `<div class="nopv">${ftBadge(f, 30)}<p>${t('fl.noPreview')}</p></div>`;

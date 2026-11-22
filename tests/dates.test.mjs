@@ -34,12 +34,12 @@ eq(yearLooksWrong('', '2027-10-19'), false, 'no start');
 eq(daysBetween('2026-10-19', '2027-10-19'), 365, 'days');
 eq(cmpIso('2026-10-19', '2027-01-01') < 0, true, 'cmp');
 eq(daysLeft(isoToday()), 0, 'today');
-// 68-6184 style: 19/10/2569 - 19/10/2570 is NOT expired on 2026-11-22
+// a policy 19/10/2569 - 19/10/2570 is NOT expired on 2026-11-22
 eq(daysBetween('2026-11-22', parseDate('19/10/2570')) > 0, true, 'BE expiry still active');
 
 // plates, class, พ.ร.บ. check
-eq(normPlate('71 7895'), '71-7895', 'plate space');
-eq(normPlate('71-7895'), '71-7895', 'plate dash');
+eq(normPlate('00 0002'), '00-0002', 'plate space');
+eq(normPlate('00-0002'), '00-0002', 'plate dash');
 eq(normPlate('กข 1234'), 'กข 1234', 'plate letters unchanged');
 eq(policyClass({ odCover: 'ไม่คุ้มครอง', tfCover: 'ไม่คุ้มครอง' }), 'ชั้น 3', 'class 3');
 eq(policyClass({ odCover: 'ไม่คุ้มครอง', tfCover: '500,000' }), 'ชั้น 2', 'class 2');
@@ -54,15 +54,15 @@ eq(prbCheck({ netPremium: 600 }).ok, null, 'vat missing');
 // normalize: made-up พ.ร.บ. answer with the known AI mistakes
 const F = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { value: v, confidence: 0.9 }]));
 const n = normalize({ docType: 'prb', slot: '3', fields: F({
-  insuredName: 'ห้างหุ้นส่วนจำกัด ทดสอบ ทรานสปอร์ต', plate: '71 7895', vin: 'FG8JRTEST0001\nJ08ETEST0001',
-  policyStart: '09/11/2569', policyExpiry: '09/11/2570', contractDate: '09/11/2569', prbNo: '9620656', barcode: '3710496206565',
+  insuredName: 'ห้างหุ้นส่วนจำกัด ทดสอบ ทรานสปอร์ต', plate: '00 0002', vin: 'FG8JRTEST0001\nJ08ETEST0001',
+  policyStart: '09/11/2569', policyExpiry: '09/11/2570', contractDate: '09/11/2569', prbNo: '1000006', barcode: '3710410000065',
   netPremium: '600.00', stamps: '3', vat: '42.21', total: '645.21', bodyType: 'ตู้บรรทุก', carValue: '670,000' }) });
-eq(n.values.plate, '71-7895', 'n plate');
+eq(n.values.plate, '00-0002', 'n plate');
 eq([n.values.vin, n.values.engineNo], ['FG8JRTEST0001', 'J08ETEST0001'], 'n vin/engine split');
 eq(n.values.policyType, 'พ.ร.บ.', 'n prb class');
 eq(n.values.insuredName, 'ห้างหุ้นส่วนจำกัด ทดสอบ ทรานสปอร์ต', 'n insured as printed');
 eq([n.values.body, n.values.carValue], ['ตู้บรรทุก', '670000'], 'n body + value');
-eq([n.prb.prbNo, n.prb.barcode, n.prb.check.ok], ['9620656', '3710496206565', true], 'n prb fields');
+eq([n.prb.prbNo, n.prb.barcode, n.prb.check.ok], ['1000006', '3710410000065', true], 'n prb fields');
 eq(n.values.policyExpiry, '2027-11-09', 'n expiry CE');
 const n2 = normalize({ docType: 'policy', fields: F({ vin: 'ABC123456', engineNo: 'ABC-123456', odCover: 'ไม่คุ้มครอง', tfCover: 'ไม่คุ้มครอง', policyStart: '2026-10-19', policyExpiry: '2026-10-19' }) });
 eq([n2.values.vin, n2.notes.vin], [undefined, 'v.vinEngine'], 'engine as vin dropped');

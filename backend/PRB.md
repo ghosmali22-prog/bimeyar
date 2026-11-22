@@ -81,5 +81,5 @@ Per line, in integer satang: `net = netPremium`, `stamps`, `vat`, `total = total
 The existing `buildName` of `js/naming.js` (unchanged):
 `buildName({ plate: plateOnly(row.plate, row.province), customer: { name: insuredName }, month, doc: 'พ.ร.บ.', ext })`
 with `month` = month of `contractDate` (purchase month), else `issueDate`, else `start`, else this month.
-e.g. `71-5262 - พี พี เอส ทรานสปอร์ต(11) - พ.ร.บ..pdf` (company words are removed by `customerPart`, as for
+e.g. `00-0001 - ทดสอบ ขนส่ง(11) - พ.ร.บ..pdf` (insured "ห้างหุ้นส่วนจำกัด ทดสอบ ขนส่ง") (company words are removed by `customerPart`, as for
 the main files; the insured FOLDER keeps the full name). The backend only cleans the name and adds " (2)"…
