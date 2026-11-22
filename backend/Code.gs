@@ -1766,7 +1766,8 @@ function prbUpload(req, user) {
   if (bytes.length > MAX_BYTES) throw err('too_big', 'File is larger than 25 MB');
   if (!bytes.length) throw err('bad_request', 'No file data');
   const mime = clean(m.mime, 120) || 'application/octet-stream';
-  if (/^application\/vnd\.google-apps\./.test(mime)) throw err('bad_request', 'Upload a document or image');
+  // พ.ร.บ. files are PDFs or photos only (never HTML or other types that a browser could run)
+  if (!/^(application\/pdf|image\/(jpeg|png|webp|heic|heif))$/.test(mime)) throw err('bad_request', 'Upload a PDF or a photo');
   let name = fileName(m.name) || fileName(m.orig) || 'file';
   if (!extOf(name) && extOf(m.orig)) name = fileName(name + extOf(m.orig));
   return withLock(() => {
