@@ -43,6 +43,15 @@ to a production system. Talk to the owner (Pejman) in Persian.
   `upload` / `moveFile` / `createInvoice` take `vehicleId` + `slot`; without them they work as in v3.
   Invoice = a PDF file in the `pay` sub-folder (v3) or folder `4` of a vehicle (v4) with `appProperties.kind = 'invoice'`, `invNo`, `status`; the invoice data is JSON in its description.
   Invoice numbers come from Script property `INV_SEQ` under `LockService` only.
+  **พ.ร.บ. section (v4.5)**: separate from the customers, contract in `backend/PRB.md`. Root → folder "พ.ร.บ."
+  (`bimeyar = 'prbroot'`, Script property `PRB_ROOT_ID`, made at the first upload/import only) → one folder per insured
+  (`bimeyar = 'prbins'`, `ik` = hash of the exact name; insured JSON merged) → files `bimeyar = 'prb'`, `kind = 'prb'`
+  (row JSON in the description: PRB no., barcode, plate, chassis, dates, net/stamps/VAT/total…) and PRB invoices
+  `kind = 'prbinv'` (`PRB-YYYY-NNNN`, Script property `PRB_SEQ`; never `INV_SEQ`). These tags are never `item`, so no
+  customer tool sees them; `assertCustomer` refuses `prb*` folders. Only `prb*` actions touch them (`prbAssertFile` checks the
+  chain). The import tool only COPIES files from a vehicle's folder 3 (`src` tag); the original is never changed.
+  Duplicates (PRB no. or barcode) are refused. Totals in integer satang: `prbTotals` (backend) = `prbTotals` in `js/prb.js`.
+  File names via the existing `buildName` (company words removed); the insured folder keeps the full name.
   The root folder is tagged `appProperties.bimeyar = 'root'`. The company logo file is tagged `bimeyar = 'logo'`.
 - **AI** (v4.4): Claude first, Gemini as automatic fallback, called only from the backend (`aiExtract`, used by every AI feature).
   Keys are Script properties `CLAUDE_API_KEY` and `GEMINI_API_KEY`: never in the repo, never in the frontend, never in logs.
@@ -119,7 +128,7 @@ to a production system. Talk to the owner (Pejman) in Persian.
   Rollback tag of `main` before it: `v4.3-pre-claude` (= `v4.3.0`). Before that: `v4.2.0-stable` (= `v4.2.0`), `v4.1.0-stable` (= `v4.1.0`), `v4.0.0-stable` (= `v4.0.0`), `v3.3.0-stable` (= `v3.3.0`), `v3.2-pre-device` (= `v3.2.0`),
   `v3.1-pre-naming` (= `v3.1.0`), `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
-- Tests: `node tests/ai-provider.test.mjs` (v4.4 Claude + Gemini fallback), `node tests/aiedit.test.mjs` (v4.3 Edit with AI), `node tests/restore.test.mjs` (v4.2 restore names), `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
+- Tests: `node tests/prb.test.mjs` + `node tests/prb-front.test.mjs` (v4.5 พ.ร.บ. section), `node tests/dates.test.mjs` (v4.4.1 dates + AI rules), `node tests/ai-provider.test.mjs` (v4.4 Claude + Gemini fallback), `node tests/aiedit.test.mjs` (v4.3 Edit with AI), `node tests/restore.test.mjs` (v4.2 restore names), `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
 
 ## Design (owner's decision)
 

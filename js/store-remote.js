@@ -175,4 +175,26 @@ export class ApiStore {
   aclList() { return call('aclList'); }
   aclSet(email, role) { return call('aclSet', { email, role }); }
   aclRemove(email) { return call('aclRemove', { email }); }
+
+  // พ.ร.บ. section (v4.5)
+  prbList() { return call('prbList'); }
+  async prbUpload(blob, insured, row, meta = {}, onProgress) {
+    if (blob.size > MAX_UPLOAD_MB * 1048576) throw new ApiError('too_big', 'too_big');
+    const data = await b64(blob);
+    return call('prbUpload', { insured, row, meta: { name: meta.name || '', orig: meta.orig || '', mime: meta.mime || blob.type || 'application/octet-stream' }, data }, onProgress, 300000);
+  }
+  prbUpdate(id, row) { return call('prbUpdate', { id, row }); }
+  async prbGetBlob(id, fresh = false) {
+    if (!fresh && this.blobCache.has(id)) return this.blobCache.get(id);
+    const r = await call('prbGetFile', { id });
+    const blob = unb64(r.data, r.mime);
+    if (blob.size < 8 * 1048576) this.blobCache.set(id, blob);
+    return blob;
+  }
+  prbShare(id) { return call('prbShare', { id }); }
+  prbUnshare(id) { return call('prbUnshare', { id }); }
+  async prbDelete(id) { const r = await call('prbDelete', { id }); this.blobCache.delete(id); this.thumbCache.delete(id); return r; }
+  prbImportPlan() { return call('prbImportPlan'); }
+  prbImport(items) { return call('prbImport', { items }, null, 300000); }
+  prbInvoice(req) { return call('prbInvoice', req); }
 }
