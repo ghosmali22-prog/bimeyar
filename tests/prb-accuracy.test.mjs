@@ -94,5 +94,28 @@ eq(consensusName(['บริษัท ใหม่ (หจก.เค พี ท�
 eq(consensusName(['บริษัท ใหม่ โดย หจก.เค พี ที เอส ทดสอบขนส่ง'], 0, [`บริษัท เก่า /${PART}`]), `บริษัท ใหม่ โดย ${PART}`, 'split on โดย');
 eq(consensusName(['บริษัท ไก่ทอด จำกัด', 'บริษัท ปลาทู จำกัด', 'บริษัท ปลาทู จำกัด'], 0), '', 'different companies are not merged');
 
+// ---------- v4.5.4: Thai tone marks & spellingChoices ----------
+const { stripMarks, markCount, spellingChoices } = await import('../js/prb.js');
+const PLAIN = 'หจก. พี พี ขนส่ง', MARKED = 'หจก. พี่ พี่ ขนส่ง';
+eq([stripMarks(MARKED), stripMarks(PLAIN), markCount(MARKED), markCount(PLAIN)], ['หจก. พี พี ขนสง', 'หจก. พี พี ขนสง', 3, 1], 'stripMarks and markCount U+0E47–U+0E4C');
+// plain majority + one marked row -> suggestion is the plain majority, never the marked one
+const toneBatch = [PLAIN, PLAIN, MARKED];
+eq([majorityName(toneBatch, 0), majorityName(toneBatch, 1), majorityName(toneBatch, 2)], ['', '', PLAIN], 'majorityName: plain majority suggested for marked row only');
+eq([consensusName(toneBatch, 0), consensusName(toneBatch, 1), consensusName(toneBatch, 2)], ['', '', PLAIN], 'consensusName: plain majority suggested for marked row only');
+const tonePost = prbPost(toneBatch.map((n, i) => ({ row: { plate: `99-000${i + 1}` }, insured: { name: n } })));
+eq(tonePost.map(p => p.suggest.insuredName || ''), ['', '', PLAIN], 'prbPost: plain majority suggested for marked row only');
+// a saved marked name does not beat the batch majority (whole name and sub-part)
+eq(consensusName(toneBatch, 0, [MARKED]), '', 'saved marked name never suggested for plain majority row');
+eq(consensusName(toneBatch, 2, [MARKED]), PLAIN, 'saved marked name does not prevent marked row from getting plain majority');
+eq(consensusName([PLAIN], 0, [MARKED]), '', 'single plain row is not replaced by a saved marked name');
+const subBatch = [`บริษัท ทดสอบ จำกัด /${PLAIN}`, `บริษัท ทดสอบ จำกัด /${PLAIN}`, `บริษัท อื่น จำกัด /${MARKED}`];
+eq(consensusName(subBatch, 0, [`บริษัท เก่า จำกัด /${MARKED}`]), '', 'saved marked sub-part never suggested over plain batch majority');
+eq(consensusName(subBatch, 2, [`บริษัท เก่า จำกัด /${MARKED}`]), `บริษัท อื่น จำกัด /${PLAIN}`, 'marked sub-part still gets plain batch majority despite saved marked name');
+// spellingChoices order: batch majority first, fewer marks on ties, extra-marked variants dropped, then other batch, then saved
+eq(spellingChoices([MARKED, PLAIN, PLAIN], [MARKED]), [PLAIN], 'spellingChoices drops extra-marked variant and puts plain majority first');
+eq(spellingChoices([MARKED, PLAIN], [MARKED]), [PLAIN], 'spellingChoices tie in batch count: fewer marks wins and extra-marked dropped');
+eq(spellingChoices(['หจก. ทดสอบ ขนส่ง', PLAIN, PLAIN, MARKED], ['บริษัท พี พี ขนส่ง จำกัด', MARKED]),
+  [PLAIN, 'หจก. ทดสอบ ขนส่ง', 'บริษัท พี พี ขนส่ง จำกัด'], 'spellingChoices order: majority first, other batch, then saved, extra marks dropped');
+
 console.log(`prb-accuracy: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

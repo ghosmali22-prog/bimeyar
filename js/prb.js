@@ -364,12 +364,68 @@ export function suggestPolicyNo(row, peers, hint = {}) {
   else if (!digitsOf(cur).endsWith(no)) why = 'noPrb';
   return why && value !== cur ? { value, why } : null;
 }
+const THAI_MARKS = /[\u0E47-\u0E4C]/g;
+/** Removes Thai tone marks / diacritics U+0E47–U+0E4C. */
+export const stripMarks = s => String(s ?? '').replace(THAI_MARKS, '');
+/** Count of Thai marks U+0E47–U+0E4C in s. */
+export const markCount = s => (String(s ?? '').match(THAI_MARKS) || []).length;
+const markless = s => cleanInsName(stripMarks(s));
+
+/**
+ * True when candidate q has the same mark-less form as v (whitespace-normalized), more marks than v,
+ * and the batch majority (batch names/parts only, not existing) for that mark-less form has fewer marks than q.
+ */
+function hasExtraMarks(v, q, batchList) {
+  const mk = markless(v);
+  if (!mk || markless(q) !== mk || markCount(q) <= markCount(v)) return false;
+  const bCount = new Map(), first = new Map();
+  for (const raw of batchList || []) {
+    const s = cleanInsName(raw);
+    if (!s || markless(s) !== mk) continue;
+    bCount.set(s, (bCount.get(s) || 0) + 1);
+    if (!first.has(s)) first.set(s, first.size);
+  }
+  if (!bCount.size) return false;
+  const maj = [...bCount.keys()].sort((a, b) =>
+    bCount.get(b) - bCount.get(a) || markCount(a) - markCount(b) || first.get(a) - first.get(b)
+  )[0];
+  return markCount(maj) < markCount(q);
+}
+
+/**
+ * De-duplicated ordered list of spelling choices: batch majority first (count desc; ties: fewer marks,
+ * then first appearance), then other batch spellings, then saved names; drops any spelling with more marks
+ * than another spelling of the same mark-less form whose batch count >= its own.
+ */
+export function spellingChoices(batchNames = [], savedNames = []) {
+  const bCount = new Map(), first = new Map();
+  for (const raw of batchNames || []) {
+    const s = cleanInsName(raw);
+    if (!s) continue;
+    bCount.set(s, (bCount.get(s) || 0) + 1);
+    if (!first.has(s)) first.set(s, first.size);
+  }
+  const all = [...bCount.keys()].sort((a, b) =>
+    bCount.get(b) - bCount.get(a) || markCount(a) - markCount(b) || first.get(a) - first.get(b)
+  );
+  for (const raw of savedNames || []) {
+    const s = cleanInsName(raw);
+    if (s && !all.includes(s)) all.push(s);
+  }
+  return all.filter(s => {
+    const mk = markless(s), mc = markCount(s), bc = bCount.get(s) || 0;
+    return !all.some(o => o !== s && markless(o) === mk && markCount(o) < mc && (bCount.get(o) || 0) >= bc);
+  });
+}
+
 /** The majority spelling of a name in one batch when this one differs by 1-4 characters (or only in spacing) */
 export function majorityName(names, i) {
   const me = String(names?.[i] ?? '').trim(); if (!me) return '';
   const count = {};
   for (const n of names) { const k = String(n ?? '').trim(); if (k) count[k] = (count[k] || 0) + 1; }
-  const best = Object.entries(count).filter(([k, c]) => k !== me && c >= 2 && c > (count[me] || 0)).sort((a, b) => b[1] - a[1]);
+  const best = Object.entries(count)
+    .filter(([k, c]) => k !== me && c >= 2 && c > (count[me] || 0) && !hasExtraMarks(me, k, names))
+    .sort((a, b) => b[1] - a[1] || markCount(a[0]) - markCount(b[0]));
   for (const [k] of best) {
     const d = lev(me, k);
     if ((d >= 1 && d <= 4) || me.replace(/\s+/g, '') === k.replace(/\s+/g, '')) return k;
@@ -394,15 +450,22 @@ export function consensusName(names, i, existing = []) {
   const whole = majorityName(names, i);
   if (whole) return whole;
   const me = String(names?.[i] ?? '').trim(); if (!me) return '';
-  const count = {};
-  const add = (n, w) => subParts(n).forEach((x, k) => { const v = x.trim(); if (!isSep(x, k) && v) count[v] = (count[v] || 0) + w; });
-  (names || []).forEach(n => add(n, 1));
-  (existing || []).forEach(n => add(n, 2));   // a name already saved in Drive counts more
+  const count = {}, batchParts = [];
+  (names || []).forEach(n => subParts(n).forEach((x, k) => {
+    const v = x.trim();
+    if (!isSep(x, k) && v) { batchParts.push(v); count[v] = (count[v] || 0) + 1; }
+  }));
+  (existing || []).forEach(n => subParts(n).forEach((x, k) => {
+    const v = x.trim();
+    if (!isSep(x, k) && v && !hasExtraMarks(stripMarks(v), v, batchParts)) count[v] = (count[v] || 0) + 2;
+  }));
   const parts = subParts(me);
   let changed = false;
   const out = parts.map((x, k) => {
     const v = x.trim(); if (isSep(x, k) || !v) return x;
-    const best = Object.entries(count).filter(([q, c]) => q !== v && c >= 2 && c > (count[v] || 0) && subNear(v, q)).sort((a, b) => b[1] - a[1])[0];
+    const best = Object.entries(count)
+      .filter(([q, c]) => q !== v && c >= 2 && c > (count[v] || 0) && !hasExtraMarks(v, q, batchParts) && subNear(v, q))
+      .sort((a, b) => b[1] - a[1] || markCount(a[0]) - markCount(b[0]))[0];
     if (!best) return x;
     changed = true; return x.replace(v, best[0]);
   });
@@ -424,7 +487,7 @@ export function prbPost(items) {
     const s = suggestPolicyNo(it.row || {}, rows.filter((_, j) => j !== i));
     if (s) out[i].suggest.policyNo = s;
     const m = majorityName(names, i);
-    if (m) out[i].suggest.insuredName = m;
+    if (m && !hasExtraMarks(names[i], m, names)) out[i].suggest.insuredName = m;
   });
   return out;
 }

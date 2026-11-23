@@ -11,7 +11,7 @@ export const MAX_UPLOAD_MB = 25;
 // Largest total size sent to the AI in one go (photos are compressed first)
 export const MAX_AI_MB = 15;
 
-export const APP_VERSION = '4.5.3';
+export const APP_VERSION = '4.5.4';
 
 /**
  * The 4 sub-folders of every customer folder. Must match SUBFOLDERS in backend/Code.gs.

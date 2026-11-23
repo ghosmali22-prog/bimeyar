@@ -71,7 +71,8 @@ function fixture() {
     remove(id, pid) { perms[id] = perms[id].filter(p => p.id !== pid); mutation('permission-remove', id); },
   } };
   const PropertiesService = { getScriptProperties: () => ({ getProperty: k => props[k] ?? null,
-    setProperty(k, v) { props[k] = v; mutation('property', k); } }) };
+    setProperty(k, v) { props[k] = v; mutation('property', k); },
+    deleteProperty(k) { delete props[k]; mutation('property', k); } }) };
   const LockService = { getScriptLock: () => ({ waitLock() { assert.equal(locked, false, 'no nested lock'); locked = true; },
     releaseLock() { assert.equal(locked, true); locked = false; } }) };
   const Utilities = { DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' },
@@ -274,7 +275,7 @@ eq(files[docs.at(-1).id].trashed, true, 'temporary Doc trashed on conversion err
 
 // Route/ACL regression: deny before invoking any Drive operations.
 props.ACL = JSON.stringify({ 'viewer@example.invalid': 'viewer', 'editor@example.invalid': 'editor' });
-const needs = { prbList: 'viewer', prbGetFile: 'viewer', prbUpload: 'editor', prbUpdate: 'editor', prbShare: 'editor', prbUnshare: 'editor', prbDelete: 'editor', prbInvoice: 'editor', prbImport: 'admin', prbImportPlan: 'admin' };
+const needs = { prbList: 'viewer', prbGetFile: 'viewer', prbUpload: 'editor', prbUpdate: 'editor', prbShare: 'editor', prbUnshare: 'editor', prbDelete: 'editor', prbDeleteInsured: 'editor', prbInvoice: 'editor', prbSeqReset: 'admin', prbImport: 'admin', prbImportPlan: 'admin' };
 for (const [action, role] of Object.entries(needs)) {
   eq(B.ACTIONS[action].need, role, action + ' role');
   if (role === 'viewer') continue;
@@ -282,6 +283,48 @@ for (const [action, role] of Object.entries(needs)) {
   const post = B.doPost({ postData: { contents: JSON.stringify({ action, token: (role === 'admin' ? 'editor' : 'viewer') + '@example.invalid' }) } });
   eq(JSON.parse(post).error, 'role', 'router role denied');
   eq(writes.length, before, 'denied action has no writes');
+}
+{
+  const before = writes.length;
+  const post = B.doPost({ postData: { contents: JSON.stringify({ action: 'prbSeqReset', token: 'viewer@example.invalid' }) } });
+  eq(JSON.parse(post).error, 'role', 'viewer denied prbSeqReset');
+  eq(writes.length, before, 'viewer prbSeqReset has no writes');
+}
+
+// v4.5.4: prbDeleteInsured & prbSeqReset
+{
+  const f = fixture();
+  const up = f.upload({ prbNo: '1001', netPremium: 600, stamps: 3, vat: 42.21 }, { name: 'หจก. ทดสอบ ขนส่ง' });
+  const insId = up.insured.id, rowId = up.row.id;
+  // prbDeleteInsured refuses a non-empty insured folder
+  rejects(() => f.run('prbDeleteInsured', { id: insId }), 'bad_request');
+  assert.throws(() => f.run('prbDeleteInsured', { id: insId }), /Insured folder is not empty/); checks++;
+  eq(Boolean(f.files[insId].trashed), false, 'non-empty insured not trashed');
+  // prbDeleteInsured refuses non-prbins folders and files
+  const custFolder = f.folder('Customer folder', f.root, { bimeyar: 'item' });
+  for (const badId of [f.root, f.props.PRB_ROOT_ID, custFolder, rowId]) {
+    rejects(() => f.run('prbDeleteInsured', { id: badId }), 'not_found');
+  }
+  // prbInvoice + prbSeqReset refuses while a live prbinv exists
+  const inv1 = f.run('prbInvoice', { insuredId: insId, rowIds: [rowId], issue: '2026-11-22' });
+  eq(inv1.no, 'PRB-2026-0001', 'first invoice number');
+  rejects(() => f.run('prbSeqReset'), 'bad_request');
+  assert.throws(() => f.run('prbSeqReset'), /PRB invoices exist/); checks++;
+  eq(JSON.parse(f.props.PRB_SEQ), { 2026: 1 }, 'PRB_SEQ kept while live invoice exists');
+  // Trash the invoice, then prbSeqReset succeeds and the next invoice number skips the trashed one
+  eq(f.run('prbDelete', { id: inv1.id }), true, 'trash prbinv');
+  eq(f.files[inv1.id].trashed, true, 'prbinv marked trashed');
+  eq(f.run('prbSeqReset'), { ok: true }, 'prbSeqReset succeeds after trashing prbinv');
+  eq(f.props.PRB_SEQ, undefined, 'PRB_SEQ property deleted');
+  const inv2 = f.run('prbInvoice', { insuredId: insId, rowIds: [rowId], issue: '2026-11-22' });
+  eq(inv2.no, 'PRB-2026-0002', 'next invoice number skips trashed PRB-2026-0001');
+  // Still non-empty because rowId and inv2 are live; trash them, then prbDeleteInsured trashes the insured folder
+  rejects(() => f.run('prbDeleteInsured', { id: insId }), 'bad_request');
+  f.run('prbDelete', { id: rowId });
+  f.run('prbDelete', { id: inv2.id });
+  eq(f.run('prbDeleteInsured', { id: insId }), true, 'prbDeleteInsured trashes empty insured');
+  eq(f.files[insId].trashed, true, 'insured folder marked trashed:true (not removed)');
+  eq(f.run('prbList').insured, [], 'trashed insured excluded from prbList');
 }
 // Stale configured PRB root is never trusted or adopted outside the app.
 const z = fixture();
