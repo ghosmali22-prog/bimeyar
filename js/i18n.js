@@ -812,6 +812,14 @@ const PRB_TEXT = {
   'prb.sugPolicy': ['Use full policy no.: {x}', 'ใช้เลขกรมธรรม์เต็ม: {x}', 'استفاده از شمارهٔ کامل بیمه‌نامه: {x}'],
   'prb.sugName': ['Use the spelling of the other rows: {x}', 'ใช้ชื่อสะกดแบบแถวอื่น: {x}', 'استفاده از املای ردیف‌های دیگر: {x}'],
   'prb.chk.period': ['The end date is not after the start date.', 'วันสิ้นสุดไม่อยู่หลังวันเริ่ม', 'تاریخ پایان بعد از شروع نیست.'],
+  'prb.trashInsured': ['Move to trash', 'ย้ายไปถังขยะ', 'انتقال به سطل زباله'],
+  'prb.trashInsuredQ': ['Move the empty insured folder “{x}” to the trash?', 'ย้ายโฟลเดอร์ผู้เอาประกันภัยที่ว่างอยู่ “{x}” ไปที่ถังขยะใช่ไหม?', 'پوشهٔ خالی بیمه‌گذار «{x}» به سطل زباله منتقل شود؟'],
+  'prb.trashInvoiceQ': ['Move the invoice “{x}” to the trash?', 'ย้ายใบแจ้งหนี้ “{x}” ไปที่ถังขยะใช่ไหม?', 'صورتحساب «{x}» به سطل زباله منتقل شود؟'],
+  'prb.seqReset': ['Reset PRB invoice numbers', 'รีเซ็ตเลขที่ใบแจ้งหนี้ พ.ร.บ.', 'بازنشانی شماره‌های صورتحساب พ.ร.บ.'],
+  'prb.seqResetQ': ['Reset the PRB invoice number counter? Numbers already used by trashed invoices will still be skipped.', 'รีเซ็ตตัวนับเลขที่ใบแจ้งหนี้ พ.ร.บ. ใช่ไหม? เลขที่เคยใช้ในใบแจ้งหนี้ที่อยู่ในถังขยะจะยังถูกข้ามไป', 'شمارندهٔ صورتحساب‌های พ.ร.บ. بازنشانی شود؟ شماره‌هایی که قبلاً در صورتحساب‌های سطل زباله استفاده شده‌اند همچنان رد می‌شوند.'],
+  'prb.seqResetDone': ['PRB invoice numbers reset.', 'รีเซ็ตเลขที่ใบแจ้งหนี้ พ.ร.บ. แล้ว', 'شماره‌های صورتحساب พ.ร.บ. بازنشانی شد.'],
+  'prb.notEmpty': ['Insured folder is not empty. Move its records and invoices to the trash first.', 'โฟลเดอร์ผู้เอาประกันภัยยังไม่ว่าง กรุณาย้ายรายการและใบแจ้งหนี้ไปถังขยะก่อน', 'پوشهٔ بیمه‌گذار خالی نیست. ابتدا سوابق و صورتحساب‌های آن را به سطل زباله منتقل کنید.'],
+  'prb.invExist': ['PRB invoices exist. Move all PRB invoices to the trash before resetting.', 'ยังมีใบแจ้งหนี้ พ.ร.บ. อยู่ กรุณาย้ายใบแจ้งหนี้ทั้งหมดไปถังขยะก่อนรีเซ็ต', 'صورتحساب พ.ร.บ. وجود دارد. پیش از بازنشانی همهٔ صورتحساب‌ها را به سطل زباله منتقل کنید.'],
 };
 for (const [key, values] of Object.entries(PRB_TEXT)) {
   ['en', 'th', 'fa'].forEach((l, i) => { D[l][key] = values[i]; });

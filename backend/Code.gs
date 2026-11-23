@@ -207,6 +207,19 @@ const ACTIONS = {
   prbDelete: { need: 'editor', run: req => withLock(() => {
     prbAssertFile(req.id); Drive.Files.update({ trashed: true }, req.id); return true;
   }) },
+  prbDeleteInsured: { need: 'editor', run: req => withLock(() => {
+    prbAssertInsured(req.id);
+    if (listAll("'" + req.id + "' in parents and trashed=false").length) throw err('bad_request', 'Insured folder is not empty');
+    Drive.Files.update({ trashed: true }, req.id); return true;
+  }) },
+  prbSeqReset: { need: 'admin', run: () => withLock(() => {
+    if (listAll(tagQuery('prb') + " and appProperties has { key='kind' and value='prbinv' }").some(f => f.mimeType !== FOLDER)) {
+      throw err('bad_request', 'PRB invoices exist');
+    }
+    const p = PropertiesService.getScriptProperties();
+    if (p.deleteProperty) p.deleteProperty('PRB_SEQ'); else p.setProperty('PRB_SEQ', '');
+    return { ok: true };
+  }) },
   prbImportPlan: { need: 'admin', run: () => prbImportPlan() },
   prbImport: { need: 'admin', run: (req, user) => prbImport(req, user) },
   prbInvoice: { need: 'editor', run: (req, user) => prbInvoice(req, user) },

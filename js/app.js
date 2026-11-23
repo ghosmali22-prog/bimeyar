@@ -12,7 +12,7 @@ import { prepare, normalize, diff, fileNote, FIELD_GROUPS, DATE_FIELDS } from '.
 import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './validate.js';
 import { buildName, docNameFromOld, plateOnly, plateFromName, followsPattern, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
 import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey, needsAiRead, detectVehicles, aiEditSuggest } from './vehicles.js';
-import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup, prbSanity, suggestInsured, groupInsured, prbPost, suggestPolicyNo, majorityName, consensusName } from './prb.js';
+import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup, prbSanity, suggestInsured, groupInsured, prbPost, suggestPolicyNo, majorityName, consensusName, spellingChoices } from './prb.js';
 import { parseDate } from './dates.js';
 
 /*
@@ -141,6 +141,7 @@ function applyRole() {
 }
 
 const ERR = { network: 'err.network', offline: 'err.offline', timeout: 'err.timeout', role: 'err.role', not_found: 'err.not_found', server: 'err.server', too_big: 'err.tooBig' };
+const MSG_ERR = { 'Insured folder is not empty': 'prb.notEmpty', 'PRB invoices exist': 'prb.invExist' };
 function handleError(e) {
   const code = e?.code;
   if (code !== 'bad_pin' && code !== 'locked') console.error(e);   // a wrong device password is not an app error
@@ -155,7 +156,8 @@ function handleError(e) {
   if (code === 'auth' || e?.auth) { auth.drop(); return showGate('expired'); }
   if (code === 'forbidden') { S.store = null; return showGate('deny', e.email || auth.user()?.email || ''); }
   if (code === 'sessions_full') return toast(t('dv.full'), 'err');
-  toast(e?.key ? t(e.key) : ERR[code] ? t(ERR[code]) : e?.message || t('err.generic'), 'err');
+  const msgKey = e?.key || MSG_ERR[e?.message] || ERR[code];
+  toast(msgKey ? t(msgKey) : e?.message || t('err.generic'), 'err');
   if (code === 'not_found' && S.store) reload().catch(() => { });
   if (!S.store && S.mode === 'cloud' && S.gate === 'loading') {
     if (device.has()) { device.lock(); showGate('unlock'); } else showGate('signin');
@@ -296,15 +298,14 @@ function syncChrome() {
 
 function gateHtml() {
   const g = S.gate;
-  const demo = `<button class="btn ghost" data-act="mode-local">${t('gate.demo')}</button>`;
+  // v4.5.4: no "Try the demo on this device" on the sign-in / unlock screens (private company app); demo code stays
   if (g === 'loading') return `<section class="gate card"><div class="gate-ico">${icon('lock', 38)}</div><h1>${t('gate.loading')}</h1><div class="spin"></div></section>`;
   if (g === 'deny') return `<section class="gate card">
       <div class="gate-ico deny">${icon('lock', 38)}</div><h1>${t('deny.title')}</h1>
       <p>${t('deny.text', { x: `<b dir="ltr">${esc(S.denied)}</b>` })}</p>
-      <div class="gate-actions"><button class="btn primary" data-act="retry">${t('deny.retry')}</button><button class="btn ghost" data-act="switch-account">${t('deny.switch')}</button></div>
-      <div class="gate-foot">${demo}</div></section>`;
+      <div class="gate-actions"><button class="btn primary" data-act="retry">${t('deny.retry')}</button><button class="btn ghost" data-act="switch-account">${t('deny.switch')}</button></div></section>`;
   if (g === 'config' || g === 'gis') return `<section class="gate card"><div class="gate-ico">${icon('cloud', 38)}</div><h1>${t('gate.title')}</h1><p>${t('gate.' + g)}</p>
-      <div class="gate-actions">${g === 'gis' ? `<button class="btn primary" data-act="reload">${t('gate.retry')}</button>` : ''}${demo}</div></section>`;
+      <div class="gate-actions">${g === 'gis' ? `<button class="btn primary" data-act="reload">${t('gate.retry')}</button>` : ''}</div></section>`;
   if (g === 'unlock') {
     const b = device.info() || {};
     const msg = S.pinLeft != null ? t('dv.wrong', { n: S.pinLeft }) : '';
@@ -319,7 +320,6 @@ function gateHtml() {
         <button class="btn primary block" id="ulbtn">${icon('lock', 18)}<span>${t('dv.unlock')}</span></button>
       </form>
       <div class="gate-actions"><button class="btn ghost" data-act="dv-forgot">${t('dv.forgot')}</button></div>
-      <div class="gate-foot">${demo}</div>
     </section>`;
   }
   if (g === 'setpin') return `<section class="gate card">
@@ -342,7 +342,6 @@ function gateHtml() {
       <h1>${t('gate.title')}</h1>
       <p>${S.pinMsg && g === 'expired' ? t(S.pinMsg) : t(g === 'expired' ? 'gate.expired' : 'gate.text')}</p>
       <div class="gbtn" id="gbtn"><div class="spin"></div></div>
-      <div class="gate-foot">${demo}</div>
     </section>`;
 }
 
@@ -2322,8 +2321,10 @@ function drawPrb() {
     return;
   }
   const d = P.data, ins = d.insured.find(i => i.id === P.insured), rows = prbRows();
-  const invoices = d.invoices.filter(i => i.insuredId === P.insured);
-  el.innerHTML = `<div class="prb-layout"><aside class="panel prb-insured"><h2>${t('prb.insured')}</h2>${d.insured.map(i => `<button class="prb-ins ${P.insured === i.id ? 'on' : ''}" data-act="prb-insured" data-id="${esc(i.id)}" aria-pressed="${P.insured === i.id}"><span>${esc(i.name)}</span><small>${num(d.rows.filter(r => r.insuredId === i.id).length)}</small></button>`).join('') || `<p>${t('prb.empty')}</p>`}</aside><section class="prb-detail"><div class="prb-toolbar"><div><h2>${esc(ins?.name || t('prb.title'))}</h2><p>${esc([ins?.taxId, ins?.address].filter(Boolean).join(' · '))}</p></div>${prbButton('prb-refresh', 'prb.refresh')}</div><div class="prb-toolbar"><label class="f grow"><span class="sr-only">${t('prb.search')}</span><input type="search" id="prbSearch" value="${esc(P.q)}" placeholder="${esc(t('prb.search'))}"></label><label class="f"><span class="sr-only">${t('prb.status')}</span><select id="prbStatus"><option value="">${t('f.allStatus')}</option>${['active', 'soon', 'expired', 'none'].map(st => `<option value="${st}" ${P.status === st ? 'selected' : ''}>${t('st.' + st)}</option>`).join('')}</select></label></div><div id="prbRows">${prbTable(rows, canEdit())}</div><div class="prb-toolbar" id="prbSelection">${prbSelection()}</div>${!rows.length ? `<p class="set-card">${t(d.rows.length ? 'prb.noMatch' : 'prb.empty')}</p>` : ''}<h3>${t('nav.invoices')}</h3><div class="prb-invoices">${invoices.map(i => `<button class="btn ghost" data-act="prb-invoice-open" data-id="${esc(i.id)}">${esc(i.no)} · ${baht(i.t?.total || 0)}</button>`).join('') || `<p>${t('prb.noInvoices')}</p>`}</div></section></div>`;
+  const insRows = d.rows.filter(r => r.insuredId === P.insured), invoices = d.invoices.filter(i => i.insuredId === P.insured);
+  const trashIns = ins && canEdit() && !insRows.length && !invoices.length ? prbButton('prb-trash-insured', 'prb.trashInsured', ins.id, 'danger-ghost sm') : '';
+  const rstSeq = isAdmin() && !d.invoices.length ? prbButton('prb-seq-reset', 'prb.seqReset') : '';
+  el.innerHTML = `<div class="prb-layout"><aside class="panel prb-insured"><h2>${t('prb.insured')}</h2>${d.insured.map(i => `<button class="prb-ins ${P.insured === i.id ? 'on' : ''}" data-act="prb-insured" data-id="${esc(i.id)}" aria-pressed="${P.insured === i.id}"><span>${esc(i.name)}</span><small>${num(d.rows.filter(r => r.insuredId === i.id).length)}</small></button>`).join('') || `<p>${t('prb.empty')}</p>`}</aside><section class="prb-detail"><div class="prb-toolbar"><div><h2>${esc(ins?.name || t('prb.title'))}</h2><p>${esc([ins?.taxId, ins?.address].filter(Boolean).join(' · '))}</p></div>${trashIns}${prbButton('prb-refresh', 'prb.refresh')}</div><div class="prb-toolbar"><label class="f grow"><span class="sr-only">${t('prb.search')}</span><input type="search" id="prbSearch" value="${esc(P.q)}" placeholder="${esc(t('prb.search'))}"></label><label class="f"><span class="sr-only">${t('prb.status')}</span><select id="prbStatus"><option value="">${t('f.allStatus')}</option>${['active', 'soon', 'expired', 'none'].map(st => `<option value="${st}" ${P.status === st ? 'selected' : ''}>${t('st.' + st)}</option>`).join('')}</select></label></div><div id="prbRows">${prbTable(rows, canEdit())}</div><div class="prb-toolbar" id="prbSelection">${prbSelection()}</div>${!rows.length ? `<p class="set-card">${t(d.rows.length ? 'prb.noMatch' : 'prb.empty')}</p>` : ''}<h3>${t('nav.invoices')}</h3><div class="prb-invoices">${invoices.map(i => `<button class="btn ghost" data-act="prb-invoice-open" data-id="${esc(i.id)}">${esc(i.no)} · ${baht(i.t?.total || 0)}</button>`).join('') || `<p>${t('prb.noInvoices')}</p>`}${rstSeq}</div></section></div>`;
 }
 function prbSelection() {
   return canEdit() ? `<span>${t('prb.selected', { n: P.selected.size })}</span><button class="btn primary" data-act="prb-invoice" ${P.selected.size ? '' : 'disabled'}>${t('inv.create')}</button>${prbButton('prb-clear', 'f.clear')}` : '';
@@ -2509,7 +2510,7 @@ function prbBatchChecks() {
   const groups = groupInsured(live.map(o => o.x.insured.name)).map(g => g.map(j => live[j].i));
   const gEl = $('#prbGroups');
   if (gEl) gEl.innerHTML = groups.map(g => {
-    const names = [...new Set([...g.map(i => PR.items[i].insured.name), ...suggestInsured(PR.items[g[0]].insured.name, P.data?.insured || []).map(x => x.name)])];
+    const names = spellingChoices(g.map(i => PR.items[i].insured.name), suggestInsured(PR.items[g[0]].insured.name, P.data?.insured || []).map(x => x.name));
     return `<div class="prb-warn prb-group"><b>${esc(t('prb.sameInsured', { x: g.map(i => '#' + (i + 1)).join(', ') }))}</b> ${esc(t('prb.pickSpelling'))}
       ${names.map(n => `<button type="button" class="btn ghost sm" data-act="prb-spell" data-g="${g.join(',')}" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>`;
   }).join('');
@@ -2647,7 +2648,8 @@ function prbInvTable(inv) {
 function prbInvoiceOpen(id) {
   const inv = P.data.invoices.find(i => i.id === id); if (!inv) return;
   const body = `<div id="prbInvoicePrint"><h2>${esc(S.company?.name || 'RICH INSURANS')}</h2><h3>${esc(inv.no)}</h3><p>${esc(inv.cust.name)}<br>${esc(inv.cust.taxId || '')}<br>${esc(inv.cust.address || '')}</p><p>${t('prb.issueDate')}: ${esc(fmtDay(inv.issue))}${inv.due ? ' · ' + t('prb.due') + ': ' + esc(fmtDay(inv.due)) : ''}</p>${prbInvTable(inv)}<p>${esc(inv.notes || '')}</p></div>`;
-  sheet({ title: esc(inv.no), cls: 'xwide', body, foot: S.mode === 'cloud' ? `${prbButton('prb-download', 'fl.download', id)}${prbButton('prb-send', 'fl.share', id)}` : prbButton('prb-print', 'prb.print') });
+  const act = S.mode === 'cloud' ? `${prbButton('prb-download', 'fl.download', id)}${prbButton('prb-send', 'fl.share', id)}` : prbButton('prb-print', 'prb.print');
+  sheet({ title: esc(inv.no), cls: 'xwide', body, foot: `${act}${canEdit() ? prbButton('prb-delete', 'btn.delete', id, 'danger') : ''}` });
 }
 async function prbDownload(id, share = false) {
   const row = P.data.rows.find(r => r.id === id) || P.data.invoices.find(r => r.id === id); if (!row) return;
@@ -2705,11 +2707,31 @@ const ACT = {
   },
   async 'prb-delete'(el) {
     if (!canEdit()) return;
-    const state = P, store = S.store, row = state.data.rows.find(r => r.id === el.dataset.id); if (!row) return;
-    if (!await confirmBox(esc(t('del.file', { x: row.name }) + t(S.mode === 'cloud' ? 'del.drive' : 'del.local')))) return;
+    const state = P, store = S.store, row = state.data.rows.find(r => r.id === el.dataset.id), inv = !row && state.data.invoices.find(i => i.id === el.dataset.id);
+    const item = row || inv; if (!item) return;
+    const q = row ? t('del.file', { x: row.name }) : t('prb.trashInvoiceQ', { x: inv.no || inv.fileName });
+    if (!await confirmBox(esc(q + t(S.mode === 'cloud' ? 'del.drive' : 'del.local')))) return;
     if (store !== S.store || !canEdit()) return;
-    await store.prbDelete(row.id); if (state !== P) return;
-    state.selected.delete(row.id); await loadPrb();
+    await store.prbDelete(item.id); if (state !== P) return;
+    state.selected.delete(item.id); await loadPrb();
+  },
+  async 'prb-trash-insured'(el) {
+    if (!canEdit()) return;
+    const state = P, store = S.store, ins = state.data?.insured.find(i => i.id === (el.dataset.id || state.insured)); if (!ins) return;
+    if (state.data.rows.some(r => r.insuredId === ins.id) || state.data.invoices.some(i => i.insuredId === ins.id)) return toast(t('prb.notEmpty'), 'err');
+    if (!await confirmBox(esc(t('prb.trashInsuredQ', { x: ins.name }) + t(S.mode === 'cloud' ? 'del.drive' : 'del.local')))) return;
+    if (store !== S.store || !canEdit()) return;
+    await store.prbDeleteInsured(ins.id); if (state !== P) return;
+    state.insured = ''; state.selected.clear(); await loadPrb();
+  },
+  async 'prb-seq-reset'() {
+    if (!isAdmin()) return toast(t('err.role'), 'err');
+    const state = P, store = S.store;
+    if (state.data?.invoices?.length) return toast(t('prb.invExist'), 'err');
+    if (!await confirmBox(esc(t('prb.seqResetQ')), t('prb.seqReset'), false)) return;
+    if (store !== S.store || !isAdmin()) return;
+    await store.prbSeqReset();
+    toast(t('prb.seqResetDone'));
   },
   async 'prb-share'(el) {
     if (!canEdit() || S.mode !== 'cloud') return;

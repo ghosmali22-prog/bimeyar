@@ -194,6 +194,8 @@ export class ApiStore {
   prbShare(id) { return call('prbShare', { id }); }
   prbUnshare(id) { return call('prbUnshare', { id }); }
   async prbDelete(id) { const r = await call('prbDelete', { id }); this.blobCache.delete(id); this.thumbCache.delete(id); return r; }
+  prbDeleteInsured(id) { return call('prbDeleteInsured', { id }); }
+  prbSeqReset() { return call('prbSeqReset'); }
   prbImportPlan() { return call('prbImportPlan'); }
   prbImport(items) { return call('prbImport', { items }, null, 300000); }
   prbInvoice(req) { return call('prbInvoice', req); }

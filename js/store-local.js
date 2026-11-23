@@ -379,6 +379,22 @@ export class LocalStore {
     if (this.db) await rq(this.s('blobs', 'readwrite').delete(id));
     return true;
   }
+  async prbDeleteInsured(id) {
+    const d = this._prbLoad();
+    if (!d.insured.some(x => x.id === id)) throw Object.assign(new Error('Insured folder not found'), { code: 'not_found' });
+    if (d.rows.some(r => r.insuredId === id) || d.invoices.some(i => i.insuredId === id)) {
+      throw Object.assign(new Error('Insured folder is not empty'), { code: 'bad_request', key: 'prb.notEmpty' });
+    }
+    d.insured = d.insured.filter(x => x.id !== id);
+    this._prbSave(d);
+    return true;
+  }
+  async prbSeqReset() {
+    const d = this._prbLoad();
+    if (d.invoices.length) throw Object.assign(new Error('PRB invoices exist'), { code: 'bad_request', key: 'prb.invExist' });
+    try { localStorage.removeItem('by_prb_seq'); } catch { }
+    return { ok: true };
+  }
   async prbImportPlan() {
     const { customers, files, vehicles } = await this.loadAll();
     const d = this._prbLoad();

@@ -1,5 +1,17 @@
 # Changelog
 
+## v4.5.4 (2026-11-23)
+
+- **Name spelling suggestions (พ.ร.บ. review)**: a spelling with extra Thai tone marks (e.g. "พี่ พี่") is never offered
+  when the batch majority has none; the "pick one spelling" buttons show the majority spelling first (`spellingChoices`,
+  `stripMarks`, `markCount` in `js/prb.js`). A saved name with extra marks no longer beats the batch.
+- **Trash (Drive trash only, in-app confirm)**: PRB invoices (button in the invoice sheet, existing `prbDelete`) and an
+  insured with 0 records and 0 invoices (new action `prbDeleteInsured`, only `prbins` folders inside the พ.ร.บ. folder).
+- **Admin: reset PRB invoice numbers** (new action `prbSeqReset`): only when no PRB invoice exists (not trashed);
+  numbers of trashed invoices are still skipped, so no duplicates.
+- Sign-in / unlock screens: no "Try the demo on this device" button (private company app); demo code kept.
+- CLAUDE.md: current deployment (backend Version 15, frontend v4.5.3) and the history cleanup.
+
 ## v4.5.3 (2026-11-23)
 
 - **Branch prefix of Viriyah policy numbers** (the 5-digit number under "VIB"): new AI field `branchCode`, and the prompt says

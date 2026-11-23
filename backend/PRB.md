@@ -58,6 +58,8 @@ Per line, in integer satang: `net = netPremium`, `stamps`, `vat`, `total = total
 | `prbGetFile` | viewer | `{ id }` | `{ mime, data }` |
 | `prbShare` / `prbUnshare` | editor | `{ id }` | `{ row, link }` / `row` |
 | `prbDelete` | editor | `{ id }` (Drive trash only) | `true` |
+| `prbDeleteInsured` | editor | `{ id }` (empty `prbins` folder only; Drive trash only) | `true` |
+| `prbSeqReset` | admin | – (only when no non-trashed `prbinv` exists; deletes `PRB_SEQ`) | `{ ok: true }` |
 | `prbImportPlan` | admin | – (read only) | `[{ id, name, mime, size, customerId, customer, vehicleId, plate, ym, imported }]` |
 | `prbImport` | admin | `{ items: [{ id, insured, row, name }] }` (max 20) | `{ done: [{ id, row }], skipped: [{ id, why }] }` |
 | `prbInvoice` | editor | `{ insuredId, rowIds: [], issue, due, lang, notes, dateFmt }` | `invoice` |
