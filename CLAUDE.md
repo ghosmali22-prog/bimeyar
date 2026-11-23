@@ -130,7 +130,11 @@ to a production system. Talk to the owner (Pejman) in Persian.
   Older: `v4.3-pre-claude` (= `v4.3.0`). Before that: `v4.2.0-stable` (= `v4.2.0`), `v4.1.0-stable` (= `v4.1.0`), `v4.0.0-stable` (= `v4.0.0`), `v3.3.0-stable` (= `v3.3.0`), `v3.2-pre-device` (= `v3.2.0`),
   `v3.1-pre-naming` (= `v3.1.0`), `v3.0.1-stable` (v3.0 look).
   The v2 frontend is tag `v2.0.1-pre-upgrade`.
-- Tests: `node tests/prb.test.mjs` + `node tests/prb-front.test.mjs` (v4.5 พ.ร.บ. section), `node tests/dates.test.mjs` (v4.4.1 dates + AI rules), `node tests/ai-provider.test.mjs` (v4.4 Claude + Gemini fallback), `node tests/aiedit.test.mjs` (v4.3 Edit with AI), `node tests/restore.test.mjs` (v4.2 restore names), `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
+- **Dashboard (v4.7)**: `js/dash.js` (pure, tested in `tests/dash.test.mjs`): payment due = vehicle `policyStart` + `payDays`
+  (optional vehicle fields `payDays`, `paid` ('1'), `paidDate`; missing payDays = 30 IN CODE ONLY, never written to old
+  records). Only the current policy of each plate, unpaid, due not older than 60 days (owner's decision). The พ.ร.บ.
+  expiring chart uses the พ.ร.บ. section rows (`prbList`), newest PRB per chassis/plate only.
+- Tests: `node tests/dash.test.mjs`, `node tests/prb.test.mjs` + `node tests/prb-front.test.mjs` (v4.5 พ.ร.บ. section), `node tests/dates.test.mjs` (v4.4.1 dates + AI rules), `node tests/ai-provider.test.mjs` (v4.4 Claude + Gemini fallback), `node tests/aiedit.test.mjs` (v4.3 Edit with AI), `node tests/restore.test.mjs` (v4.2 restore names), `node tests/vehicles.test.mjs` (v4 vehicles, folders, security chain, move tool + undo), `node tests/device-session.test.mjs` (device password, v3.3), `node tests/naming.test.mjs` (naming + backend upload/rename/undo/share on a fake Drive) and `node tests/invoice-totals.test.mjs`.
 
 ## Design (owner's decision)
 

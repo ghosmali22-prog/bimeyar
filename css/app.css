@@ -1003,3 +1003,30 @@ img.fadein { animation: fade .5s ease both; }
 .logo.logo-img img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .gate-logo { width: 132px; height: 132px; border-radius: 30px; object-fit: cover; display: block; margin: 0 auto 10px; box-shadow: 0 20px 34px -16px rgba(0, 0, 0, .55); }
 @media (max-width: 480px) { .gate-logo { width: 108px; height: 108px; border-radius: 26px; } }
+
+/* v4.7.0 dashboard charts */
+.dues { margin-block-end: 20px; min-width: 0; }
+.dues-cards { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+.dues-card { min-width: 0; padding: 16px; }
+.dues-card header { gap: 8px; flex-wrap: wrap; min-height: 44px; }
+.dues-alerts { display: grid; gap: 4px; margin-block-end: 12px; padding: 12px; background: var(--surface, #fff); border-radius: 18px; }
+.dues-alerts > .pill { justify-self: start; }
+.dues-alert { min-height: 44px; text-align: start; background: none; border: 0; padding: 8px; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+.dues .bad { color: var(--bad); }
+.dues .warn { color: var(--warn); }
+.dues .ok { color: var(--ok); }
+.dues-chips, .dues-toggle { display: flex; flex-wrap: wrap; gap: 4px; }
+.dues .btn, .dues-list .btn { min-height: 44px; }
+.dues-toggle [aria-pressed=true] { background: #eee9ff; }
+.dues-chart { display: flex; overflow-x: auto; gap: 2px; height: 174px; padding-block: 8px; margin-block-start: 4px; overscroll-behavior-inline: contain; }
+.dues-bar { flex: 1 0 44px; min-width: 44px; min-height: 44px; padding: 3px 0; background: transparent; border: 0; border-radius: 8px; font: inherit; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; }
+.dues-bar svg { height: 90px; width: 40px; flex-shrink: 0; fill: currentColor; }
+.dues-bar span { font-size: 12px; font-weight: 700; }
+.dues-bar small { font-size: 10px; line-height: 1.3; min-height: 28px; max-width: 68px; overflow-wrap: anywhere; padding-top: 5px; color: var(--ink, #292540); }
+.dues button:focus-visible, .dues-list button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dues-list { padding: 16px; }
+.dues-row { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; border-block-end: 1px solid #e9e6ef; padding: 10px 0; background: transparent; }
+.dues-row-main { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; min-height: 44px; text-align: start; font: inherit; color: inherit; background: none; border: 0; cursor: pointer; overflow-wrap: anywhere; }
+.dues-row-main small { line-height: 1.5; }
+#vform [name=paid] { width: 24px; height: 24px; margin: 10px; }
+@media (min-width: 821px) { .dues-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dues-cards > :only-child { grid-column: 1 / -1; } }

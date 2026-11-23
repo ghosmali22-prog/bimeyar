@@ -825,6 +825,40 @@ for (const [key, values] of Object.entries(PRB_TEXT)) {
   ['en', 'th', 'fa'].forEach((l, i) => { D[l][key] = values[i]; });
 }
 
+const DASH_TEXT = {
+  'cf.payDays': ['Payment term (days)', 'ระยะเวลาชำระเงิน (วัน)', 'مهلت پرداخت (روز)'],
+  'cf.paid': ['Paid', 'ชำระแล้ว', 'پرداخت شده'],
+  'cf.paidDate': ['Payment date', 'วันที่ชำระเงิน', 'تاریخ پرداخت'],
+  'pay.payment': ['Payment', 'การชำระเงิน', 'پرداخت'],
+  'pay.title': ['Payments due', 'กำหนดชำระเงิน', 'سررسید پرداخت‌ها'],
+  'pay.dueHint': ['Payment due: {date}', 'กำหนดชำระเงิน: {date}', 'سررسید پرداخت: {date}'],
+  'pay.invalidDays': ['Enter a whole number from 1 to 365, or leave blank.', 'กรอกจำนวนเต็มตั้งแต่ 1 ถึง 365 หรือเว้นว่าง', 'عدد صحیح بین ۱ تا ۳۶۵ وارد کنید یا خالی بگذارید.'],
+  'pay.invalidDate': ['Enter a valid payment date.', 'กรุณากรอกวันที่ชำระเงินให้ถูกต้อง', 'تاریخ پرداخت معتبر وارد کنید.'],
+  'pay.tomorrow': ['Tomorrow is the payment due date for {c} {p}', 'พรุ่งนี้ครบกำหนดชำระเงินของ {c} {p}', 'فردا سررسید پرداخت {c} {p} است'],
+  'pay.today': ['Today is the payment due date for {c} {p}', 'วันนี้ครบกำหนดชำระเงินของ {c} {p}', 'امروز سررسید پرداخت {c} {p} است'],
+  'pay.overdueN': ['Overdue payments: {n}', 'ค้างชำระ {n} รายการ', 'پرداخت‌های عقب‌افتاده: {n}'],
+  'pay.overdue': ['Overdue payments', 'รายการค้างชำระ', 'پرداخت‌های عقب‌افتاده'],
+  'pay.alerts': ['{n} payment alerts', 'แจ้งเตือนการชำระเงิน {n} รายการ', '{n} هشدار پرداخت'],
+  'pay.start': ['Policy start', 'วันเริ่มคุ้มครอง', 'شروع بیمه‌نامه'],
+  'pay.due': ['Due', 'ครบกำหนด', 'سررسید'],
+  'pay.term': ['{n}-day payment term', 'ระยะเวลาชำระ {n} วัน', 'مهلت پرداخت {n} روز'],
+  'pay.state.overdue': ['Overdue', 'ค้างชำระ', 'عقب‌افتاده'],
+  'pay.state.today': ['Due today', 'ครบกำหนดวันนี้', 'سررسید امروز'],
+  'pay.state.tomorrow': ['Due tomorrow', 'ครบกำหนดพรุ่งนี้', 'سررسید فردا'],
+  'pay.state.upcoming': ['Upcoming', 'ยังไม่ถึงกำหนด', 'پیش رو'],
+  'dash.prbExpiring': ['พ.ร.บ. expiring', 'พ.ร.บ. ใกล้หมดอายุ', 'سررسید بیمه اجباری خودرو'],
+  'dash.expired': ['Expired', 'หมดอายุแล้ว', 'منقضی‌شده'],
+  'dash.days': ['{n} d', '{n} วัน', '{n} روز'],
+  'dash.weeks': ['Weeks', 'รายสัปดาห์', 'هفتگی'],
+  'dash.week': ['W{n}', 'สัปดาห์ {n}', 'هفته {n}'],
+  'dash.empty': ['No records in this period.', 'ไม่มีรายการในช่วงเวลานี้', 'در این بازه موردی وجود ندارد.'],
+};
+for (const [key, values] of Object.entries(DASH_TEXT)) {
+  ['en', 'th', 'fa'].forEach((l, i) => { D[l][key] = values[i]; });
+}
+// The scale toggle has a separate label from the numbered day chips.
+for (const [i, l] of ['en', 'th', 'fa'].entries()) D[l]['dash.daily'] = ['Days', 'รายวัน', 'روزانه'][i];
+
 let saved = null;
 try { saved = localStorage.getItem('by_lang'); } catch { }
 export let lang = D[saved] ? saved : 'en';

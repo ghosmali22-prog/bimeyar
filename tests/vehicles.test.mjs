@@ -210,6 +210,20 @@ eq([v4.id, v4.vin, v4.premium], [v1.id, 'MP1TFAKE000000111', '18500'], 'same pla
 eq(kids(july.id).length, 2, 'no duplicate plate folder');
 A.saveVehicle.run({ vehicle: { id: v1.id, insurer: 'Viriyah' } }, user);
 eq(JSON.parse(Drive.files[v1.id].description).premium, '18500', 'edit merges: other fields kept');
+// Optional payment metadata merges without writing defaults to old records.
+const payKeys = ['payDays', 'paid', 'paidDate'];
+eq(payKeys.some(k => k in JSON.parse(Drive.files[v2.id].description)), false, 'no payment defaults persisted');
+const payOld = JSON.parse(Drive.files[v1.id].description);
+Drive.files[v1.id].description = JSON.stringify({ ...payOld, oldUnknown: 'keep' });
+A.saveVehicle.run({ vehicle: { id: v1.id, payDays: '45', paid: '1', paidDate: '2569-11-23' } }, user);
+let paySaved = JSON.parse(Drive.files[v1.id].description);
+eq([paySaved.payDays, paySaved.paid, paySaved.paidDate], ['45', '1', '2026-11-23'], 'payment fields merged and BE normalized');
+eq([paySaved.oldUnknown, paySaved.vin, paySaved.premium], ['keep', payOld.vin, payOld.premium], 'unknown and old fields retained');
+A.saveVehicle.run({ vehicle: { id: v1.id, paid: '' } }, user);
+paySaved = JSON.parse(Drive.files[v1.id].description);
+eq(['paid' in paySaved, paySaved.payDays, paySaved.paidDate], [false, '45', '2026-11-23'], 'empty paid clears only paid');
+A.saveVehicle.run({ vehicle: { id: v1.id, payDays: '', paidDate: '' } }, user);
+eq(payKeys.some(k => k in JSON.parse(Drive.files[v1.id].description)), false, 'all optional payment fields can be cleared');
 throws(() => A.saveVehicle.run({ vehicle: { customerId: c.id, plate: '' } }, user), 'plate is required');
 // same plate renewed next year
 const r1 = A.saveVehicle.run({ vehicle: { customerId: c.id, plate: '99-0016', contractDate: '2027-07-04' } }, user);

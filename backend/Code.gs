@@ -92,6 +92,7 @@ const VFILE_SLOTS = ['1', '2', '3', '4', '5.1', '5.2', '5.3', '5.4', '5.5'];
 const MONTHS_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 /** Vehicle fields (v4), stored as JSON in the description of the plate folder. All optional except the plate. */
 const VFIELDS = {
+  payDays: 4, paid: 1, paidDate: 'date',
   plate: 40, province: 60, brand: 40, model: 60, year: 4, color: 30, body: 60, vin: 40, engineNo: 40, carValue: 20,   // carValue: v4.4.1
   insurer: 80, policyNo: 60, policyType: 60, coverage: 20, premium: 20,
   contractDate: 'date', policyStart: 'date', policyExpiry: 'date', note: 500,

@@ -1,9 +1,9 @@
 // Caches ONLY the app shell (HTML, CSS, JS, icons) so the app opens fast like an installed app.
 // Customer data never goes into this cache: API calls go to script.google.com (another origin) and are
 // never touched here, and only the files listed below are ever stored.
-const CACHE = 'bimeyar-v4.6.0';
+const CACHE = 'bimeyar-v4.7.0';
 const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/util.js', 'js/i18n.js', 'js/config.js', 'js/store-local.js', 'js/store-remote.js',
-  'js/auth.js', 'js/assistant.js', 'js/demo.js', 'js/invoice.js', 'js/validate.js', 'js/ai.js', 'js/naming.js', 'js/device.js', 'js/vehicles.js', 'js/dates.js', 'js/prb.js', 'manifest.webmanifest',
+  'js/auth.js', 'js/assistant.js', 'js/demo.js', 'js/invoice.js', 'js/validate.js', 'js/ai.js', 'js/naming.js', 'js/device.js', 'js/vehicles.js', 'js/dates.js', 'js/prb.js', 'js/dash.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
   'icons/favicon-64.png', 'assets/rich-mark-128.png', 'assets/rich-logo-320.png'];
 const SHELL_PATHS = new Set(SHELL.map(p => new URL(p, self.registration.scope).pathname));
