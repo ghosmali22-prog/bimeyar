@@ -299,7 +299,7 @@ function syncChrome() {
 function gateHtml() {
   const g = S.gate;
   // v4.5.4: no "Try the demo on this device" on the sign-in / unlock screens (private company app); demo code stays
-  if (g === 'loading') return `<section class="gate card"><div class="gate-ico">${icon('lock', 38)}</div><h1>${t('gate.loading')}</h1><div class="spin"></div></section>`;
+  if (g === 'loading') return `<section class="gate card"><img class="gate-logo" src="assets/rich-logo-320.png" alt="RICH INSURANS" width="160" height="160"><h1>${t('gate.loading')}</h1><div class="spin"></div></section>`;
   if (g === 'deny') return `<section class="gate card">
       <div class="gate-ico deny">${icon('lock', 38)}</div><h1>${t('deny.title')}</h1>
       <p>${t('deny.text', { x: `<b dir="ltr">${esc(S.denied)}</b>` })}</p>
@@ -310,7 +310,7 @@ function gateHtml() {
     const b = device.info() || {};
     const msg = S.pinLeft != null ? t('dv.wrong', { n: S.pinLeft }) : '';
     return `<section class="gate card">
-      <div class="gate-ico">${icon('lock', 38)}</div>
+      <img class="gate-logo" src="assets/rich-logo-320.png" alt="RICH INSURANS" width="160" height="160">
       <h1>${t('dv.unlockTitle')}</h1>
       <p>${t('dv.unlockText', { x: `<b dir="ltr">${esc(b.email || '')}</b>` })}</p>
       <form class="form gate-form" data-form="unlock" id="ulform" novalidate>
@@ -338,7 +338,7 @@ function gateHtml() {
       <div class="gate-actions"><button class="btn ghost" data-act="dv-skip">${t('dv.skip')}</button></div>
     </section>`;
   return `<section class="gate card">
-      <div class="gate-ico">${icon('shield', 38)}</div>
+      <img class="gate-logo" src="assets/rich-logo-320.png" alt="RICH INSURANS" width="160" height="160">
       <h1>${t('gate.title')}</h1>
       <p>${S.pinMsg && g === 'expired' ? t(S.pinMsg) : t(g === 'expired' ? 'gate.expired' : 'gate.text')}</p>
       <div class="gbtn" id="gbtn"><div class="spin"></div></div>

@@ -997,3 +997,9 @@ img.fadein { animation: fade .5s ease both; }
 .prb-autonote { color: #6a4df5; font-weight: 600; margin-block: 2px; }
 .prb-cell[data-pk="policyNo"] { min-width: 200px; }
 .prb-cell[data-pk="barcode"], .prb-cell[data-pk="vin"], .prb-cell[data-pk="engineNo"] { min-width: 140px; }
+
+/* v4.6.0: RICH INSURANS logo (header mark + sign-in / unlock screens); colours of the app unchanged */
+.logo.logo-img { background: none; overflow: hidden; box-shadow: 0 8px 18px -8px rgba(0, 0, 0, .45); }
+.logo.logo-img img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.gate-logo { width: 132px; height: 132px; border-radius: 30px; object-fit: cover; display: block; margin: 0 auto 10px; box-shadow: 0 20px 34px -16px rgba(0, 0, 0, .55); }
+@media (max-width: 480px) { .gate-logo { width: 108px; height: 108px; border-radius: 26px; } }
