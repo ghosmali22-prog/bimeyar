@@ -13,7 +13,8 @@ import { checkCustomer, findDuplicates, thaiPhone, money, latinDigits } from './
 import { buildName, docNameFromOld, plateOnly, plateFromName, followsPattern, monthOf, extOf, withExt, safeName, uniqueIn } from './naming.js';
 import { VSLOTS, VSLOT, FILE_SLOTS, VFIELDS, VGROUPS, vehiclesOf, latestOf, byMonth, ymText, ymFolder, ymForVehicle, vehicleFileName, slotFromAi, findCustomer, findVehicle, allVehicles, batchHint, searchVehicles, movePlan, moveName, plateKey, nameKey, needsAiRead, detectVehicles, aiEditSuggest } from './vehicles.js';
 import { PRB_FIELDS, prbStatus, sortRows, prbTotals, vatCheck, prbFileName, rowFromAi, isPrbDoc, findDup, prbSanity, suggestInsured, groupInsured, prbPost, suggestPolicyNo, majorityName, consensusName, spellingChoices } from './prb.js';
-import { parseDate } from './dates.js';
+import { parseDate, isoToday, fmtDMY } from './dates.js';
+import { payDue, paymentItems, paymentBuckets, prbExpiring } from './dash.js';
 
 /*
  * Layout = the v2 design (dashboard with stat cards, dark customer panel with the purple case file,
@@ -25,6 +26,7 @@ let savedMode = null;
 try { savedMode = localStorage.getItem('by_mode'); } catch { }
 
 const S = {
+  prbDash: null, prbDashStore: null, prbDashRequest: 0, payScale: 'weeks',
   view: 'dash', customers: [], files: [], invoices: [], vehicles: [], exp: {}, vexp: {}, renew: [], company: null, sel: null, store: null,
   openVeh: '', openSlot: '',   // v4: the open vehicle card and folder in the case file
   gate: null,            // null | 'loading' | 'signin' | 'expired' | 'deny' | 'config' | 'gis' | 'unlock' | 'setpin' (v3.3)
@@ -133,6 +135,22 @@ async function reload(remount = false) {
   S.quota = await S.store.quota().catch(() => null);
   if (!S.company) S.store.getSettings().then(c => { S.company = c; }).catch(() => { });
   if (remount) mount(); else drawAll(false);
+  loadPrbDash();
+}
+
+// Optional dashboard data must never delay or block the customer dashboard.
+function loadPrbDash() {
+  const store = S.store, request = ++S.prbDashRequest;
+  if (S.prbDashStore !== store) S.prbDash = null;
+  S.prbDashStore = store;
+  drawDues();
+  Promise.resolve().then(() => store.prbList()).then(data => {
+    if (S.store !== store || request !== S.prbDashRequest) return;
+    S.prbDash = data;
+    drawDues();
+  }).catch(() => {
+    if (S.store === store && request === S.prbDashRequest) { S.prbDash = null; drawDues(); }
+  });
 }
 
 function applyRole() {
@@ -235,6 +253,7 @@ const addBtn = () => `<button class="btn primary" data-act="upload">${icon('plus
 const VIEWS = {
   prb: () => `${titleRow('prb', `<button class="btn ghost" data-act="prb-camera">${icon('camera')} ${t('btn.camera')}</button><button class="btn primary" data-act="prb-upload">${icon('plus')} ${t('btn.addFile')}</button>${isAdmin() ? `<button class="btn ghost" data-act="prb-import">${t('prb.import')}</button>` : ''}`)}<section id="prbView" aria-live="polite"></section>`,
   dash: () => `${titleRow('dash', `<button class="btn ghost" data-act="smart">${icon('wand')}<span>${t('su.btn')}</span></button><button class="btn ghost" data-act="new-customer">${icon('userplus')}<span>${t('btn.newCustomer')}</span></button>${addBtn()}`)}
+    <section class="dues" id="dues"></section>
     <section class="stats" id="stats"></section>
     <section class="filters" id="filters"></section>
     <section class="panel" id="panel"></section>`,
@@ -268,7 +287,7 @@ function mount() {
 }
 function drawAll(anim) {
   if (S.gate || !S.store) return;
-  drawStats(anim); drawFilters(true); drawResults(anim);
+  drawDues(); drawStats(anim); drawFilters(true); drawResults(anim);
   syncChrome();
 }
 function drawResults(anim) {
@@ -346,6 +365,69 @@ function gateHtml() {
 }
 
 /* ---------- stat cards ---------- */
+/* Dashboard groups contain references only; opening charts never writes records. */
+let duesGroups = [];
+function duesGroup(kind, title, rows) {
+  return duesGroups.push({ kind, title, rows }) - 1;
+}
+function duesChart(kind, title, buckets) {
+  const max = Math.max(1, ...buckets.map(b => b.n));
+  return `<div class="dues-chart" role="group" aria-label="${esc(title)}">${buckets.map(b => {
+    const label = `${b.label}: ${num(b.n)}`, group = duesGroup(kind, b.label, b.rows);
+    return `<button class="dues-bar ${b.tone || 'ok'}" data-act="dues-list" data-group="${group}" aria-label="${esc(label)}">
+      <span>${num(b.n)}</span><svg viewBox="0 0 40 90" role="img" aria-label="${esc(label)}"><rect x="7" y="${90 - b.n / max * 86}" width="26" height="${b.n / max * 86}" rx="4"/></svg><small>${esc(b.short || b.label)}</small></button>`;
+  }).join('')}</div>`;
+}
+function drawDues() {
+  const el = $('#dues'); if (!el || S.gate) return;
+  duesGroups = [];
+  const today = isoToday(), items = paymentItems(S.customers, S.vehicles, today);
+  const buckets = paymentBuckets(items, today), alerts = items.filter(x => x.d <= 1);
+  const overdue = buckets.overdueRows;
+  const alertGroup = duesGroup('pay', t('pay.alerts', { n: alerts.length }), alerts);
+  const overdueGroup = duesGroup('pay', t('pay.overdue'), overdue);
+  const strip = alerts.length ? `<div class="dues-alerts"><span class="pill ${overdue.length ? 'bad' : 'warn'}">${t('pay.alerts', { n: alerts.length })}</span>
+    ${overdue.length ? `<button class="dues-alert bad" data-act="dues-list" data-group="${overdueGroup}">${t('pay.overdueN', { n: overdue.length })}</button>` : ''}
+    ${alerts.filter(x => x.d >= 0).map(x => `<button class="dues-alert warn" data-act="dues-list" data-group="${alertGroup}">${esc(t('pay.' + x.state, { c: x.c.name, p: x.v.plate || '' }))}</button>`).join('')}</div>` : '';
+  const scale = S.payScale;
+  const payChart = duesChart('pay', t('pay.title'), buckets[scale].map((b, i) => ({ ...b,
+    label: scale === 'days' ? fmtDMY(b.start) : `${fmtDMY(b.start)} – ${fmtDMY(b.end)}`,
+    short: scale === 'days' ? fmtDMY(b.start).slice(0, 5) : t('dash.week', { n: i + 1 }),
+    tone: b.rows.some(x => x.d <= 1) ? 'warn' : 'ok' })));
+  let prbCard = '';
+  if (S.prbDash && S.prbDashStore === S.store) {
+    const prb = prbExpiring(S.prbDash.rows || [], today);
+    const chips = [{ label: t('dash.expired'), rows: prb.expired, tone: 'bad' }, ...[7, 30, 60, 90].map(n => ({
+      label: t('dash.days', { n }), rows: prb.months.flatMap(m => m.rows).filter(x => x.d >= 0 && x.d <= n), tone: 'warn' }))];
+    prbCard = `<article class="card dues-card"><header>${t('dash.prbExpiring')}</header><div class="dues-chips">${chips.map(b => `<button class="btn ghost ${b.tone}" data-act="dues-list" data-group="${duesGroup('prb', b.label, b.rows)}">${b.label} <b>${num(b.rows.length)}</b></button>`).join('')}</div>
+      ${duesChart('prb', t('dash.prbExpiring'), [{ label: t('dash.expired'), n: prb.expired.length, rows: prb.expired, tone: 'bad' },
+        ...prb.months.map(m => ({ ...m, label: m.ym.split('-').map(num).join('/'), tone: m.rows.some(x => x.d >= 0 && x.d <= 30) ? 'warn' : 'ok' }))])}</article>`;
+  }
+  el.innerHTML = `${strip}<div class="dues-cards">${prbCard}<article class="card dues-card"><header>${t('pay.title')}<div class="dues-toggle">${['weeks', 'days'].map(s => `<button class="btn ghost" data-act="dues-scale" data-scale="${s}" aria-pressed="${scale === s}">${t(s === 'days' ? 'dash.daily' : 'dash.weeks')}</button>`).join('')}</div></header>
+    <button class="btn ghost bad" data-act="dues-list" data-group="${overdueGroup}">${t('pay.overdueN', { n: overdue.length })}</button>${payChart}</article></div>`;
+}
+function duesList(index) {
+  const group = duesGroups[index]; if (!group) return;
+  sheet({ title: group.title, cls: 'wide', body: `<div class="dues-list">${group.rows.map(x => {
+    if (group.kind === 'prb') {
+      const name = S.prbDash?.insured?.find(i => i.id === x.row.insuredId)?.name || x.row.insuredName || '';
+      return `<button class="dues-row dues-row-main" data-act="dues-prb" data-id="${esc(x.row.insuredId || '')}"><b><bdi>${esc(x.row.plate || '—')}</bdi> · ${esc(name)}</b><small>${fmtDay(x.end)} · ${daysText(x.d)}</small></button>`;
+    }
+    return `<div class="dues-row"><button class="dues-row-main" data-act="open-customer" data-id="${esc(x.c.id)}" data-veh="${esc(x.v.id)}"><b>${esc(x.c.name)} · <bdi>${esc(x.v.plate || '—')}</bdi></b><small>${t('pay.start')}: ${fmtDay(parseDate(x.v.policyStart))} · ${t('pay.due')}: ${fmtDay(x.due)}</small><small>${t('pay.term', { n: payDue(x.v).days })} · ${daysText(x.d)}</small><em class="pill ${x.d < 0 ? 'bad' : x.d <= 1 ? 'warn' : 'ok'}">${t('pay.state.' + x.state)}</em></button>
+      ${canEdit() ? `<button class="btn ghost" data-act="dues-paid" data-id="${esc(x.v.id)}">${t('cf.paid')}</button>` : ''}</div>`;
+  }).join('') || `<p class="muted">${t('dash.empty')}</p>`}</div>` });
+}
+async function duesPaid(el) {
+  if (!canEdit() || el.disabled) return;
+  const v = vehById(el.dataset.id); if (!v) return;
+  el.disabled = true;
+  try {
+    const real = await realVehicle(v, v.customerId);
+    await S.store.saveVehicle({ id: real.id, paid: '1', paidDate: isoToday() });
+    closeSheet(); await reload();
+  } finally { el.disabled = false; }
+}
+
 function drawStats(anim) {
   const el = $('#stats'); if (!el) return;
   const soon = S.renew.filter(m => m.d <= 30).length;   // v4: counted per vehicle
@@ -811,7 +893,9 @@ const fieldInput = (k, v, { err = '', warn = '', conf = null, note = '', req = f
   const val = esc(v || '');
   const attrs = `name="${k}" data-r="${k}"`;
   let inp;
-  if (DATE_FIELDS.has(k)) inp = `<input type="date" ${attrs} value="${val}">`;
+  if (DATE_FIELDS.has(k) || k === 'paidDate') inp = `<input type="date" ${attrs} value="${val}">`;
+  else if (k === 'paid') inp = `<input type="checkbox" ${attrs} value="1" ${v === '1' ? 'checked' : ''}>`;
+  else if (k === 'payDays') inp = `<input type="number" ${attrs} value="${val}" placeholder="30" min="1" max="365" step="1" inputmode="numeric">`;
   else if (k === 'address' || k === 'note') inp = `<textarea ${attrs} rows="2" maxlength="${k === 'note' ? 500 : 300}">${val}</textarea>`;
   else {
     const extra = { phone: 'inputmode="tel" dir="ltr" autocomplete="tel"', idNo: 'inputmode="numeric" dir="ltr"', year: 'inputmode="numeric" maxlength="4"', coverage: 'inputmode="decimal"', carValue: 'inputmode="decimal"', premium: 'inputmode="decimal"', vin: 'dir="ltr" autocapitalize="characters"', engineNo: 'dir="ltr" autocapitalize="characters"', policyNo: 'dir="ltr"', province: 'list="dl-prov"', policyType: 'list="dl-ptype"', name: 'required maxlength="120"', plate: 'maxlength="40"' }[k] || '';
@@ -894,6 +978,7 @@ function drawVehicleSheet(errors = {}) {
       ${VF.legacy ? `<p class="note">${icon('info', 15)}<span>${t('vh.legacyEdit')}</span></p>` : ''}
       ${fieldset(t('g.vehicle'), VGROUPS.vehicle, v, { errors, plateReq: true })}
       ${fieldset(t('g.policy'), VGROUPS.policy, v, { errors })}
+      <fieldset class="fgroup"><legend>${t('pay.payment')}</legend><div class="fgrid">${['payDays', 'paid', 'paidDate'].map(k => fieldInput(k, v[k], { err: errors[k] })).join('')}</div><p class="muted" id="payDueHint" aria-live="polite"></p></fieldset>
       <fieldset class="fgroup"><legend>${t('vh.month')}</legend>
         ${VF.id ? `<p class="sh-text"><b>${iso(ymFolder(v.ym))}</b></p><p class="muted">${t('vh.monthFixed')}</p>`
           : `<label class="fld"><span class="fl">${t('vh.monthFolder')}</span><input type="month" name="ym" value="${esc(ym)}" data-vf-ym></label><p class="muted">${t('vh.monthHint')}</p>`}</fieldset>
@@ -901,12 +986,27 @@ function drawVehicleSheet(errors = {}) {
     foot: `${VF.id ? `<button type="button" class="btn danger-ghost" data-act="del-vehicle" data-id="${esc(VF.id)}">${icon('trash', 17)}<span>${t('vh.remove')}</span></button>` : ''}<span class="sp"></span>
       <button type="button" class="btn ghost" data-act="close-sheet">${t('btn.cancel')}</button><button class="btn primary" type="submit" form="vform">${t('btn.save')}</button>` });
   sheetClose = () => { VF = null; };
+  const form = $('#vform');
+  const updatePayment = event => {
+    if (event.target === form.elements.paid && form.elements.paid.checked && !form.elements.paidDate.value) form.elements.paidDate.value = isoToday();
+    const due = payDue({ policyStart: form.elements.policyStart.value, payDays: form.elements.payDays.value }).due;
+    $('#payDueHint').textContent = t('pay.dueHint', { date: due ? fmtDay(due) : '—' });
+  };
+  form.addEventListener('input', updatePayment);
+  form.addEventListener('change', updatePayment);
+  // Opening the form only computes the hint; a payment date is filled on user input.
+  $('#payDueHint').textContent = t('pay.dueHint', { date: payDue(v).due ? fmtDay(payDue(v).due) : '—' });
   if (!VF.id) setTimeout(() => $('#vform input[name=plate]')?.focus(), 350);
 }
 async function saveVehicleForm(form) {
   const v = tidy({ ...VF.v, ...readForm(form, VFIELDS) });
+  v.paid = form.elements.paid.checked ? '1' : '';
+  if (v.paid && !v.paidDate) v.paidDate = isoToday();
   v.plate = plateOnly(v.plate, v.province);
   const errors = {};
+  if (form.elements.payDays.validity.badInput || (v.payDays && (!Number.isInteger(Number(v.payDays)) || +v.payDays < 1 || +v.payDays > 365))) errors.payDays = 'pay.invalidDays';
+  if (v.paidDate && !parseDate(v.paidDate)) errors.paidDate = 'pay.invalidDate';
+  if (v.paidDate && !errors.paidDate) v.paidDate = parseDate(v.paidDate);
   if (!v.plate) errors.plate = 'vh.needPlate';
   if (v.policyStart && v.policyExpiry && v.policyExpiry <= v.policyStart) errors.policyExpiry = 'v.order';
   VF.v = v;
@@ -2296,6 +2396,8 @@ async function loadPrb() {
       const data = await store.prbList();
       if (state !== P || store !== S.store) return;
       state.data = data; state.store = store;
+      S.prbDashRequest++; // A completed PRB edit supersedes any older dashboard request.
+      S.prbDash = data; S.prbDashStore = store;
       if (!data.insured.some(i => i.id === state.insured)) state.insured = data.insured[0]?.id || '';
       state.selected = new Set([...state.selected].filter(id => data.rows.some(r => r.id === id && r.insuredId === state.insured)));
     } catch (e) { if (state === P) { state.error = true; handleError(e); } }
@@ -2762,6 +2864,16 @@ const ACT = {
     const root = $('#print-root'); root.innerHTML = source.outerHTML;
     document.body.classList.add('printing');
     window.print(); document.body.classList.remove('printing'); root.innerHTML = '';
+  },
+  'dues-list'(el) { duesList(+el.dataset.group); },
+  'dues-scale'(el) { S.payScale = el.dataset.scale === 'days' ? 'days' : 'weeks'; drawDues(); },
+  'dues-paid': duesPaid,
+  'dues-prb'(el) {
+    if (!S.prbDash || S.prbDashStore !== S.store) return;
+    if (P.store !== S.store) resetPrb();
+    P.data = S.prbDash; P.store = S.store; P.insured = el.dataset.id;
+    P.q = ''; P.status = ''; P.selected.clear();
+    S.view = 'prb'; closeSheet(); mount();
   },
   go(el) { S.view = el.dataset.view; S.mobileDetail = false; closeSheet(); mount(); scrollTo({ top: 0, behavior: 'smooth' }); },
   'close-sheet': closeSheet,

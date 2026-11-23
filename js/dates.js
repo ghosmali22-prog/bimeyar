@@ -54,6 +54,22 @@ export function daysLeft(iso) {
   return Math.round((d - t) / 864e5);
 }
 export const cmpIso = (a, b) => String(a || '').slice(0, 10).localeCompare(String(b || '').slice(0, 10));
+/** Calendar-day addition at local noon (including DST boundaries). */
+export function addDays(iso, n) {
+  const parsed = parseDate(iso);
+  if (!parsed || !Number.isInteger(n)) return '';
+  const d = noon(parsed);
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+/** First day of the month, offset by whole calendar months. */
+export function monthStart(iso, offset = 0) {
+  const parsed = parseDate(iso);
+  if (!parsed || !Number.isInteger(offset)) return '';
+  const d = noon(parsed.slice(0, 7) + '-01');
+  d.setMonth(d.getMonth() + offset);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
+}
 export const isExpired = iso => !!iso && daysLeft(iso) < 0;
 
 /** "19/10/2027" (era 'ce') or "19/10/2570" (era 'be'); '' when not an ISO date */

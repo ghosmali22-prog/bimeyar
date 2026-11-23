@@ -1,5 +1,18 @@
 # Changelog
 
+## v4.7.0 (2026-11-23)
+
+- **Dashboard charts** (top of the home screen, compact, phone friendly):
+  - **พ.ร.บ. expiring**: expired / 7 / 30 / 60 / 90 days and a bar per month (this + next 5 months); tap -> list,
+    a row opens the พ.ร.บ. tab with that insured. Data: พ.ร.บ. section, newest PRB per chassis / plate only.
+  - **Payments due** (main policy): due = policy start + "payment due after (days)" (default 30, in code only).
+    Overdue count in red, bars per week (8 weeks) or per day (14 days); list with a "Paid" button.
+  - Alert strip: "tomorrow is the payment due date for {customer} {plate}", due today, overdue (red) + badge.
+- **New optional vehicle fields** `payDays`, `paid`, `paidDate` (vehicle form, "Payment" box). Old records are not
+  changed; only the current policy of each plate, unpaid, with a due date not older than 60 days is shown.
+- Shared date helper: `addDays`, `monthStart` in `js/dates.js`. Renewals unchanged.
+- Backend: `VFIELDS` accepts the 3 new fields (Code.gs, additive).
+
 ## v4.6.0 (2026-11-23)
 
 - **Rebrand to "RICH INSURANS"** (visible name only): page title, header, sign-in / unlock screens, PWA manifest

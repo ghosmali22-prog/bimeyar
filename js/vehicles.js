@@ -31,7 +31,7 @@ export const VSLOT = Object.fromEntries(VSLOTS.map(s => [s.id, s]));
 export const FILE_SLOTS = VSLOTS.filter(s => !s.group).map(s => s.id);
 /** Vehicle fields. All optional except the plate. Must match VFIELDS in backend/Code.gs. */
 export const VFIELDS = ['plate', 'province', 'brand', 'model', 'year', 'color', 'body', 'vin', 'engineNo', 'carValue',
-  'insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'contractDate', 'policyStart', 'policyExpiry', 'note'];
+  'insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'contractDate', 'policyStart', 'policyExpiry', 'note', 'payDays', 'paid', 'paidDate'];
 export const VGROUPS = {
   vehicle: ['plate', 'province', 'brand', 'model', 'year', 'color', 'body', 'vin', 'engineNo', 'carValue'],
   policy: ['insurer', 'policyNo', 'policyType', 'coverage', 'premium', 'contractDate', 'policyStart', 'policyExpiry'],

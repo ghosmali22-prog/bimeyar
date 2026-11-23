@@ -1,6 +1,6 @@
 // v4.4.1: the shared date helper (js/dates.js) and the AI clean-up rules for policies and พ.ร.บ. (js/ai.js).
 // Only made-up values; no real customer data. Run: node tests/dates.test.mjs
-import { parseDate, beToCe, ceToBe, fmtDMY, yearLooksWrong, daysBetween, cmpIso, daysLeft, isoToday } from '../js/dates.js';
+import { parseDate, beToCe, ceToBe, fmtDMY, yearLooksWrong, daysBetween, cmpIso, daysLeft, isoToday, addDays, monthStart } from '../js/dates.js';
 import { toIsoDate } from '../js/validate.js';
 
 globalThis.localStorage = { getItem: () => null, setItem: () => { }, removeItem: () => { } };
@@ -11,6 +11,16 @@ let fail = 0, pass = 0;
 const eq = (a, b, msg) => { if (JSON.stringify(a) === JSON.stringify(b)) pass++; else { fail++; console.error('FAIL', msg, a, '!=', b); } };
 
 // dates
+eq(addDays('2026-01-31', 30), '2026-03-02', 'payment term crosses month');
+eq(addDays('2569-12-31', 1), '2027-01-01', 'BE and year boundary');
+eq(addDays('2028-02-28', 1), '2028-02-29', 'leap day');
+eq(addDays('2026-03-07', 2), '2026-03-09', 'spring DST calendar addition');
+eq(addDays('2026-10-31', 2), '2026-11-02', 'autumn DST calendar addition');
+eq(addDays('2026-01-01', -60), '2025-11-02', 'negative offset');
+eq(addDays('bad', 30), '', 'invalid date');
+eq(addDays('2026-01-01', 1.5), '', 'whole days only');
+eq(monthStart('2026-12-31', 2), '2027-02-01', 'month buckets cross year');
+eq(monthStart('2026-01-31', 1), '2026-02-01', 'month buckets avoid overflow');
 eq(parseDate('19/10/2569'), '2026-10-19', 'BE d/m/y');
 eq(parseDate('19/10/2570'), '2027-10-19', 'BE end');
 eq(parseDate('2570-10-19'), '2027-10-19', 'BE iso');
