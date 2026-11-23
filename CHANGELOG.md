@@ -1,5 +1,16 @@
 # Changelog
 
+## v4.6.0 (2026-11-23)
+
+- **Rebrand to "RICH INSURANS"** (visible name only): page title, header, sign-in / unlock screens, PWA manifest
+  name / short_name, EN / TH / FA texts (new tagline), privacy page.
+- **Logo** (`assets/rich-logo.png`, gold infinity on dark green): header mark (`assets/rich-mark-128.png`), sign-in /
+  unlock / loading screens (`assets/rich-logo-320.png`), favicon (`icons/favicon-64.png`), apple-touch-icon,
+  PWA icons 192 / 512 (tight crop) and maskable 512 (full logo, safe zone). Invoice PDFs already show the logo once it
+  is uploaded in Settings → "Company & invoice details" → "Upload logo" (no code change).
+- Not changed: repo name, URL path, API_URL, OAuth client, storage keys, Script Properties, Drive names, file naming,
+  colour scheme. Service-worker cache `bimeyar-v4.6.0` so phones get the new name and icons.
+
 ## v4.5.4 (2026-11-23)
 
 - **Name spelling suggestions (พ.ร.บ. review)**: a spelling with extra Thai tone marks (e.g. "พี่ พี่") is never offered
