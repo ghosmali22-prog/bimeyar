@@ -146,10 +146,10 @@ function loadPrbDash() {
   drawDues();
   Promise.resolve().then(() => store.prbList()).then(data => {
     if (S.store !== store || request !== S.prbDashRequest) return;
-    S.prbDash = data;
-    drawDues();
+    S.prbDash = data; S.prbDashErr = false;
+    drawDues(); drawStats(false);
   }).catch(() => {
-    if (S.store === store && request === S.prbDashRequest) { S.prbDash = null; drawDues(); }
+    if (S.store === store && request === S.prbDashRequest) { S.prbDash = null; S.prbDashErr = true; drawDues(); drawStats(false); }
   });
 }
 
@@ -370,41 +370,73 @@ let duesGroups = [];
 function duesGroup(kind, title, rows) {
   return duesGroups.push({ kind, title, rows }) - 1;
 }
-function duesChart(kind, title, buckets) {
+/* v4.7.1: month label without thousand separators: TH "พ.ย. 69" (Buddhist), EN "Nov 2026", FA Gregorian month + year */
+function fmtYm(ym, short = false) {
+  const [y, m] = String(ym).split('-').map(Number); if (!y || !m) return '';
+  const loc = lang === 'th' ? 'th-TH' : lang === 'fa' ? 'fa-IR-u-ca-gregory' : 'en-GB';
+  return new Intl.DateTimeFormat(loc, short ? { month: 'short' } : { month: 'short', year: lang === 'th' ? '2-digit' : 'numeric' }).format(new Date(y, m - 1, 15));
+}
+/* v4.7.1: the same gradient bars as the stat cards; empty buckets stay a thin stub, numbers only in the tooltip */
+function duesBars(kind, title, buckets) {
   const max = Math.max(1, ...buckets.map(b => b.n));
-  return `<div class="dues-chart" role="group" aria-label="${esc(title)}">${buckets.map(b => {
-    const label = `${b.label}: ${num(b.n)}`, group = duesGroup(kind, b.label, b.rows);
-    return `<button class="dues-bar ${b.tone || 'ok'}" data-act="dues-list" data-group="${group}" aria-label="${esc(label)}">
-      <span>${num(b.n)}</span><svg viewBox="0 0 40 90" role="img" aria-label="${esc(label)}"><rect x="7" y="${90 - b.n / max * 86}" width="26" height="${b.n / max * 86}" rx="4"/></svg><small>${esc(b.short || b.label)}</small></button>`;
+  return `<div class="bars due-bars" role="group" aria-label="${esc(title)}">${buckets.map((b, i) => {
+    const label = `${b.label}: ${num(b.n)}`, h = b.n ? Math.max(18, b.n / max * 100) : 6;
+    const bar = `<i class="${b.n ? 'now' : ''} ${b.n && b.tone ? b.tone : ''}" style="--h:${h}%;--i:${i}"></i><small>${esc(b.short)}</small>`;
+    return b.n ? `<button type="button" data-act="dues-list" data-group="${duesGroup(kind, b.label, b.rows)}" title="${esc(label)}" aria-label="${esc(label)}">${bar}</button>` : `<div title="${esc(label)}">${bar}</div>`;
   }).join('')}</div>`;
 }
 function drawDues() {
   const el = $('#dues'); if (!el || S.gate) return;
   duesGroups = [];
   const today = isoToday(), items = paymentItems(S.customers, S.vehicles, today);
-  const buckets = paymentBuckets(items, today), alerts = items.filter(x => x.d <= 1);
-  const overdue = buckets.overdueRows;
-  const alertGroup = duesGroup('pay', t('pay.alerts', { n: alerts.length }), alerts);
-  const overdueGroup = duesGroup('pay', t('pay.overdue'), overdue);
-  const strip = alerts.length ? `<div class="dues-alerts"><span class="pill ${overdue.length ? 'bad' : 'warn'}">${t('pay.alerts', { n: alerts.length })}</span>
-    ${overdue.length ? `<button class="dues-alert bad" data-act="dues-list" data-group="${overdueGroup}">${t('pay.overdueN', { n: overdue.length })}</button>` : ''}
-    ${alerts.filter(x => x.d >= 0).map(x => `<button class="dues-alert warn" data-act="dues-list" data-group="${alertGroup}">${esc(t('pay.' + x.state, { c: x.c.name, p: x.v.plate || '' }))}</button>`).join('')}</div>` : '';
-  const scale = S.payScale;
-  const payChart = duesChart('pay', t('pay.title'), buckets[scale].map((b, i) => ({ ...b,
-    label: scale === 'days' ? fmtDMY(b.start) : `${fmtDMY(b.start)} – ${fmtDMY(b.end)}`,
-    short: scale === 'days' ? fmtDMY(b.start).slice(0, 5) : t('dash.week', { n: i + 1 }),
-    tone: b.rows.some(x => x.d <= 1) ? 'warn' : 'ok' })));
-  let prbCard = '';
-  if (S.prbDash && S.prbDashStore === S.store) {
-    const prb = prbExpiring(S.prbDash.rows || [], today);
-    const chips = [{ label: t('dash.expired'), rows: prb.expired, tone: 'bad' }, ...[7, 30, 60, 90].map(n => ({
-      label: t('dash.days', { n }), rows: prb.months.flatMap(m => m.rows).filter(x => x.d >= 0 && x.d <= n), tone: 'warn' }))];
-    prbCard = `<article class="card dues-card"><header>${t('dash.prbExpiring')}</header><div class="dues-chips">${chips.map(b => `<button class="btn ghost ${b.tone}" data-act="dues-list" data-group="${duesGroup('prb', b.label, b.rows)}">${b.label} <b>${num(b.rows.length)}</b></button>`).join('')}</div>
-      ${duesChart('prb', t('dash.prbExpiring'), [{ label: t('dash.expired'), n: prb.expired.length, rows: prb.expired, tone: 'bad' },
-        ...prb.months.map(m => ({ ...m, label: m.ym.split('-').map(num).join('/'), tone: m.rows.some(x => x.d >= 0 && x.d <= 30) ? 'warn' : 'ok' }))])}</article>`;
+  const buckets = paymentBuckets(items, today), overdue = buckets.overdueRows;
+  const near = items.filter(x => x.d === 0 || x.d === 1), alerts = overdue.length + near.length;
+  // slim alert pill: one line, icon + text + count; hidden when there is nothing to alert
+  let pill = '';
+  if (alerts) {
+    const one = near.length === 1 && !overdue.length ? near[0] : null;
+    const text = one ? t('pay.' + one.state, { c: one.c.name, p: one.v.plate || '' }) : !near.length ? t('pay.overdueN', { n: overdue.length }) : t('pay.alerts', { n: alerts });
+    pill = `<button type="button" class="due-pill ${overdue.length ? 'bad' : 'warn'}" data-act="dues-list" data-group="${duesGroup('pay', t('pay.alertsTitle'), [...overdue, ...near])}">${icon('alert', 16)}<span>${esc(text)}</span><b>${num(alerts)}</b></button>`;
   }
-  el.innerHTML = `${strip}<div class="dues-cards">${prbCard}<article class="card dues-card"><header>${t('pay.title')}<div class="dues-toggle">${['weeks', 'days'].map(s => `<button class="btn ghost" data-act="dues-scale" data-scale="${s}" aria-pressed="${scale === s}">${t(s === 'days' ? 'dash.daily' : 'dash.weeks')}</button>`).join('')}</div></header>
-    <button class="btn ghost bad" data-act="dues-list" data-group="${overdueGroup}">${t('pay.overdueN', { n: overdue.length })}</button>${payChart}</article></div>`;
+  const scale = S.payScale, list = buckets[scale], upcoming = list.reduce((a, b) => a + b.n, 0);
+  const next = items.find(x => x.d >= 0);
+  const big = overdue.length
+    ? `<button type="button" class="big due-big bad" data-act="dues-list" data-group="${duesGroup('pay', t('pay.overdue'), overdue)}"><b>${num(overdue.length)}</b><small>${t('pay.unitOverdue')}</small></button>`
+    : `<div class="big"><b>${num(upcoming)}</b><small>${t(scale === 'days' ? 'pay.unitDays' : 'pay.unitWeeks')}</small></div>`;
+  const delta = overdue.length ? `<p class="delta">${upcoming ? t(scale === 'days' ? 'pay.moreDays' : 'pay.moreWeeks', { n: upcoming }) : t('pay.noUpcoming')}</p>`
+    : `<p class="delta good">${icon('check', 13)} ${esc(next ? t('pay.next', { d: fmtDay(next.due), c: next.c.name }) : t('pay.allClear'))}</p>`;
+  const bars = duesBars('pay', t('pay.title'), list.map((b, i) => ({ ...b,
+    label: scale === 'days' ? fmtDay(b.start) : `${fmtDay(b.start)} – ${fmtDay(b.end)}`,
+    short: scale === 'days' ? num(+b.start.slice(8, 10)) : t('dash.week', { n: i + 1 }),
+    tone: b.rows.some(x => x.d <= 1) ? 'warn' : '' })));
+  el.innerHTML = `${pill}<article class="card pay-card" style="--i:0">
+    <header><span class="pay-h"><i class="badge-ico ${overdue.length ? 'bad' : alerts ? 'warn' : 'ok'}">${icon(overdue.length || alerts ? 'alert' : 'calendar', 15)}</i>${t('pay.title')}</span>
+      <span class="seg pay-seg" role="group" aria-label="${esc(t('pay.title'))}">${['weeks', 'days'].map(x => `<button type="button" class="${scale === x ? 'on' : ''}" data-act="dues-scale" data-scale="${x}" aria-pressed="${scale === x}">${t(x === 'days' ? 'dash.daily' : 'dash.weeks')}</button>`).join('')}</span></header>
+    <div class="pay-body"><div class="pay-main">${big}${delta}</div>${bars}</div>
+  </article>`;
+}
+/* v4.7.1: the พ.ร.บ. stat card (replaces "Files stored"): expiring in 30 days, expired, next expiry, bars per month */
+function prbStatCard(big) {
+  const ok = S.prbDash && S.prbDashStore === S.store;
+  if (!ok) return `<article class="card tilt c-prb" data-act="dash-prb-card" style="--i:1">
+    <header><span lang="th">พ.ร.บ.</span><i class="badge-ico">${icon('shield', 15)}</i></header>
+    <div class="big"><b class="muted">${S.prbDashErr ? '—' : '…'}</b></div><p class="delta">${S.prbDashErr ? '' : t('team.loading')}</p></article>`;
+  const today = isoToday(), prb = prbExpiring(S.prbDash.rows || [], today);
+  const nextRow = prb.months.flatMap(m => m.rows).find(x => x.d >= 0);
+  const nextTxt = nextRow ? t('dash.prbNext', { d: fmtDay(nextRow.end) }) : '';
+  const allOk = !prb.d30 && !prb.expired.length;
+  const sub = !(S.prbDash.rows || []).length ? t('dash.prbNone')
+    : allOk ? `${icon('check', 13)} ${esc(t('dash.prbAllOk') + (nextTxt ? ' · ' + nextTxt : ''))}`
+    : esc([prb.expired.length ? t('dash.prbExpiredN', { n: prb.expired.length }) : '', nextTxt].filter(Boolean).join(' · '));
+  const chips = [[prb.d7, 7], [prb.d60, 60], [prb.d90, 90]].filter(([n, d]) => n > 0 && (d === 7 || n > (d === 60 ? prb.d30 : prb.d60)));
+  const maxM = Math.max(1, ...prb.months.map(m => m.n));
+  return `<article class="card tilt c-prb" data-act="dash-prb-card" data-st="${prb.d30 ? 'soon' : prb.expired.length ? 'expired' : ''}" style="--i:1">
+    <header><span lang="th">พ.ร.บ.</span><i class="badge-ico ${prb.expired.length ? 'bad' : prb.d30 ? 'warn' : 'ok'}">${icon(prb.expired.length || prb.d30 ? 'alert' : 'check', 15)}</i></header>
+    <div class="big">${allOk ? `<b class="ok-mark">${icon('check', 26)}</b><small>${t('dash.prbValid')}</small>` : `${big(prb.d30)}<small>${t('dash.prbUnit')}</small>`}</div>
+    <p class="delta ${prb.expired.length ? 'bad' : 'good'}">${sub}</p>
+    ${chips.length ? `<p class="prb-chips">${chips.map(([n, d]) => `<em><span>${t('dash.days', { n: d })}</span><b>${num(n)}</b></em>`).join('')}</p>` : ''}
+    <div class="bars">${prb.months.map((m, i) => `<div title="${esc(fmtYm(m.ym))}: ${num(m.n)}"><i class="${i === 0 ? 'now' : ''}" style="--h:${Math.max(7, (m.n / maxM) * 100)}%;--i:${i}"></i><small>${esc(fmtYm(m.ym, true))}</small></div>`).join('')}</div>
+  </article>`;
 }
 function duesList(index) {
   const group = duesGroups[index]; if (!group) return;
@@ -433,12 +465,7 @@ function drawStats(anim) {
   const soon = S.renew.filter(m => m.d <= 30).length;   // v4: counted per vehicle
   const expired = S.renew.filter(m => m.d < 0).length;
 
-  const k0 = monthKey(new Date());
-  const months = Array.from({ length: 6 }, (_, i) => ({ k: k0 - 5 + i, n: 0 }));
-  for (const f of S.files) { const k = monthKey(f.createdAt), b = months.find(x => x.k === k); if (b) b.n++; }
-  const maxM = Math.max(1, ...months.map(m => m.n));
-  const thisMonth = months[5].n;
-
+  // v4.7.1: the "Files stored" card was replaced by the พ.ร.บ. card (prbStatCard)
   const now = Date.now();
   const pts = Array.from({ length: 8 }, (_, i) => S.customers.filter(c => new Date(c.createdAt) <= now - (7 - i) * 7 * 864e5).length);
   const maxP = Math.max(1, ...pts), minP = Math.min(...pts);
@@ -468,12 +495,7 @@ function drawStats(anim) {
     </div>
   </article>
 
-  <article class="card tilt" data-act="go" data-view="files" style="--i:1">
-    <header><span>${t('s2.title')}</span><i class="badge-ico">${icon('folder', 15)}</i></header>
-    <div class="big">${big(S.files.length)}<small>${t('s2.unit')}</small></div>
-    <p class="delta good">${thisMonth ? t('s2.month', { n: thisMonth, m: monthName(k0) }) : t('s2.none')}</p>
-    <div class="bars">${months.map((m, i) => `<div><i class="${i === 5 ? 'now' : ''}" style="--h:${Math.max(7, (m.n / maxM) * 100)}%;--i:${i}" title="${num(m.n)}"></i><small>${monthName(m.k, true)}</small></div>`).join('')}</div>
-  </article>
+  ${prbStatCard(big)}
 
   <article class="card tilt" data-act="${canEdit() ? 'new-customer' : 'go'}" data-view="dash" style="--i:2">
     <header><span>${t('s3.title')}</span><i class="badge-ico">${icon('users', 15)}</i></header>
@@ -2868,6 +2890,12 @@ const ACT = {
   'dues-list'(el) { duesList(+el.dataset.group); },
   'dues-scale'(el) { S.payScale = el.dataset.scale === 'days' ? 'days' : 'weeks'; drawDues(); },
   'dues-paid': duesPaid,
+  'dash-prb-card'(el) {
+    if (!S.prbDash || S.prbDashStore !== S.store) { S.view = 'prb'; return mount(); }
+    if (P.store !== S.store) resetPrb();
+    P.data = S.prbDash; P.store = S.store; P.q = ''; P.status = el.dataset.st || ''; P.selected.clear();
+    S.view = 'prb'; closeSheet(); mount(); scrollTo({ top: 0, behavior: 'smooth' });
+  },
   'dues-prb'(el) {
     if (!S.prbDash || S.prbDashStore !== S.store) return;
     if (P.store !== S.store) resetPrb();
