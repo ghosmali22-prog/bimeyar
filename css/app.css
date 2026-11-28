@@ -19,7 +19,7 @@
 * { box-sizing: border-box; margin: 0; -webkit-tap-highlight-color: transparent; }
 html { -webkit-text-size-adjust: 100%; }
 body {
-  font-family: Inter, Vazirmatn, "Noto Sans Thai", -apple-system, "SF Pro Text", "Segoe UI", Tahoma, sans-serif;
+  font-family: Inter, Vazirmatn, "Noto Sans Thai Looped", "Noto Sans Thai", -apple-system, "SF Pro Text", "Segoe UI", Tahoma, sans-serif;
   color: var(--ink); background: #e9e6f7; min-height: 100dvh; padding: 22px;
   font-size: 14px; line-height: 1.6; overflow-x: hidden;
 }
@@ -1004,29 +1004,53 @@ img.fadein { animation: fade .5s ease both; }
 .gate-logo { width: 132px; height: 132px; border-radius: 30px; object-fit: cover; display: block; margin: 0 auto 10px; box-shadow: 0 20px 34px -16px rgba(0, 0, 0, .55); }
 @media (max-width: 480px) { .gate-logo { width: 108px; height: 108px; border-radius: 26px; } }
 
-/* v4.7.0 dashboard charts */
-.dues { margin-block-end: 20px; min-width: 0; }
-.dues-cards { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
-.dues-card { min-width: 0; padding: 16px; }
-.dues-card header { gap: 8px; flex-wrap: wrap; min-height: 44px; }
-.dues-alerts { display: grid; gap: 4px; margin-block-end: 12px; padding: 12px; background: var(--surface, #fff); border-radius: 18px; }
-.dues-alerts > .pill { justify-self: start; }
-.dues-alert { min-height: 44px; text-align: start; background: none; border: 0; padding: 8px; font: inherit; cursor: pointer; overflow-wrap: anywhere; }
-.dues .bad { color: var(--bad); }
-.dues .warn { color: var(--warn); }
-.dues .ok { color: var(--ok); }
-.dues-chips, .dues-toggle { display: flex; flex-wrap: wrap; gap: 4px; }
-.dues .btn, .dues-list .btn { min-height: 44px; }
-.dues-toggle [aria-pressed=true] { background: #eee9ff; }
-.dues-chart { display: flex; overflow-x: auto; gap: 2px; height: 174px; padding-block: 8px; margin-block-start: 4px; overscroll-behavior-inline: contain; }
-.dues-bar { flex: 1 0 44px; min-width: 44px; min-height: 44px; padding: 3px 0; background: transparent; border: 0; border-radius: 8px; font: inherit; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; }
-.dues-bar svg { height: 90px; width: 40px; flex-shrink: 0; fill: currentColor; }
-.dues-bar span { font-size: 12px; font-weight: 700; }
-.dues-bar small { font-size: 10px; line-height: 1.3; min-height: 28px; max-width: 68px; overflow-wrap: anywhere; padding-top: 5px; color: var(--ink, #292540); }
-.dues button:focus-visible, .dues-list button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* v4.7.0 dashboard (v4.7.1 redesign: same glass cards, gradient bars and segmented control as the stat cards) */
+.dues { display: grid; gap: 12px; margin-bottom: 14px; min-width: 0; }
+.due-pill { justify-self: start; max-width: 100%; display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 6px 8px 6px 14px; border-radius: 999px;
+  background: rgba(255, 255, 255, .72); border: 1px solid var(--edge); box-shadow: var(--shadow); -webkit-backdrop-filter: blur(18px) saturate(160%); backdrop-filter: blur(18px) saturate(160%);
+  font-size: 13px; font-weight: 600; color: var(--ink); text-align: start; transition: transform .35s var(--spring), box-shadow .3s; }
+.due-pill:hover { transform: translateY(-1px); }
+.due-pill:active { transform: scale(.98); }
+.due-pill > svg { flex: none; color: var(--warn); }
+.due-pill.bad > svg { color: var(--bad); }
+.due-pill span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.due-pill b { flex: none; min-width: 26px; height: 26px; padding: 0 8px; border-radius: 999px; display: grid; place-items: center; font-size: 12px; color: #fff; background: linear-gradient(140deg, #ffb24a, var(--warn)); }
+.due-pill.bad b { background: linear-gradient(140deg, #ff8fa3, var(--bad)); box-shadow: 0 6px 12px -6px rgba(238, 79, 108, .8); }
+.pay-card { display: flex; flex-direction: column; gap: 6px; min-height: 172px; }
+.pay-h { display: inline-flex; align-items: center; gap: 10px; }
+.pay-body { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(0, 2.4fr); gap: 8px 28px; align-items: end; flex: 1; }
+.pay-main { display: flex; flex-direction: column; min-width: 0; align-self: stretch; }
+.pay-main .delta { margin-top: auto; display: flex; align-items: center; gap: 4px; }
+.pay-seg { width: 180px; max-width: 55%; padding: 3px; }
+.pay-seg button { height: 32px; font-size: 12.5px; }
+.due-big { background: none; padding: 0; text-align: start; color: inherit; cursor: pointer; }
+.due-big.bad b { color: var(--bad); }
+.badge-ico.bad { background: #ffe1e7; color: var(--bad); }
+.due-bars { height: 96px; gap: 6px; }
+.bars button { flex: 1; height: 100%; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; padding: 0; border-radius: 8px; cursor: pointer; transition: transform .35s var(--spring); }
+.bars button:hover { transform: translateY(-2px); }
+.bars button:hover i { filter: brightness(1.06); }
+.bars i.now.warn { background: linear-gradient(180deg, #ffc46b, var(--warn)); box-shadow: 0 8px 14px -6px rgba(242, 157, 31, .7); }
+.due-bars small { white-space: nowrap; }
+.c-prb .ok-mark { color: var(--ok); display: inline-grid; place-items: center; }
+.c-prb .delta { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.prb-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 4px; }
+.prb-chips em { font-style: normal; font-size: 10.5px; font-weight: 600; color: var(--muted); background: var(--accent-soft); border-radius: 999px; padding: 2px 4px 2px 8px; display: inline-flex; align-items: center; gap: 5px; }
+.prb-chips b { font-weight: 800; color: #fff; background: var(--accent); border-radius: 999px; min-width: 16px; padding: 0 5px; text-align: center; }
+.c-prb .bars { height: 64px; }
 .dues-list { padding: 16px; }
-.dues-row { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; border-block-end: 1px solid #e9e6ef; padding: 10px 0; background: transparent; }
+.dues-row { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; border-block-end: 1px solid var(--line); padding: 10px 0; background: transparent; }
 .dues-row-main { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; min-height: 44px; text-align: start; font: inherit; color: inherit; background: none; border: 0; cursor: pointer; overflow-wrap: anywhere; }
 .dues-row-main small { line-height: 1.5; }
+.dues-list .btn { min-height: 44px; }
 #vform [name=paid] { width: 24px; height: 24px; margin: 10px; }
-@media (min-width: 821px) { .dues-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dues-cards > :only-child { grid-column: 1 / -1; } }
+.enter .dues .card, .enter .due-pill { animation: rise .9s var(--spring) backwards; animation-delay: 60ms; }
+@media (max-width: 820px) {
+  .pay-card { min-height: 0; }
+  .pay-body { grid-template-columns: 1fr; }
+  .pay-seg { width: 150px; }
+  .due-pill { justify-self: stretch; }
+}
+@media (prefers-reduced-motion: reduce) { .due-pill, .bars button { transition: none; } }
+/* v4.7.1: Thai "พ.ร.บ." inside RTL (Persian) text keeps its own direction, so the last dot stays at the end */
+[dir=rtl] [lang=th], [dir=rtl] [data-i18n="nav.prb"] { unicode-bidi: plaintext; }
